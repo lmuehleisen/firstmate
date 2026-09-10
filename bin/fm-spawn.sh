@@ -295,8 +295,10 @@
 # (verified agy 1.2.0), so agy tasks carry no turn-end file and no semantic busy
 # record, and their state is read from the runtime backend's own agent-state
 # classifier. agy is crewmate/scout only and is refused for --secondmate. Every
-# agy launch must carry --add-dir for the task worktree: without it agy silently
-# writes into its own scratch directory instead of the task's local copy.
+# agy launch must carry --add-dir for the task worktree, and every agy grant must
+# be a physically resolved path: without the grant agy silently writes into its
+# own scratch directory instead of the task's local copy, and with an unresolved
+# one it treats its own worktree as non-workspace access and parks on a prompt.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1595,14 +1597,14 @@ launch_template() {
     # interactive session, which is the supervised crewmate pane shape; -p is a
     # one-shot headless run and is never used here.
     #
-    # --add-dir __WORKTREE__ is MANDATORY, not a convenience. Verified on agy
-    # 1.2.0: with the pane cwd already inside the worktree but no --add-dir, a
-    # file write silently landed in agy's own scratch directory
+    # The worktree grant is MANDATORY, not a convenience. Verified on agy 1.2.0:
+    # with the pane cwd already inside the worktree but no --add-dir, a file
+    # write silently landed in agy's own scratch directory
     # (~/.gemini/antigravity-cli/scratch) while the model reported success, so a
     # worker without it would look productive and change nothing in the task's
-    # local copy. __PERMISSIONDIRS__ adds this home's state directory and the
-    # brief's directory with the same repeatable flag, for status and inbox
-    # writes.
+    # local copy. __PERMISSIONDIRS__ carries all three grants - the task
+    # worktree, this home's state directory, and the brief's directory - because
+    # each has to be a PHYSICALLY RESOLVED path; see the substitution below.
     #
     # The approval posture is $permission_flags above; agy installs no turn-end
     # hook because it has none that works (see the header and the harness
@@ -1615,7 +1617,7 @@ launch_template() {
     agy)
       printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS __AGYBIN__ '
       printf '%s' "$permission_flags"
-      printf '%s' ' __MODELFLAG____EFFORTFLAG__--add-dir __WORKTREE__ __PERMISSIONDIRS__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' ' __MODELFLAG____EFFORTFLAG____PERMISSIONDIRS__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
@@ -3938,8 +3940,21 @@ case "$HARNESS" in
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|agy)
+  claude|codex)
     permission_dirs="--add-dir $(shell_quote "$STATE_REAL") --add-dir $(shell_quote "$(cd "$(dirname "$BRIEF")" && pwd -P)") "
+    LAUNCH=${LAUNCH//__PERMISSIONDIRS__/$permission_dirs}
+    ;;
+  agy)
+    # agy resolves a path physically before testing it against the granted
+    # workspace, so every grant must be handed over already resolved. Verified
+    # on agy 1.2.0: granting an unresolved path whose parent is a symlink (the
+    # /var -> /private/var case every mktemp -d lab hits) made agy treat a write
+    # inside its OWN worktree as non-workspace access and park on an "Allow
+    # creation of this file? Reason: outside workspace" prompt. The worktree is
+    # granted here rather than through __WORKTREE__ so it is resolved the same
+    # way as the other two, and so cursor's --workspace and omp's --cwd keep
+    # taking the recorded path unchanged.
+    permission_dirs="--add-dir $(shell_quote "$(cd "$WT" && pwd -P)") --add-dir $(shell_quote "$STATE_REAL") --add-dir $(shell_quote "$(cd "$(dirname "$BRIEF")" && pwd -P)") "
     LAUNCH=${LAUNCH//__PERMISSIONDIRS__/$permission_dirs}
     ;;
 esac
