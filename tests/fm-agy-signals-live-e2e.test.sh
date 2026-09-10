@@ -6,6 +6,8 @@
 # It proves the harness-dependent facts bin/fm-spawn.sh and bin/fm-control-lib.sh
 # encode for agy, each of which is a rendered or executed behavior that only the
 # real binary can answer:
+# The delivery-only busy matcher must also recognize its running footer with
+# and without a recorded agy harness, while rejecting its idle footer.
 #
 #   1. The production launch shape reaches a usable composer with NO
 #      workspace-trust dialog, and without appending anything to the operator's
@@ -126,6 +128,23 @@ tmux_capture() {
   "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" 2>/dev/null || true
 }
 
+assert_delivery_busy() {  # <busy|idle>
+  local expected=$1 visible harness actual
+  visible=$(tmux_capture | grep -v '^[[:space:]]*$' | tail -12)
+  [ -n "$visible" ] || fail "delivery busy check captured no visible footer"
+  for harness in agy ''; do
+    actual=idle
+    if printf '%s\n' "$visible" | bash -c \
+      '. "$1/bin/fm-composer-lib.sh"; unset FM_BUSY_REGEX; fm_busy_lines_match "$2"' \
+      _ "$ROOT" "$harness"; then
+      actual=busy
+    fi
+    [ "$actual" = "$expected" ] \
+      || fail "delivery matcher ${harness:-union} expected $expected, got $actual: $visible"
+  done
+  pass "agy $AGY_VERSION: explicit and harness-less delivery matchers read $expected"
+}
+
 # Turn completion, not a text sentinel. The pane echoes the request verbatim,
 # so waiting for a token named in the prompt matches immediately and reads a
 # still-running turn as finished. The footer is the one reliable boundary:
@@ -183,6 +202,7 @@ wait_for_text() {  # <text> [samples]
 wait_for_text 'Accept-edits mode' \
   || fail "agy did not reach an accept-edits composer"
 wait_for_turn || fail "agy did not complete its opening turn"
+assert_delivery_busy idle
 [ "$(composer_state)" = empty ] || fail 'shared composer classifier did not prove the idle Agy input empty'
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l 'AGY_PENDING_GUARD'
 sleep 0.3
@@ -252,6 +272,7 @@ wait_for_text 'esc to cancel' 120 \
   || fail "agy did not render its running-turn footer for a long turn"
 tmux_capture > "$LAB/busy.capture"
 rm -f "$STATE/agy-live.turn-ended"
+assert_delivery_busy busy
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Escape
 wait_for_text 'Interrupted' 120 \
   || fail "a single Escape did not cancel agy's running turn"

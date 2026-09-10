@@ -543,6 +543,23 @@ Before `agy` was added to the tmux process-name classifier, that same interrupt 
 `tests/fm-agy-harness.test.sh` is the portable regression.
 `FM_AGY_SIGNALS_LIVE=1 tests/fm-agy-signals-live-e2e.test.sh` is the command that refreshes the version-scoped facts above against the installed binary.
 
+### Delivery busy footer
+
+Verified on 2026-09-10 with agy 1.2.0 through a private tmux session on macOS.
+The live guard exercises `fm_busy_lines_match` against the running and idle footers, both with an explicit `agy` harness and with the harness-less submit fallback:
+
+```sh
+FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+```
+
+```text
+ok - agy 1.2.0: explicit and harness-less delivery matchers read idle
+ok - agy 1.2.0: explicit and harness-less delivery matchers read busy
+# all fm-agy-signals live checks passed (agy 1.2.0)
+```
+
+`tests/fm-tmux-submit-busy.test.sh` covers harness isolation and the idle-to-busy submit path with an unreadable composer, including already-busy and failed-capture baselines that must remain unconfirmed.
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
