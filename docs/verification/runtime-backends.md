@@ -394,7 +394,7 @@ This guard is the refresh command after any harness upgrade; it spends a small n
 ## agy (Antigravity CLI)
 
 The agy crewmate adapter was verified on 2026-09-10 with agy 1.2.0 on macOS 25.6.0, tmux 3.6a.
-Every check ran in throwaway scratch workspaces and one disposable pooled worktree against the real CLI, with the operator's global agy configuration read but never written; the two probe files this record describes were removed and the operator's `settings.json` was restored to its prior contents.
+The current live guard uses throwaway workspaces on a private tmux socket and checks that the operator's global trusted-workspace list stays unchanged.
 agy self-updated from 1.1.25 to 1.1.28 to 1.2.0 during verification, so re-run the live guard after any upgrade before trusting these facts.
 
 ### accept-edits covers file edits, not shell commands
@@ -454,22 +454,55 @@ Allow creation of this file?
 
 A resolved grant produces neither prompt, and also suppresses the workspace-trust dialog whose acceptance appends the path to the operator's global `trustedWorkspaces`.
 
-### Hooks load but never execute
+### Native worker hooks
 
-`~/.gemini/config/hooks.json` carrying `Stop` and `PreToolUse` entries was listed as enabled:
+Verified on 2026-09-10 with Agy 1.2.0 using the documented named-hook schema in a separately granted `.agents/hooks.json`.
+The production worker installer preserves the project hook file and writes its own registration under task state.
+`PreInvocation` reports busy, and a `Stop` with `fullyIdle=true` reports idle and signals turn-end for the bound generation and conversation.
+An approval wait remains busy.
+Escape emits no Stop, so the semantic state conservatively stays busy and control reports cancellation unconfirmed.
+This positive guard supersedes the earlier negative hook probe, which used an incompatible schema.
 
 ```sh
-agy -p '/hooks'
+FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+```
+
+The current guard additionally verifies the shared composer classifier against real empty and pending input.
+The nine-check run passed on 2026-09-10 with Agy 1.2.0; the composer check enables terminal color locally because the invoking test environment had `NO_COLOR=1`.
+Agy 1.2.0 draws a `>` row between solid rules and a shortcuts or cancel footer with a model cell.
+Its accept-edits placeholder uses SGR 90; the shared classifier removes only that exact styled hint inside the proven Agy shape.
+Without styling, a placeholder-looking row stays unknown.
+Typing hides the shortcuts hint while the accept-edits mode cell remains; a manual-mode row without that footer proof stays unknown.
+Ordinary typed input, wrapped text, and a shell below a stale composer remain protected by the portable composer regressions.
+[Google's hook reference](https://antigravity.google/docs/hooks) owns the vendor payload and response schema.
+
+### Primary and secondmate supervision
+
+Verified on 2026-09-10 with Agy 1.2.0 and `gemini-3.8-flash` at low effort on macOS using a throwaway Firstmate home and private tmux socket.
+The startup fixture acquired the real session lock and rendered the production supervision instructions; it omitted fleet bootstrap and external startup checks.
+The native registration, transport, shared guard, watcher, queue drain and acknowledgement were production code.
+
+```sh
+FM_AGY_PRIMARY_LIVE=1 bin/fm-test-run.sh tests/fm-agy-primary-live-e2e.test.sh
 ```
 
 ```text
-hooks	enabled	PreToolUse	-	command	touch /Users/lucas/.agy-lab-k4/GLOBAL_PRETOOL_FIRED
-hooks	enabled	Stop	-	command
+ok - agy primary fixture: interactive shell is ready before launch delivery
+ok - agy primary fixture: native agy process started
+ok - agy primary: native nudge reaches the model and real session lock is acquired
+ok - agy primary: Stop forces a bounded recovery and the real watcher arms
+ok - agy primary: native watcher completion re-enters the model without polling or injected keys
+ok - agy primary: the same guard includes a marked linked secondmate home
+# all agy primary live checks passed (agy 1.2.0)
 ```
 
-Neither marker file existed after a completed headless turn, a completed interactive turn, or an interactive turn in which a `Bash(ls)` tool call actually ran.
-A workspace-local `<workspace>/.agents/hooks.json` was never listed at all, with the workspace trusted.
-This is the evidence behind agy carrying no turn-end signal and being refused for secondmate work.
+The opening invocation receives the session-start nudge, while later invocations can execute pending tools without repeated injection.
+Native `Stop.executionNum` advances on a forced continuation and resets for a fresh execution cycle.
+Native PreToolUse decisions preserve review with `ask` or refuse a disallowed tool with `deny`; no `allow` bypass is installed.
+The driver approves only exact fixture commands and the fixture's generation-bound queue acknowledgement when native review asks.
+It retains captures, observer events and transcripts on failure.
+The linked secondmate check verifies the production scope boundary; it does not provision a persistent fleet home.
+Headless primary supervision, compaction refresh, semantic interrupt completion, and runtime backends other than tmux were not verified by this run.
 
 ### Model ids and --effort conflict
 

@@ -24,10 +24,8 @@
 #   4. A single Escape cancels a running turn and leaves an empty composer, so
 #      no clear key is needed after it.
 #   5. /exit exits on one Enter.
-#   6. A workspace-local .agents/hooks.json never fires, which is why agy
-#      carries no turn-end signal and is refused for secondmate work. Only the
-#      worktree-local hook path is exercised: this guard never writes agy's
-#      global ~/.gemini configuration.
+#   6. Native hooks in a separately granted state directory publish semantic
+#      busy and turn-end, and retire without changing project or global hooks.
 #
 # --add-dir is not re-proven here because the portable suite pins that the flag
 # is emitted; what this guard adds is that the flag's mode and prompts behave as
@@ -47,8 +45,13 @@ TARGET="$SESSION:agy"
 AGY_VERSION=
 
 cleanup() {
+  local rc=$?
   [ -z "${REAL_TMUX:-}" ] || "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  [ -z "$LAB" ] || rm -rf -- "$LAB"
+  if [ "$rc" -ne 0 ] && [ -n "$LAB" ]; then
+    printf 'Agy worker failure evidence retained: %s\n' "$LAB" >&2
+  else
+    [ -z "$LAB" ] || rm -rf -- "$LAB"
+  fi
 }
 trap cleanup EXIT
 
@@ -59,6 +62,16 @@ fail() {
 
 pass() {
   printf 'ok - %s\n' "$1"
+}
+
+composer_state() {
+  local screen cy
+  screen=$("$REAL_TMUX" -L "$SOCKET" capture-pane -e -p -t "$TARGET")
+  cy=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{cursor_y}')
+  printf '%s\n' "$screen" > "$LAB/composer.capture"
+  printf '%s\n' "$cy" > "$LAB/composer.cursor"
+  bash -c '. "$1/bin/fm-composer-lib.sh"; fm_composer_classify_screen "$2" "$3" "$4"' \
+    _ "$ROOT" $'styled=1\ncursor=1\nidentity=0' "$screen" "$cy"
 }
 
 fm_live_gate opt-in FM_AGY_SIGNALS_LIVE tmux
@@ -80,11 +93,14 @@ LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-live.XXXXXX")
 LAB=$(cd "$LAB" && pwd -P)
 WORKSPACE="$LAB/workspace"
 mkdir -p "$WORKSPACE/.agents"
-# The worktree-local hook path agy's own release notes document. It must never
-# fire; see fact 6 above.
-cat > "$WORKSPACE/.agents/hooks.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch $WORKSPACE/STOP_FIRED"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"touch $WORKSPACE/PRETOOL_FIRED"}]}]}}
-EOF
+STATE="$LAB/state"
+mkdir -p "$STATE"
+GEN=$("$ROOT/bin/fm-busy-event.sh" arm "$STATE" agy-live) || fail 'could not arm worker state'
+"$ROOT/bin/fm-agy-hook.sh" install-worker "$STATE" agy-live "$GEN" "$WORKSPACE" \
+  || fail 'could not install production worker hooks'
+agy_state() {
+  bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux pane agy agy-live "$2"' _ "$ROOT" "$STATE"
+}
 
 # The operator's global settings file, read ONLY to prove this launch does not
 # change it. Nothing here ever writes to it.
@@ -155,7 +171,7 @@ wait_for_text() {  # <text> [samples]
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n agy -c "$WORKSPACE" -x 200 -y 50 \
   || fail "could not create the private tmux session"
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
-  "$AGY_BIN --mode accept-edits --add-dir $WORKSPACE -i 'reply with exactly: LIVE_OK'"
+  "env -u NO_COLOR $AGY_BIN --mode accept-edits --add-dir $WORKSPACE --add-dir $STATE/agy-live.agy-hooks -i 'reply with exactly: LIVE_OK'"
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter
 
 # --- 1. no trust dialog, no global trust mutation ---------------------------
@@ -167,6 +183,12 @@ wait_for_text() {  # <text> [samples]
 wait_for_text 'Accept-edits mode' \
   || fail "agy did not reach an accept-edits composer"
 wait_for_turn || fail "agy did not complete its opening turn"
+[ "$(composer_state)" = empty ] || fail 'shared composer classifier did not prove the idle Agy input empty'
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l 'AGY_PENDING_GUARD'
+sleep 0.3
+[ "$(composer_state)" = pending ] || fail 'shared composer classifier did not preserve unsubmitted Agy input'
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" C-u
+pass 'agy: shared composer classifier distinguishes idle placeholder from pending input'
 capture=$(tmux_capture)
 case "$capture" in
   *'Do you trust the contents of this project?'*)
@@ -181,6 +203,9 @@ if [ -n "${trusted_before:-}" ]; then
     || fail "the launch changed the operator's global trustedWorkspaces ($trusted_before -> $trusted_after)"
 fi
 pass "agy: a resolved grant launches with no trust dialog and no global trust write"
+[ "$(agy_state)" = 'idle agy-hook' ] || fail 'production Stop hook did not settle worker state'
+[ -e "$STATE/agy-live.turn-ended" ] || fail 'production Stop hook did not notify watcher'
+pass 'agy: production hooks in the separately granted directory settle a real turn'
 
 # --- 2. accept-edits auto-approves a file edit ------------------------------
 
@@ -212,6 +237,7 @@ case "$capture" in
   *) fail "agy's command approval prompt offered no approve choice: $capture" ;;
 esac
 pass "agy: a shell command still requests approval under accept-edits"
+[ "$(agy_state)" = 'busy agy-hook' ] || fail 'approval wait must keep semantic busy'
 
 # --- 4. Escape cancels and leaves an empty composer ------------------------
 
@@ -224,6 +250,8 @@ sleep 2
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter
 wait_for_text 'esc to cancel' 120 \
   || fail "agy did not render its running-turn footer for a long turn"
+tmux_capture > "$LAB/busy.capture"
+rm -f "$STATE/agy-live.turn-ended"
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Escape
 wait_for_text 'Interrupted' 120 \
   || fail "a single Escape did not cancel agy's running turn"
@@ -236,6 +264,8 @@ case "$capture" in
     fail "agy repolluted its composer after Escape and would need a clear key" ;;
 esac
 pass "agy: a single Escape cancels the turn and leaves the composer empty"
+[ "$(agy_state)" = 'busy agy-hook' ] || fail 'interrupt unexpectedly settled semantic state; revisit adapter contract'
+[ ! -e "$STATE/agy-live.turn-ended" ] || fail 'interrupt unexpectedly emitted Stop; revisit adapter contract'
 
 # --- 5. /exit exits on one Enter -------------------------------------------
 
@@ -256,15 +286,13 @@ done
 [ "$exited" -eq 1 ] || fail "/exit did not exit agy on one Enter"
 pass "agy: /exit exits the agent on one Enter"
 
-# --- 6. no turn-end hook ---------------------------------------------------
+# --- 6. worker hook retirement --------------------------------------------
 
 # Several turns have now completed and a tool has actually run, so both hook
 # events had their chance. Their absence is why agy has no turn-end signal.
-[ ! -e "$WORKSPACE/STOP_FIRED" ] \
-  || fail "a workspace-local Stop hook FIRED; agy may now have a usable turn-end signal and the adapter should be revisited"
-[ ! -e "$WORKSPACE/PRETOOL_FIRED" ] \
-  || fail "a workspace-local PreToolUse hook FIRED; agy's hook surface may now be usable and the adapter should be revisited"
-pass "agy: workspace-local hooks never fire, so the adapter installs no turn-end hook"
+"$ROOT/bin/fm-agy-hook.sh" retire-worker "$STATE" agy-live || fail 'retirement failed'
+[ ! -e "$STATE/agy-live.agy-hooks" ] || fail 'retirement left worker hooks'
+pass 'agy: worker hook retirement removes only Firstmate-owned state'
 
 # --- 7. the model-id / --effort conflict is real ---------------------------
 

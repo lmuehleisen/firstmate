@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Behavior tests for the agy (Antigravity CLI) crewmate adapter: harness
+# Behavior tests for the agy (Antigravity CLI) harness adapter: harness
 # detection, the approval-mode mapping and its refusals, the mandatory
 # worktree grant, the effort ceiling and the model-id/--effort conflict, the
-# secondmate refusal, and the control mechanics.
+# secondmate launch, native hook transports, and the control mechanics.
 #
 # The facts pinned here are the ones an Antigravity release could silently
 # change and the ones a wrong guess would make dangerous:
@@ -19,9 +19,8 @@
 #   3. agy publishes reasoning effort TWICE - as a suffix inside model ids and
 #      as --effort - and passing both is a launch-refusing conflict, so the
 #      adapter must emit at most one of them.
-#   4. agy is a crewmate/scout adapter only: its hook surface lists entries as
-#      enabled but never executes them, so there is no turn-end signal a primary
-#      supervision cycle could use.
+#   4. Worker hooks bind generation and conversation before closing busy;
+#      primary hooks compose the shared guard without bypassing review.
 #
 # Detection and launch shape are harness-dependent facts, so this portable
 # suite pins the classifier and the rendered command with real processes and no
@@ -453,24 +452,30 @@ EOF
 
 # --- task kinds -------------------------------------------------------------
 
-test_agy_secondmate_launch_is_refused() {
+test_agy_secondmate_launch_is_supported() {
   local fields case_dir home proj wt fakebin id out
   fields=$(make_spawn_case secondmate)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $fields
 EOF
   : "$case_dir" "$proj" "$wt"
+  local sm="$case_dir/secondmate-home"
+  mkdir -p "$sm/bin" "$sm/data" "$sm/.agents"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
+  printf 'charter\n' > "$sm/data/charter.md"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$home" agy --secondmate 2>&1) && \
-    fail "an agy secondmate launch must be refused"
+    FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 FM_FAKE_LAUNCH_LOG="$home/launch.log" \
+    TMUX="fake,1,0" PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$sm" agy --secondmate 2>&1) || fail "agy secondmate: $out"
   case "$out" in
-    *'crewmate/scout adapter only'*) ;;
-    *) fail "the refusal must name the crewmate/scout boundary, got: $out" ;;
+    *'harness=agy kind=secondmate'*) ;;
+    *) fail "secondmate launch did not complete: $out" ;;
   esac
-  pass "fm-spawn.sh: an agy secondmate launch is refused"
+  [ ! -e "$home/state/$id.agy-hooks" ] || fail "secondmate must use primary hooks, never worker hooks"
+  pass "fm-spawn.sh: agy secondmate launches without worker wiring"
 }
 
 # --- control mechanics ------------------------------------------------------
@@ -493,24 +498,127 @@ test_agy_control_mechanics_are_the_verified_ones() {
   pass "fm-control-lib.sh: agy carries its verified interrupt and exit mechanics"
 }
 
-test_agy_is_crewmate_and_scout_only() {
+test_agy_supports_all_task_kinds() {
   fm_control_harness_supports_kind agy ship || fail "agy must be verified for ship work"
   fm_control_harness_supports_kind agy scout || fail "agy must be verified for scout work"
-  ! fm_control_harness_supports_kind agy secondmate \
-    || fail "agy has no working turn-end signal and must be refused for secondmates"
-  pass "fm-control-lib.sh: agy is a crewmate/scout adapter only"
+  fm_control_harness_supports_kind agy secondmate || fail "agy must support secondmate work"
+  pass "fm-control-lib.sh: agy supports worker, scout, and secondmate"
 }
 
-test_agy_leaves_no_per_task_wiring() {
+test_agy_wiring_has_a_cleanup_owner() {
   local out
-  # agy installs no hook and binds no session sidecar, so a relaunch away from
-  # it has nothing to retire. An entry appearing here later would mean wiring
-  # was added without a matching cleanup path.
+  # Flat wiring cleanup and owned-directory retirement share this adapter path.
   out=$(fm_control_harness_wiring_paths agy /wt /state task-1)
-  [ -z "$out" ] || fail "agy installs no per-task wiring, got '$out'"
+  [ "$out" = /state/task-1.agy-hooks/.agents/hooks.json ] || fail "wrong agy wiring path: $out"
   out=$(fm_control_harness_turnend_token_path agy /state task-1)
   [ -z "$out" ] || fail "agy mints no turn-end registry token, got '$out'"
-  pass "fm-control-lib.sh: agy leaves no per-task wiring to retire"
+  pass "fm-control-lib.sh: agy hook file has a cleanup path and no global token"
+}
+
+test_agy_worker_hooks() {
+  local dir="$TMP_ROOT/worker hooks" state wt gen next out hook
+  state="$dir/state" wt="$dir/worktree"
+  hook="$ROOT/bin/fm-agy-hook.sh"
+  mkdir -p "$state" "$wt/.agents"
+  printf '{"project-owned":{}}\n' > "$wt/.agents/hooks.json"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" agy-worker) || fail 'arm agy'
+  "$hook" install-worker "$state" agy-worker "$gen" "$wt" || fail 'install agy hooks'
+  out=$(cat "$wt/.agents/hooks.json")
+  [ "$out" = '{"project-owned":{}}' ] || fail 'worker installation changed project hooks'
+  agy_worker_event() {
+    jq -n --arg conv "$2" --arg wt "$wt" --argjson idle "${3:-true}" \
+      '{conversationId:$conv,workspacePaths:[$wt],fullyIdle:$idle}' \
+      | "$hook" worker "$1" "$state" agy-worker "$gen" "$wt"
+  }
+  agy_worker_state() {
+    bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux pane agy agy-worker "$2"' _ "$ROOT" "$state"
+  }
+  agy_worker_event PreInvocation main >/dev/null
+  [ "$(agy_worker_state)" = 'busy agy-hook' ] || fail 'PreInvocation did not open busy'
+  agy_worker_event Stop child >/dev/null
+  [ "$(agy_worker_state)" = 'busy agy-hook' ] || fail 'child Stop settled parent'
+  agy_worker_event Stop main false >/dev/null
+  [ "$(agy_worker_state)" = 'busy agy-hook' ] || fail 'background work settled before fullyIdle'
+  [ ! -e "$state/agy-worker.turn-ended" ] || fail 'partial Stop emitted completion'
+  agy_worker_event Stop main >/dev/null
+  [ "$(agy_worker_state)" = 'idle agy-hook' ] || fail 'fullyIdle Stop did not close busy'
+  [ -e "$state/agy-worker.turn-ended" ] || fail 'fullyIdle Stop did not notify watcher'
+  rm "$state/agy-worker.turn-ended"
+  next=$("$ROOT/bin/fm-busy-event.sh" arm "$state" agy-worker) || fail 'rearm agy'
+  agy_worker_event Stop main >/dev/null
+  [ "$(agy_worker_state)" = 'busy fm-spawn' ] || fail 'stale hook changed replacement state'
+  [ ! -e "$state/agy-worker.turn-ended" ] || fail 'stale hook woke replacement'
+  "$hook" retire-worker "$state" agy-worker || fail 'retire agy'
+  [ ! -e "$state/agy-worker.agy-hooks" ] || fail 'retire left hook directory'
+  mkdir "$state/agy-worker.agy-hooks"
+  if "$hook" retire-worker "$state" agy-worker 2>/dev/null; then fail 'retired an unowned directory'; fi
+  : "$next"
+  pass 'agy worker hooks bind generation and conversation, preserve project hooks, and retire safely'
+}
+
+test_agy_primary_hooks() {
+  local dir="$TMP_ROOT/primary" out payload
+  mkdir -p "$dir/bin" "$dir/state" "$dir/projects/project"
+  git -C "$dir" init -q
+  git -C "$dir" config user.name Test
+  git -C "$dir" config user.email test@example.invalid
+  printf '# Firstmate\n' > "$dir/AGENTS.md"
+  primary_call() {
+    FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+      JETSKI_APP_DATA_DIR=antigravity-cli "$ROOT/bin/fm-agy-hook.sh" primary "$1"
+  }
+  payload=$(jq -n --arg root "$dir" '{conversationId:"primary",workspacePaths:[$root],invocationNum:0,executionNum:0,fullyIdle:true}')
+  out=$(printf '%s' "$payload" | primary_call PreInvocation)
+  printf '%s' "$out" | jq -e '.injectSteps[0].ephemeralMessage | contains("fm-session-start.sh")' >/dev/null \
+    || fail "startup nudge missing: $out"
+  out=$(printf '%s' "$payload" | jq '.invocationNum=1' | primary_call PreInvocation)
+  [ "$out" = '{}' ] || fail 'startup nudge preempted a pending tool on a later invocation'
+  out=$(printf '%s' "$payload" | jq 'del(.invocationNum)' | primary_call PreInvocation)
+  [ "$out" = '{}' ] || fail 'malformed invocation number injected startup'
+  out=$(printf '%s' "$payload" | primary_call Stop)
+  [ "$out" = '{}' ] || fail "empty fleet forced a continuation: $out"
+  touch "$dir/state/worker.meta"
+  out=$(printf '%s' "$payload" | primary_call Stop)
+  printf '%s' "$out" | jq -e '.decision == "continue" and (.reason | contains("run_command"))' >/dev/null \
+    || fail "missing watcher did not force Agy recovery: $out"
+  out=$(printf '%s' "$payload" | jq '.executionNum=1' | primary_call Stop)
+  [ "$out" = '{}' ] || fail 'continuation guard did not bound the follow-up'
+  out=$(printf '%s' "$payload" | jq '.executionNum="0"' | primary_call Stop)
+  [ "$out" = '{}' ] || fail 'malformed execution number forced continuation'
+  out=$(printf '%s' "$payload" | jq '.workspacePaths=["/elsewhere"]' | primary_call Stop)
+  [ "$out" = '{}' ] || fail 'foreign workspace forced continuation'
+  out=$(printf '%s' "$payload" | jq '.toolCall={name:"run_command",args:{CommandLine:"bin/fm-watch-arm.sh &"}}' | primary_call PreToolUse)
+  printf '%s' "$out" | jq -e '.decision == "deny"' >/dev/null || fail "unsafe watcher accepted: $out"
+  out=$(printf '%s' "$payload" | jq '.toolCall={name:"run_command",args:{CommandLine:"date"}}' | primary_call PreToolUse)
+  printf '%s' "$out" | jq -e '.decision == "ask"' >/dev/null || fail 'ordinary command must retain native review'
+  out=$(printf '%s' "$payload" | jq '.toolCall={name:"invoke_subagent",args:{}}' | primary_call PreToolUse)
+  printf '%s' "$out" | jq -e '.decision == "deny"' >/dev/null || fail 'untracked delegation accepted'
+  # A linked worker is outside primary scope, even with a primary hook copied
+  # from Firstmate itself; the marker deliberately brings a secondmate back in.
+  local child="$TMP_ROOT/primary-child"
+  git -C "$dir" add AGENTS.md
+  git -C "$dir" commit -qm fixture
+  git -C "$dir" worktree add -qb child "$child" >/dev/null 2>&1 || fail 'make linked scope'
+  mkdir -p "$child/bin" "$child/state"
+  dir=$child
+  payload=$(printf '%s' "$payload" | jq --arg root "$dir" '.workspacePaths=[$root]')
+  touch "$dir/state/worker.meta"
+  out=$(printf '%s' "$payload" | primary_call Stop)
+  [ "$out" = '{}' ] || fail 'primary hook ran in worker worktree'
+  printf 'secondmate\n' > "$dir/.fm-secondmate-home"
+  out=$(printf '%s' "$payload" | primary_call Stop)
+  printf '%s' "$out" | jq -e '.decision == "continue"' >/dev/null || fail 'secondmate omitted primary guard'
+  pass 'agy primary startup, guard, loop bound, pre-tool policies, and secondmate scope'
+}
+
+test_agy_session_identity() {
+  bash -c '
+    . "$1/bin/fm-session-lock-lib.sh"
+    fm_harness_process_matches /opt/bin/agy "/opt/bin/agy --server" || exit 1
+    ! fm_harness_process_matches legacy legacy || exit 1
+    ! fm_harness_process_matches agyrate agyrate || exit 1
+  ' _ "$ROOT" || fail 'agy session identity must use exact command evidence'
+  pass 'agy session lock recognizes the exact executable and rejects similar names'
 }
 
 test_agy_marker_outranks_inherited_claudecode
@@ -526,7 +634,10 @@ test_agy_grants_resolve_a_symlinked_worktree
 test_agy_effort_caps_at_high
 test_agy_effort_passes_supported_levels_through
 test_agy_suffixed_model_id_suppresses_the_effort_flag
-test_agy_secondmate_launch_is_refused
+test_agy_secondmate_launch_is_supported
 test_agy_control_mechanics_are_the_verified_ones
-test_agy_is_crewmate_and_scout_only
-test_agy_leaves_no_per_task_wiring
+test_agy_supports_all_task_kinds
+test_agy_wiring_has_a_cleanup_owner
+test_agy_worker_hooks
+test_agy_primary_hooks
+test_agy_session_identity

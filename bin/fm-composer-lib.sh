@@ -67,6 +67,11 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#   agy        - a `>` row between solid rules, followed immediately by its
+#                shortcuts/cancel footer and model cell. The full structure,
+#                never a bare shell glyph, proves this input region. Agy's
+#                accept-edits hint needs styling to distinguish it from text;
+#                without that evidence a matching hint remains unknown.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -388,6 +393,11 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, search, build anything$|^Add a follow-up$'
+FM_COMPOSER_AGY_HINT='Accept-edits mode: file edits auto-approved (shift+tab to cycle)'
+# Agy 1.2.0 renders this one hint in SGR 90, not dim/truecolor. Remove only
+# this exact styled hint within the proven Agy shape; palette colours in any
+# other text or harness retain the generic stripper's conservative handling.
+FM_COMPOSER_AGY_HINT_STYLED=$(printf '\033[90m%s\033[39m' "$FM_COMPOSER_AGY_HINT")
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -1153,6 +1163,46 @@ _fm_composer_select_cursorless() {
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
 
+# Agy's separated prompt needs its own footer proof; the same `>` between
+# transcript rules without that footer can be an exited shell, never empty.
+_fm_composer_select_agy() {  # <plain-screen>
+  local plain=$1 first last row text footer
+  [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] || return 1
+  first=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+  last=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
+  text=$(_fm_composer_screen_row "$first" "$plain")
+  case "$text" in '>'|'>'\ *) ;; *) return 1 ;; esac
+  footer=$(_fm_composer_screen_row "$((last + 2))" "$plain")
+  # Typing hides the shortcut hint; accept-edits keeps its right-aligned mode
+  # cell. A model name alone cannot prove the manual-mode input container.
+  printf '%s\n' "$footer" | LC_ALL=C grep -qE '^(\? for shortcuts|esc to cancel)[[:space:]]{2,}[^[:space:]]|^[[:space:]]{8,}accept-edits[[:space:]]+·[[:space:]]+' || return 1
+  # No later input or popup may hide behind the recognized footer.
+  row=$((last + 3))
+  text=$(printf '%s\n' "$plain" | tail -n "+$((row + 1))")
+  fm_composer_normalize_trim_var text
+  [ -z "$text" ] || return 1
+  FM_COMPOSER_SELECTED_KIND=agy
+  FM_COMPOSER_SELECTED_FIRST=$first
+  FM_COMPOSER_SELECTED_LAST=$last
+}
+
+_fm_composer_agy_verdict() {  # <screen> <styled>
+  local screen=$1 styled=$2 row raw content plain body
+  if [ "$styled" = 1 ]; then screen=${screen//"$FM_COMPOSER_AGY_HINT_STYLED"/}; fi
+  row=$FM_COMPOSER_SELECTED_FIRST
+  raw=$(_fm_composer_screen_row "$row" "$screen")
+  plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+  body=${plain#>}
+  fm_composer_normalize_trim_var body
+  content=$(_fm_composer_row_content "$raw" "$styled")
+  if [ "$body" = "$FM_COMPOSER_AGY_HINT" ] && [ "$content" = "$plain" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  _fm_composer_classify_rows "$screen" "$styled" 0 \
+    "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
+}
+
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
@@ -1164,7 +1214,10 @@ $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
-  _fm_composer_select_cursorless "$plain" || return 1
+  _fm_composer_select_agy "$plain" || _fm_composer_select_cursorless "$plain" || return 1
+  if [ "$FM_COMPOSER_SELECTED_KIND" = agy ] && [ "$styled" = 1 ]; then
+    screen=${screen//"$FM_COMPOSER_AGY_HINT_STYLED"/}
+  fi
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1189,7 +1242,7 @@ EOF
           leading_blank=0
         fi
         ;;
-      box)
+      box|agy)
         if [ "$prompt_row" -lt 0 ] \
            && fm_composer_leading_prompt_glyph_var glyph "$content"; then
           prompt_row=$row
@@ -1247,6 +1300,14 @@ EOF
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cy"
+  if _fm_composer_select_agy "$plain"; then
+    if [ -n "$cy" ] && { [ "$cy" -lt "$FM_COMPOSER_SELECTED_FIRST" ] || [ "$cy" -gt "$FM_COMPOSER_SELECTED_LAST" ]; }; then
+      printf 'unknown'
+    else
+      _fm_composer_agy_verdict "$screen" "$styled"
+    fi
+    return 0
+  fi
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then
