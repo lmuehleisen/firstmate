@@ -56,12 +56,22 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LEASE_ENV_LOG:-}" ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          'export TREEHOUSE_DIR='*)
+            /bin/bash -c "$arg; printenv TREEHOUSE_DIR" > "$FM_FAKE_LEASE_ENV_LOG"
+            ;;
+        esac
+      done
+    fi
+    exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse_lease "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -144,11 +154,14 @@ test_already_settled_pane_costs_one_confirm_read() {
   rec=$(make_settle_case settle-already-settled "$id" 0)
   read_settle_record "$rec"
 
-  out=$(run_settle_spawn "$id")
+  out=$(TREEHOUSE_DIR="$PROJ_DIR" FM_FAKE_LEASE_ENV_LOG="$HOME_DIR/lease-env" run_settle_spawn "$id")
   status=$?
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"$'\n'"$out"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "meta did not record the already-settled worktree"
+  assert_absent "$HOME_DIR/state/$id.treehouse-lease" "committed dispatch retained an unresolved receipt"
+  assert_present "$HOME_DIR/lease-env" "lease launch did not set its slot environment"
+  [ "$(cat "$HOME_DIR/lease-env")" = "$WT_DIR" ] || fail "lease launch inherited another slot's TREEHOUSE_DIR"
   reads=$(cat "$COUNTFILE")
   [ "$reads" -eq 2 ] || fail "already-settled pane took $reads reads to confirm - expected the first read plus one confirmation"
   pass "an already-settled pane confirms on the next read, not a whole extra cycle"
@@ -156,13 +169,10 @@ test_already_settled_pane_costs_one_confirm_read() {
 
 # make_primary_case <name> <id> <stale_reads> builds the linked-home shape: the
 # spawning project is itself a LINKED worktree of the repository, and the path
-# the pane transiently reports is that repository's PRIMARY checkout. `treehouse
-# get` reports the repository it is preparing a slot from as its own cwd while
-# it is still fetching and checking out, so the pane reads the primary for the
-# first seconds. The primary is not the spawning project, so a poll that only
-# compares against the project accepts it as the worktree, and the isolation
-# guard then refuses the launch even though treehouse went on to enter a real
-# slot. The settled path is a second linked worktree of the same repository.
+# the pane transiently reports is that repository's PRIMARY checkout. Discovery
+# must confirm the exact leased path after cd, even when a backend reports an
+# old primary-checkout cwd first. The settled path is a second linked worktree
+# of the same repository.
 make_primary_case() {
   local name=$1 id=$2 stale_reads=$3 case_dir home primary proj wt fakebin countfile
   case_dir="$TMP_ROOT/$name"
@@ -211,7 +221,7 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   out=$(run_settle_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
-  assert_contains "$out" "did not enter an isolated worktree" \
+  assert_contains "$out" "did not enter an isolated worktree matching its lease" \
     "spawn did not explain that the pane never reached an isolated worktree"
   assert_contains "$out" "$STALE_DIR" \
     "the refusal did not name the path the pane kept reporting"
@@ -221,9 +231,145 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+make_claim_case() {
+  local name=$1 id=$2 dir="$TMP_ROOT/$1"
+  HOME_DIR="$dir/home"; PROJ_DIR="$dir/project"; WT_DIR="$dir/pool/1/project"
+  STALE_DIR="$PROJ_DIR"; STALE_READS=0; COUNTFILE="$dir/cwd-count"
+  FAKEBIN_DIR=$(make_settle_fakebin "$dir/fake")
+  fm_test_spawn_home "$HOME_DIR" codex
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  fm_git_worktree "$PROJ_DIR" "$WT_DIR" "fm/$id"
+  printf '{"worktrees":[{"path":"%s","leased":false}]}\n' "$WT_DIR" > "$dir/pool/treehouse-state.json"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_GET_LOG"
+if [ "${1:-}" = get ]; then
+  [ "${2:-}" = --lease ] || exit 9
+  [ -z "${FM_FAKE_GET_READY:-}" ] || : > "$FM_FAKE_GET_READY"
+  if [ -n "${FM_FAKE_GET_RELEASE:-}" ]; then
+    for _ in $(seq 1 300); do
+      [ ! -f "$FM_FAKE_GET_RELEASE" ] || break
+      /bin/sleep 0.1
+    done
+    [ -f "$FM_FAKE_GET_RELEASE" ] || exit 8
+  fi
+  printf '%s\n' "$FM_FAKE_PANE_PATH"
+fi
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+}
+
+test_unleased_detached_claim_refuses_before_get() {
+  local id=claimed-new-c1 old=claimed-old-c2 before rc out claim_home
+  make_claim_case legacy-unlanded "$id"
+  git -C "$WT_DIR" checkout --detach -q
+  printf 'unlanded detached content\n' > "$WT_DIR/unlanded"
+  git -C "$WT_DIR" add unlanded
+  git -C "$WT_DIR" -c user.name=test -c user.email=t@t commit -qm unlanded
+  before=$(git -C "$WT_DIR" rev-parse HEAD)
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] || fail "detached fixture is dirty"
+  # A cross-home claim through an alias must protect the same physical slot.
+  claim_home="$HOME_DIR/../mate"
+  fm_test_spawn_home "$claim_home" codex
+  printf '%s\n' "- mate - fixture (home: $claim_home; scope: test; projects: project; added 2026-01-01)" > "$HOME_DIR/data/secondmates.md"
+  ln -s "$WT_DIR" "$HOME_DIR/../slot-alias"
+  fm_write_meta "$claim_home/state/$old.meta" "project=$PROJ_DIR" "worktree=$HOME_DIR/../slot-alias" "kind=ship"
+  if out=$(FM_FAKE_GET_LOG="$HOME_DIR/get.log" run_settle_spawn "$id"); then rc=0; else rc=$?; fi
+  [ "$rc" -ne 0 ] || fail "unleased claim was acquired"
+  assert_contains "$out" "$old" "pre-get refusal must name the claimant"
+  assert_absent "$HOME_DIR/get.log" "pre-get refusal invoked Treehouse"
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$before" ] || fail "unlanded detached HEAD was reset"
+  assert_present "$WT_DIR/unlanded" "unlanded content was removed"
+  assert_absent "$HOME_DIR/state/$id.meta" "refused spawn published metadata"
+  pass "a clean detached unlanded legacy claim is preserved before any get, including cross-home aliases"
+}
+
+test_post_acquisition_collision_never_returns_the_slot() {
+  local id=post-new-c3 old=post-old-c4 out rc before
+  make_claim_case post-collision "$id"
+  printf '{"worktrees":[{"path":"%s","leased":true}]}\n' "$WT_DIR" > "$HOME_DIR/../pool/treehouse-state.json"
+  fm_write_meta "$HOME_DIR/state/$old.meta" "project=$PROJ_DIR" "worktree=$WT_DIR" "kind=ship"
+  before=$(git -C "$WT_DIR" rev-parse HEAD)
+  # Deliberately broken provider returns a leased slot despite its exclusion.
+  if out=$(FM_FAKE_GET_LOG="$HOME_DIR/get.log" run_settle_spawn "$id"); then rc=0; else rc=$?; fi
+  [ "$rc" -ne 0 ] || fail "post-acquisition collision was accepted"
+  assert_contains "$out" "$old" "post-acquisition refusal omitted the claimant"
+  assert_contains "$out" "no reset or return attempted" "unsafe rollback diagnostic missing"
+  assert_no_grep 'return' "$HOME_DIR/get.log" "collision auto-returned the slot"
+  assert_present "$HOME_DIR/state/$id.treehouse-lease" "collision lost its lease receipt"
+  assert_absent "$HOME_DIR/state/$id.meta" "collision published a second claim"
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$before" ] || fail "post-check reset the copy"
+  pass "a broken provider's colliding lease is retained and reported, never auto-returned"
+}
+
+test_two_spawns_serialize_acquisition_across_homes() {
+  local id=race-first-c5 second=race-second-c6 first_home mate pid i rc out
+  make_claim_case race "$id"
+  first_home=$HOME_DIR; mate="$HOME_DIR/../mate"
+  fm_test_spawn_home "$mate" codex
+  fm_test_spawn_brief "$mate" "$second"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$first_home" > "$mate/.fm-secondmate-parent"
+  printf '%s\n' "- mate - fixture (home: $mate; scope: test; projects: project; added 2026-01-01)" > "$first_home/data/secondmates.md"
+  FM_FAKE_GET_LOG="$first_home/get.log" FM_FAKE_GET_READY="$first_home/ready" \
+    FM_FAKE_GET_RELEASE="$first_home/release" run_settle_spawn "$id" > "$first_home/out" 2>&1 &
+  pid=$!
+  for ((i=0; i<300; i++)); do
+    [ ! -f "$first_home/ready" ] || break
+    sleep 0.1
+  done
+  if [ ! -f "$first_home/ready" ]; then
+    : > "$first_home/release"; wait "$pid" || true
+    fail "first spawn never reached acquisition: $(cat "$first_home/out")"
+  fi
+  HOME_DIR=$mate
+  if out=$(FM_FAKE_GET_LOG="$mate/get.log" run_settle_spawn "$second"); then rc=0; else rc=$?; fi
+  : > "$first_home/release"
+  wait "$pid" || fail "first spawn failed: $(cat "$first_home/out")"
+  [ "$rc" -ne 0 ] || fail "a concurrent cross-home spawn raced allocation"
+  assert_contains "$out" "another Treehouse slot allocation or return" "race did not hit the shared project lock"
+  assert_absent "$mate/get.log" "racing spawn reached the provider"
+  assert_present "$first_home/state/$id.meta" "winning spawn did not publish"
+  assert_absent "$mate/state/$second.meta" "racing spawn published a duplicate claim"
+  pass "two cross-home spawns cannot acquire before the winner publishes its claim"
+}
+
+test_real_treehouse_lease_preserves_process_free_detached_work() {
+  local treehouse dir project user_root first second before out
+  treehouse=$(command -v treehouse || true)
+  if [ -z "$treehouse" ]; then
+    printf 'skip: treehouse not found; real durable-lease regression unavailable\n'
+    return
+  fi
+  dir="$TMP_ROOT/real-lease"; project="$dir/project"; user_root="$dir/user"
+  mkdir -p "$user_root"
+  fm_git_init_commit "$project"
+  printf 'root = "%s"\nmax_trees = 2\n' "$dir" > "$project/treehouse.toml"
+  git -C "$project" add treehouse.toml
+  git -C "$project" -c user.name=test -c user.email=t@t commit -qm config
+  first=$(cd "$project" && HOME="$user_root" "$treehouse" get --lease --lease-holder claimant) || fail "real first lease failed"
+  git -C "$first" checkout --detach -q
+  printf 'unlanded detached content\n' > "$first/unlanded"
+  git -C "$first" add unlanded
+  git -C "$first" -c user.name=test -c user.email=t@t commit -qm unlanded
+  before=$(git -C "$first" rev-parse HEAD)
+  [ -z "$(git -C "$first" status --porcelain)" ] || fail "real lease fixture must be clean"
+  out=$(cd "$project" && HOME="$user_root" "$treehouse" status) || fail "real lease status failed"
+  assert_contains "$out" 'leased' "process-free claim lost its durable lease"
+  second=$(cd "$project" && HOME="$user_root" "$treehouse" get --lease --lease-holder next) || fail "real second lease failed"
+  [ "$first" != "$second" ] || fail "Treehouse selected a leased claimant"
+  [ "$(git -C "$first" rev-parse HEAD)" = "$before" ] || fail "Treehouse reset clean detached unlanded work"
+  assert_present "$first/unlanded" "real lease lost committed unlanded content"
+  printf '# real provider: %s\n' "$("$treehouse" --version)"
+  pass "real Treehouse excludes a process-free durable lease containing clean detached unlanded work"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_unleased_detached_claim_refuses_before_get
+test_post_acquisition_collision_never_returns_the_slot
+test_two_spawns_serialize_acquisition_across_homes
+test_real_treehouse_lease_preserves_process_free_detached_work
 
 echo "# all fm-spawn-worktree-settle tests passed"

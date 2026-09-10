@@ -169,7 +169,8 @@ SH
   # A stand-in `agy` on PATH: the spawn resolves the executable to an absolute
   # path before launching, and refuses when none exists, so the resolver needs
   # something executable to find. It is never run by these cases.
-  fm_fake_exit0 "$fakebin" agy treehouse gh-axi gh
+  fm_fake_exit0 "$fakebin" agy gh-axi gh
+  fm_fake_treehouse_lease "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

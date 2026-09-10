@@ -33,6 +33,29 @@ The same suite exercises existing remote default refresh and submodule safeguard
 These checks establish launch preparation and metadata publication, not authenticated worker execution or supervision; a real disposable worker remains the end-to-end acceptance test.
 The operator boundary is in [configuration](../configuration.md#remote-less-local-projects).
 
+## Treehouse task leases and collided-claim recovery
+
+On 2026-09-10, Treehouse v2.0.0 (build revision `68fa3d2556542add76bf80255787b8625a5041a6`) passed the real-provider lease regression in `tests/fm-spawn-worktree-settle.test.sh`.
+In an isolated local pool, a process-free leased slot kept its clean detached unlanded commit and file while a second lease acquired a different slot.
+The same suite drives the real spawn entry point with fake providers and endpoints to verify refusal before acquisition for an unleased recorded claim, cross-home project-lock contention, and preservation of a colliding lease without automatic return.
+`bin/fm-spawn.sh` owns acquisition and receipt mechanics; `bin/fm-worktree-claims-lib.sh` owns the shared local-home claim inventory.
+
+`tests/fm-teardown-endpoint-safety.test.sh` verifies record-only recovery without reset, return, branch deletion, or endpoint termination, followed by ordinary cleanup of the remaining owner.
+It refuses live or locked claimants, uncommitted work, unlanded work on either named branch, detached ownership, and a force combination.
+Its squash-content case proves the stale claimant's own branch landed without using the current owner's checkout as evidence.
+`tests/fm-control-relaunch.test.sh` covers reuse of the task's own worktree and refusal of another claimant.
+`bin/fm-teardown.sh` owns the recovery option and its safety boundary.
+
+Refresh these checks with:
+
+```sh
+bin/fm-test-run.sh tests/fm-spawn-worktree-settle.test.sh tests/fm-teardown-endpoint-safety.test.sh tests/fm-control-relaunch.test.sh
+```
+
+Acquisition is shared by tmux, Herdr, zellij, and cmux; Orca supplies its own worktree, and secondmate-home lease provisioning is separate.
+These tests do not establish live Herdr, zellij, or cmux operation, or authenticated worker execution.
+Recovery uses the existing backend classifier and refuses an unverified result.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

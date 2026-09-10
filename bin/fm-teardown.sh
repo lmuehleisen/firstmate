@@ -93,9 +93,22 @@
 # gap; forced secondmate teardown takes it and runs the same checks for every
 # descendant Treehouse slot before touching any child.
 # This refusal is not relaxed by --force: --force authorizes discarding THIS
-# task's unlanded work, never another task's live work. Reconcile whichever
-# record is wrong and re-run. Orca is not a pool slot and proves its path through
-# require_orca_worktree_path_match instead.
+# task's unlanded work, never another task's work. For a legacy collision,
+# --retire-stale-claim is a separate record-only migration: a Treehouse ship's
+# endpoint and every other claimant must be recovery-grade dead or missing,
+# each claimant's conventional fm/<task-id> local branch must independently pass
+# the committed-work landed proof using freshly fetched remote refs, and the
+# clean checked-out branch must identify exactly one OTHER claimant. A missing
+# branch, detached HEAD, non-ship claimant, or ambiguous ownership refuses.
+# The stale claimant's shared HEAD is never its landed evidence: an earlier
+# acquisition may already have replaced that copy. Only the requested task's
+# metadata/backlog lifecycle is retired; the worktree, branches, lease, and every
+# endpoint are preserved. Its own and every claimant's control/meta locks remain
+# held through retirement, closing the relaunch race. The normal captain-call
+# retention and legacy-record gates still apply. --force cannot be combined
+# with this option. Once stale records are retired, the remaining owner uses
+# ordinary guarded teardown to release the slot. Orca proves its own path via
+# require_orca_worktree_path_match instead and has no pool-claim migration.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -120,7 +133,7 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--retire-stale-claim]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -263,11 +276,17 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+RETIRE_STALE_CLAIM=0
+TEARDOWN_RECORD_ONLY=0
+# Internal selector only; never accept an ambient ref as ordinary HEAD evidence.
+TEARDOWN_SAFETY_REF=HEAD
+CLAIMANT_LOCK_PATHS=()
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --retire-stale-claim) RETIRE_STALE_CLAIM=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -275,12 +294,18 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ "$RETIRE_STALE_CLAIM" = 1 ] && [ "$FORCE" = --force ]; then
+  echo "error: --retire-stale-claim cannot be combined with --force; claimant retirement always requires landed work" >&2
+  exit 2
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worktree-claims-lib.sh
+. "$SCRIPT_DIR/fm-worktree-claims-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -351,6 +376,9 @@ DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
 teardown_release_locks() {
   local status=$? i
+  for ((i=${#CLAIMANT_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${CLAIMANT_LOCK_PATHS[$i]}" || true
+  done
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
@@ -409,6 +437,10 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+if [ "$RETIRE_STALE_CLAIM" = 1 ] && [ "$TEARDOWN_META_KIND" != ship ]; then
+  echo "REFUSED: --retire-stale-claim is only available for ship records." >&2
+  exit 1
+fi
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
@@ -1277,7 +1309,7 @@ patch_id_for_commit() {
 
 unpushed_patches_are_in_pr_head() {
   local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  current=$(git -C "$WT" rev-parse --verify "${TEARDOWN_SAFETY_REF:-HEAD}" 2>/dev/null) || return 1
   base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
     git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
@@ -1288,7 +1320,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$WT" log --format=%H "${TEARDOWN_SAFETY_REF:-HEAD}" --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -1326,7 +1358,7 @@ pr_is_merged() {
   esac
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  current=$(git -C "$WT" rev-parse --verify "${TEARDOWN_SAFETY_REF:-HEAD}" 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
   elif unpushed_patches_are_in_pr_head "$head"; then
@@ -1360,7 +1392,7 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" "${TEARDOWN_SAFETY_REF:-HEAD}" 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -2085,51 +2117,6 @@ teardown_live_slot_path() {
   canonical_existing_dir "$WT"
 }
 
-collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
-  local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
-    return 1
-  }
-  homes=("$root")
-  while [ "$i" -lt "${#homes[@]}" ]; do
-    home=${homes[$i]}
-    i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
-    reg="$home/data/secondmates.md"
-    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
-    [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
-      return 1
-    }
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "- "*)
-          secondmate_registry_parse_line "$line" || {
-            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
-            return 1
-          }
-          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
-            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
-            return 1
-          }
-          known=0
-          for existing in "${homes[@]}"; do
-            [ "$existing" != "$child" ] || known=1
-          done
-          [ "$known" = 1 ] || homes+=("$child")
-          ;;
-      esac
-    done < "$reg"
-  done
-}
 
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
@@ -2139,7 +2126,7 @@ require_exclusive_worktree_slot_record() {
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
-      [ "$other" != "$record_meta" ] || continue
+      [ ! "$other" -ef "$record_meta" ] || continue
       other_id=$(basename "$other" .meta)
       for field in worktree home; do
         other_path=$(fm_meta_get "$other" "$field")
@@ -2159,6 +2146,113 @@ require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
   require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+}
+
+stale_claim_endpoint_stopped() {  # <meta> <id>
+  local meta=$1 id=$2 endpoint_state
+  fm_backend_validate_task_endpoint "$meta" "$id" || return 1
+  endpoint_state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
+  case "$endpoint_state" in
+    dead|missing) return 0 ;;
+    *) echo "REFUSED: claimant $id's endpoint is $endpoint_state, not provably stopped; no claim or worktree was changed." >&2; return 1 ;;
+  esac
+}
+
+# Use the established committed-work proof with this claimant's branch ref.
+# The shared HEAD is NOT evidence of an older claimant's work: a prior get may
+# already have replaced it with main. Missing refs and detached checkouts stay
+# ambiguous; neither --force nor another task's merged PR can fill that gap.
+stale_claim_branch_landed() {
+  local branch=$1 meta=${2:-} unpushed default PR_URL=$PR_URL MODE=$MODE TEARDOWN_SAFETY_REF
+  if [ -n "$meta" ]; then
+    PR_URL=$(fm_meta_get "$meta" pr)
+    MODE=$(fm_meta_get "$meta" mode); MODE=${MODE:-no-mistakes}
+  fi
+  TEARDOWN_SAFETY_REF="refs/heads/$branch"
+  git -C "$WT" rev-parse --verify "$TEARDOWN_SAFETY_REF^{commit}" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --all --prune --quiet || return 1
+  unpushed=$(git -C "$WT" log --format=%H "$TEARDOWN_SAFETY_REF" --not --remotes --) || return 1
+  [ -n "$unpushed" ] || return 0
+  if [ "$MODE" = local-only ]; then
+    default=$(default_branch) || return 1
+    git -C "$WT" merge-base --is-ancestor "$TEARDOWN_SAFETY_REF" "$default"
+  else
+    work_is_landed "$branch"
+  fi
+}
+
+validate_stale_claim_retirement() {
+  local slot current dirty own_branch="fm/$ID" other other_id other_kind lock field path owner_count=0
+  local -a claims
+  [ "$KIND" = ship ] && [ "$BACKEND" != orca ] || {
+    echo "REFUSED: stale-claim retirement requires a Treehouse ship task." >&2
+    return 1
+  }
+  slot=$(teardown_live_slot_path) || return 1
+  fm_worktree_claims_for_path "$META" "$STATE" "$slot" || return 1
+  [ "${#FM_WORKTREE_CLAIMS[@]}" -gt 0 ] || {
+    echo "REFUSED: task $ID has no competing claim; use ordinary teardown." >&2
+    return 1
+  }
+  claims=("${FM_WORKTREE_CLAIMS[@]}")
+  current=$(git -C "$WT" symbolic-ref --quiet HEAD) || {
+    echo "REFUSED: shared worktree $WT has a detached HEAD; claimant ownership is ambiguous." >&2
+    return 1
+  }
+  [ "$current" != "refs/heads/$own_branch" ] || {
+    echo "REFUSED: task $ID still owns the checked-out branch; its claim is not stale." >&2
+    return 1
+  }
+  stale_claim_endpoint_stopped "$META" "$ID" || return 1
+  for other in "${claims[@]}"; do
+    other_id=${other##*/}; other_id=${other_id%.meta}
+    for field in control meta; do
+      lock="${other%/*}/.$field-$other_id.lock"
+      fm_lock_try_acquire "$lock" || {
+        echo "REFUSED: another lifecycle or metadata operation owns claimant $other_id; nothing was changed." >&2
+        return 1
+      }
+      CLAIMANT_LOCK_PATHS+=("$lock")
+    done
+    other_kind=$(fm_meta_get "$other" kind)
+    [ "${other_kind:-ship}" = ship ] || {
+      echo "REFUSED: claimant $other_id is not a ship; preserve its claim." >&2
+      return 1
+    }
+    path=$(fm_worktree_canonical_dir "$(fm_meta_get "$other" worktree)") || return 1
+    [ "$path" = "$slot" ] || {
+      echo "REFUSED: claimant $other_id changed worktree while locking; retry from current records." >&2
+      return 1
+    }
+    stale_claim_endpoint_stopped "$other" "$other_id" || return 1
+    [ "$current" != "refs/heads/fm/$other_id" ] || owner_count=$((owner_count + 1))
+  done
+  [ "$owner_count" = 1 ] || {
+    echo "REFUSED: the checked-out branch does not identify exactly one other claimant; preserve every claim." >&2
+    return 1
+  }
+  # Every old claimant's named branch must be landed independently, even when
+  # its checkout has been overwritten. Preserve all branch refs on success.
+  if ! stale_claim_branch_landed "$own_branch"; then
+    echo "REFUSED: claimant $ID's branch $own_branch is missing or unlanded; the shared HEAD cannot prove it landed." >&2
+    return 1
+  fi
+  for other in "${claims[@]}"; do
+    other_id=${other##*/}; other_id=${other_id%.meta}
+    if ! stale_claim_branch_landed "fm/$other_id" "$other"; then
+      echo "REFUSED: claimant $other_id's branch is missing or unlanded; preserve every claim." >&2
+      return 1
+    fi
+  done
+  # A dirty current owner's copy also keeps the existing collision refusal.
+  # This is an additional check, never substituted for branch-specific proof.
+  dirty=$(git -C "$WT" status --porcelain) || return 1
+  if [ -n "$dirty" ]; then
+    echo "REFUSED: shared worktree has uncommitted changes; preserve every claim." >&2
+    return 1
+  fi
+  [ "$(git -C "$WT" symbolic-ref --quiet HEAD)" = "$current" ] || return 1
+  echo "teardown: proved task $ID's claim stale and every claimant stopped and landed; retiring only $ID's record, preserving $WT and its branches" >&2
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -2965,7 +3059,12 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
+if [ "$RETIRE_STALE_CLAIM" = 1 ]; then
+  validate_stale_claim_retirement || exit 1
+  TEARDOWN_RECORD_ONLY=1
+else
+  require_exclusive_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3073,7 +3172,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -3096,7 +3195,7 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$BACKEND" = herdr ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
@@ -3181,6 +3280,7 @@ else
   fi
 fi
 
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ]; then
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
@@ -3314,6 +3414,7 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+fi
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then
@@ -3339,14 +3440,14 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+[ "$TEARDOWN_RECORD_ONLY" = 1 ] || fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
+rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" "$STATE/$ID.treehouse-lease" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
@@ -3391,7 +3492,7 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 # A secondmate retirement may remove the home containing an overridden control
@@ -3399,7 +3500,9 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
-if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
+if [ "$TEARDOWN_RECORD_ONLY" = 1 ]; then
+  echo "teardown $ID complete (stale claim retired; shared worktree $WT and every branch preserved)"
+elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window $T, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 else
   echo "teardown $ID complete (window $T, worktree $WT)"
