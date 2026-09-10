@@ -498,11 +498,32 @@ ok - agy primary: the same guard includes a marked linked secondmate home
 
 The opening invocation receives the session-start nudge, while later invocations can execute pending tools without repeated injection.
 Native `Stop.executionNum` advances on a forced continuation and resets for a fresh execution cycle.
-Native PreToolUse decisions preserve review with `ask` or refuse a disallowed tool with `deny`; no `allow` bypass is installed.
+In confirmed primary scope, native PreToolUse decisions preserve review with `ask` or refuse a disallowed tool with `deny`; no `allow` bypass is installed.
 The driver approves only exact fixture commands and the fixture's generation-bound queue acknowledgement when native review asks.
 It retains captures, observer events and transcripts on failure.
 The linked secondmate check verifies the production scope boundary; it does not provision a persistent fleet home.
 Headless primary supervision, compaction refresh, semantic interrupt completion, and runtime backends other than tmux were not verified by this run.
+
+### Inherited primary hooks in worker worktrees
+
+Verified on 2026-09-10 with agy 1.2.0 in a real linked worktree containing the tracked `.agents/hooks.json` primary registration.
+The production hook exits 0 without stdout for rejected scope or payloads.
+The live fixture observes and forwards the production response and exit code, proves the inherited PreToolUse actually ran, and requires the file edit to complete automatically under accept-edits.
+
+```sh
+FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+```
+
+```text
+ok - agy: --mode accept-edits auto-approves a file edit inside the granted worktree
+ok - agy: inherited primary PreToolUse exits silently and the linked worker edit remains automatic
+ok - agy: a shell command still requests approval under accept-edits
+# all fm-agy-signals live checks passed (agy 1.2.0)
+```
+
+Silence is required here: returning `{}` instead caused the same live worker's file write to be denied by the pre-tool hook.
+The vendor's [PreToolUse response schema](https://antigravity.google/docs/hooks#pretooluse) requires a decision when returning JSON.
+`tests/fm-agy-harness.test.sh` covers silent scope and payload rejection, while allowed calls in a primary or marked linked secondmate retain `ask`.
 
 ### Model ids and --effort conflict
 

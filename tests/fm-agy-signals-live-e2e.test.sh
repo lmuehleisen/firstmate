@@ -94,7 +94,31 @@ LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-live.XXXXXX")
 # it treat a write inside the granted directory as non-workspace access.
 LAB=$(cd "$LAB" && pwd -P)
 WORKSPACE="$LAB/workspace"
-mkdir -p "$WORKSPACE/.agents"
+# Reproduce a Firstmate worker inheriting the tracked primary registration.
+# A real linked worktree must keep accept-edits even when that hook is loaded.
+git init -q "$LAB/project" || fail 'could not initialize linked-worktree fixture'
+git -C "$LAB/project" -c user.name=Test -c user.email=test@example.invalid \
+  commit --allow-empty -qm fixture || fail 'could not commit linked-worktree fixture'
+git -C "$LAB/project" worktree add --detach "$WORKSPACE" >/dev/null 2>&1 \
+  || fail 'could not create linked worker worktree'
+mkdir -p "$WORKSPACE/.agents" "$WORKSPACE/bin" "$WORKSPACE/state"
+printf '# Isolated Firstmate worker\n' > "$WORKSPACE/AGENTS.md"
+cp "$ROOT/.agents/hooks.json" "$WORKSPACE/.agents/hooks.json"
+# Observe the production hook response without changing what Agy receives.
+cat > "$WORKSPACE/bin/fm-agy-hook.sh" <<'SH'
+#!/usr/bin/env bash
+out=$(FM_ROOT_OVERRIDE="$FM_AGY_PROBE_WORKSPACE" FM_HOME="$FM_AGY_PROBE_WORKSPACE" \
+  FM_STATE_OVERRIDE="$FM_AGY_PROBE_WORKSPACE/state" "$FM_AGY_PROBE_HOOK" "$@")
+rc=$?
+if [ "${2:-}" = PreToolUse ]; then
+  jq -cn --arg stdout "$out" --argjson rc "$rc" '{stdout:$stdout,exit:$rc}' \
+    >> "$FM_AGY_PROBE_WORKSPACE/primary-pretool.responses"
+fi
+[ -z "$out" ] || printf '%s\n' "$out"
+exit "$rc"
+SH
+chmod +x "$WORKSPACE/bin/fm-agy-hook.sh"
+export FM_AGY_PROBE_WORKSPACE="$WORKSPACE" FM_AGY_PROBE_HOOK="$ROOT/bin/fm-agy-hook.sh"
 STATE="$LAB/state"
 mkdir -p "$STATE"
 GEN=$("$ROOT/bin/fm-busy-event.sh" arm "$STATE" agy-live) || fail 'could not arm worker state'
@@ -236,6 +260,11 @@ wait_for_turn || fail "agy did not finish the accept-edits file write turn"
 [ -f "$WORKSPACE/edit-probe.txt" ] \
   || fail "--mode accept-edits did not auto-approve a file edit in the granted worktree"
 pass "agy: --mode accept-edits auto-approves a file edit inside the granted worktree"
+[ -s "$WORKSPACE/primary-pretool.responses" ] \
+  || fail 'the inherited primary PreToolUse hook was not exercised by the file edit'
+jq -es 'length > 0 and all(.stdout == "" and .exit == 0)' "$WORKSPACE/primary-pretool.responses" >/dev/null \
+  || fail 'the inherited primary hook returned a non-inert response in the worker'
+pass 'agy: inherited primary PreToolUse exits silently and the linked worker edit remains automatic'
 
 # --- 3. the same mode still prompts for a shell command --------------------
 
@@ -309,10 +338,12 @@ pass "agy: /exit exits the agent on one Enter"
 
 # --- 6. worker hook retirement --------------------------------------------
 
-# Several turns have now completed and a tool has actually run, so both hook
-# events had their chance. Their absence is why agy has no turn-end signal.
+# Several turns have completed through both the inherited primary registration
+# and the separate worker hook directory; retirement must preserve the former.
 "$ROOT/bin/fm-agy-hook.sh" retire-worker "$STATE" agy-live || fail 'retirement failed'
 [ ! -e "$STATE/agy-live.agy-hooks" ] || fail 'retirement left worker hooks'
+cmp -s "$ROOT/.agents/hooks.json" "$WORKSPACE/.agents/hooks.json" \
+  || fail 'worker hook retirement changed the inherited project registration'
 pass 'agy: worker hook retirement removes only Firstmate-owned state'
 
 # --- 7. the model-id / --effort conflict is real ---------------------------

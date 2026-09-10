@@ -533,19 +533,20 @@ test_agy_worker_hooks() {
   agy_worker_state() {
     bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux pane agy agy-worker "$2"' _ "$ROOT" "$state"
   }
-  agy_worker_event PreInvocation main >/dev/null
+  [ -z "$(agy_worker_event PreInvocation main)" ] || fail 'worker start must return an inert response'
   [ "$(agy_worker_state)" = 'busy agy-hook' ] || fail 'PreInvocation did not open busy'
-  agy_worker_event Stop child >/dev/null
+  [ -z "$(agy_worker_event PreToolUse main)" ] || fail 'unsupported worker event must be inert, never request primary review'
+  [ -z "$(agy_worker_event Stop child)" ] || fail 'rejected child Stop must return an inert response'
   [ "$(agy_worker_state)" = 'busy agy-hook' ] || fail 'child Stop settled parent'
-  agy_worker_event Stop main false >/dev/null
+  [ -z "$(agy_worker_event Stop main false)" ] || fail 'partial worker Stop must return an inert response'
   [ "$(agy_worker_state)" = 'busy agy-hook' ] || fail 'background work settled before fullyIdle'
   [ ! -e "$state/agy-worker.turn-ended" ] || fail 'partial Stop emitted completion'
-  agy_worker_event Stop main >/dev/null
+  [ -z "$(agy_worker_event Stop main)" ] || fail 'worker completion must return an inert response'
   [ "$(agy_worker_state)" = 'idle agy-hook' ] || fail 'fullyIdle Stop did not close busy'
   [ -e "$state/agy-worker.turn-ended" ] || fail 'fullyIdle Stop did not notify watcher'
   rm "$state/agy-worker.turn-ended"
   next=$("$ROOT/bin/fm-busy-event.sh" arm "$state" agy-worker) || fail 'rearm agy'
-  agy_worker_event Stop main >/dev/null
+  [ -z "$(agy_worker_event Stop main)" ] || fail 'stale worker generation must return an inert response'
   [ "$(agy_worker_state)" = 'busy fm-spawn' ] || fail 'stale hook changed replacement state'
   [ ! -e "$state/agy-worker.turn-ended" ] || fail 'stale hook woke replacement'
   "$hook" retire-worker "$state" agy-worker || fail 'retire agy'
@@ -557,7 +558,7 @@ test_agy_worker_hooks() {
 }
 
 test_agy_primary_hooks() {
-  local dir="$TMP_ROOT/primary" out payload
+  local dir="$TMP_ROOT/primary" out payload filter
   mkdir -p "$dir/bin" "$dir/state" "$dir/projects/project"
   git -C "$dir" init -q
   git -C "$dir" config user.name Test
@@ -572,25 +573,38 @@ test_agy_primary_hooks() {
   printf '%s' "$out" | jq -e '.injectSteps[0].ephemeralMessage | contains("fm-session-start.sh")' >/dev/null \
     || fail "startup nudge missing: $out"
   out=$(printf '%s' "$payload" | jq '.invocationNum=1' | primary_call PreInvocation)
-  [ "$out" = '{}' ] || fail 'startup nudge preempted a pending tool on a later invocation'
+  [ -z "$out" ] || fail 'startup nudge preempted a pending tool on a later invocation'
   out=$(printf '%s' "$payload" | jq 'del(.invocationNum)' | primary_call PreInvocation)
-  [ "$out" = '{}' ] || fail 'malformed invocation number injected startup'
+  [ -z "$out" ] || fail 'malformed invocation number injected startup'
   out=$(printf '%s' "$payload" | primary_call Stop)
-  [ "$out" = '{}' ] || fail "empty fleet forced a continuation: $out"
+  [ -z "$out" ] || fail "empty fleet forced a continuation: $out"
   touch "$dir/state/worker.meta"
   out=$(printf '%s' "$payload" | primary_call Stop)
   printf '%s' "$out" | jq -e '.decision == "continue" and (.reason | contains("run_command"))' >/dev/null \
     || fail "missing watcher did not force Agy recovery: $out"
   out=$(printf '%s' "$payload" | jq '.executionNum=1' | primary_call Stop)
-  [ "$out" = '{}' ] || fail 'continuation guard did not bound the follow-up'
+  [ -z "$out" ] || fail 'continuation guard did not bound the follow-up'
   out=$(printf '%s' "$payload" | jq '.executionNum="0"' | primary_call Stop)
-  [ "$out" = '{}' ] || fail 'malformed execution number forced continuation'
+  [ -z "$out" ] || fail 'malformed execution number forced continuation'
   out=$(printf '%s' "$payload" | jq '.workspacePaths=["/elsewhere"]' | primary_call Stop)
-  [ "$out" = '{}' ] || fail 'foreign workspace forced continuation'
+  [ -z "$out" ] || fail 'foreign workspace forced continuation'
   out=$(printf '%s' "$payload" | jq '.toolCall={name:"run_command",args:{CommandLine:"bin/fm-watch-arm.sh &"}}' | primary_call PreToolUse)
   printf '%s' "$out" | jq -e '.decision == "deny"' >/dev/null || fail "unsafe watcher accepted: $out"
   out=$(printf '%s' "$payload" | jq '.toolCall={name:"run_command",args:{CommandLine:"date"}}' | primary_call PreToolUse)
   printf '%s' "$out" | jq -e '.decision == "ask"' >/dev/null || fail 'ordinary command must retain native review'
+  out=$(printf '%s' "$payload" | jq '.toolCall={name:"write_to_file",args:{}}' | primary_call PreToolUse)
+  printf '%s' "$out" | jq -e '.decision == "ask"' >/dev/null || fail 'allowed file tool in a primary must retain native review'
+  for filter in \
+    'del(.conversationId)' '.conversationId=17' '.conversationId="bad/id"' \
+    'del(.workspacePaths)' '.workspacePaths="wrong type"' '.workspacePaths=["/elsewhere"]' \
+    'del(.toolCall)' '.toolCall.name=17' \
+    'del(.toolCall.args.CommandLine)' '.toolCall.args.CommandLine=17'; do
+    out=$(printf '%s' "$payload" | jq '.toolCall={name:"run_command",args:{CommandLine:"date"}}' \
+      | jq "$filter" | primary_call PreToolUse)
+    [ -z "$out" ] || fail "rejected PreToolUse payload must be inert ($filter), got $out"
+  done
+  out=$(printf 'invalid JSON' | primary_call PreToolUse)
+  [ -z "$out" ] || fail 'invalid JSON must return an inert response'
   out=$(printf '%s' "$payload" | jq '.toolCall={name:"invoke_subagent",args:{}}' | primary_call PreToolUse)
   printf '%s' "$out" | jq -e '.decision == "deny"' >/dev/null || fail 'untracked delegation accepted'
   # A linked worker is outside primary scope, even with a primary hook copied
@@ -604,10 +618,16 @@ test_agy_primary_hooks() {
   payload=$(printf '%s' "$payload" | jq --arg root "$dir" '.workspacePaths=[$root]')
   touch "$dir/state/worker.meta"
   out=$(printf '%s' "$payload" | primary_call Stop)
-  [ "$out" = '{}' ] || fail 'primary hook ran in worker worktree'
+  [ -z "$out" ] || fail 'primary hook ran in worker worktree'
+  out=$(printf '%s' "$payload" | jq '.toolCall={name:"run_command",args:{CommandLine:"date"}}' | primary_call PreToolUse)
+  [ -z "$out" ] || fail "primary PreToolUse must be inert in a linked worker worktree, got $out"
+  out=$(printf '%s' "$payload" | jq '.toolCall={name:"invoke_subagent",args:{}}' | primary_call PreToolUse)
+  [ -z "$out" ] || fail 'out-of-scope tools must not run primary policies'
   printf 'secondmate\n' > "$dir/.fm-secondmate-home"
   out=$(printf '%s' "$payload" | primary_call Stop)
   printf '%s' "$out" | jq -e '.decision == "continue"' >/dev/null || fail 'secondmate omitted primary guard'
+  out=$(printf '%s' "$payload" | jq '.toolCall={name:"run_command",args:{CommandLine:"date"}}' | primary_call PreToolUse)
+  printf '%s' "$out" | jq -e '.decision == "ask"' >/dev/null || fail 'secondmate primary scope must retain native review'
   pass 'agy primary startup, guard, loop bound, pre-tool policies, and secondmate scope'
 }
 

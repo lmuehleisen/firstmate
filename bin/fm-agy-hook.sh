@@ -5,8 +5,9 @@
 #        fm-agy-hook.sh worker <PreInvocation|Stop> <state> <id> <gen> <worktree>
 #        fm-agy-hook.sh primary <PreInvocation|PreToolUse|Stop>
 #
-# Hook calls consume Agy's camelCase JSON on stdin and always return one JSON
-# object with exit 0. Invalid payloads are inert. Primary scope, startup nudges,
+# Hook calls consume Agy's camelCase JSON on stdin and exit 0, returning one
+# JSON object for an action or no stdout when inert. Invalid payloads are inert.
+# Primary scope, startup nudges,
 # turn-end predicates, and pre-tool decisions remain with their existing owners.
 # Stop executionNum > 0 maps to the shared one-continuation loop guard.
 # Agy's Stop does not fire on manual interruption; neither a key nor a rendered
@@ -86,83 +87,80 @@ esac
 event=${1:-}
 shift || usage
 payload=$(cat 2>/dev/null || true)
-empty() {
-  if [ "$event" = PreToolUse ]; then
-    printf '{"decision":"ask"}\n'
-  else
-    printf '{}\n'
-  fi
+inert() {
+  # Agy requires a decision when PreToolUse emits JSON; {} denies the call.
+  # No output leaves the native permission policy in control.
   exit 0
 }
-command -v jq >/dev/null 2>&1 || empty
-conversation=$(printf '%s' "$payload" | jq -er '.conversationId | select(type == "string")' 2>/dev/null) || empty
-token_valid "$conversation" || empty
+command -v jq >/dev/null 2>&1 || inert
+conversation=$(printf '%s' "$payload" | jq -er '.conversationId | select(type == "string")' 2>/dev/null) || inert
+token_valid "$conversation" || inert
 
 if [ "$MODE" = worker ]; then
   [ "$#" -eq 4 ] || usage
   state=$1 id=$2 gen=$3 wt=$4
-  token_valid "$id" || empty
-  token_valid "$gen" || empty
+  token_valid "$id" || inert
+  token_valid "$gen" || inert
   dir="$state/$id.agy-hooks"
-  [ ! -L "$dir" ] && [ -d "$dir" ] || empty
-  [ "$(cat "$dir/.firstmate-owned" 2>/dev/null)" = "$id" ] || empty
-  [ "$(cat "$state/$id.busy-gen" 2>/dev/null)" = "$gen" ] || empty
+  [ ! -L "$dir" ] && [ -d "$dir" ] || inert
+  [ "$(cat "$dir/.firstmate-owned" 2>/dev/null)" = "$id" ] || inert
+  [ "$(cat "$state/$id.busy-gen" 2>/dev/null)" = "$gen" ] || inert
   printf '%s' "$payload" | jq -e --arg wt "$wt" \
-    '.workspacePaths | type == "array" and index($wt) != null' >/dev/null 2>&1 || empty
+    '.workspacePaths | type == "array" and index($wt) != null' >/dev/null 2>&1 || inert
   binding="$dir/$gen.session"
-  [ ! -L "$binding" ] || empty
+  [ ! -L "$binding" ] || inert
   if [ "$event" = PreInvocation ] && [ ! -e "$binding" ]; then
     (set -C; printf '%s\n' "$conversation" > "$binding") 2>/dev/null || true
   fi
-  [ "$(cat "$binding" 2>/dev/null)" = "$conversation" ] || empty
+  [ "$(cat "$binding" 2>/dev/null)" = "$conversation" ] || inert
   case "$event" in
     PreInvocation)
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
         --source agy-hook --event pre-invocation >/dev/null 2>&1 || true
       ;;
     Stop)
-      printf '%s' "$payload" | jq -e '.fullyIdle == true' >/dev/null 2>&1 || empty
+      printf '%s' "$payload" | jq -e '.fullyIdle == true' >/dev/null 2>&1 || inert
       if "$SCRIPT_DIR/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" \
         --source agy-hook --event stop >/dev/null 2>&1; then
         touch "$state/$id.turn-ended" 2>/dev/null || true
       fi
       ;;
   esac
-  empty
+  inert
 fi
 
 [ "$#" -eq 0 ] || usage
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || empty
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || inert
 printf '%s' "$payload" | jq -e --arg root "$(cd "$FM_ROOT" && pwd -P)" \
-  '.workspacePaths | type == "array" and index($root) != null' >/dev/null 2>&1 || empty
+  '.workspacePaths | type == "array" and index($root) != null' >/dev/null 2>&1 || inert
 
 case "$event" in
   PreInvocation)
     # Injecting on later model invocations continually preempts pending tools.
     # Nudge only the opening invocation of a user/background execution cycle.
-    printf '%s' "$payload" | jq -e '.invocationNum == 0' >/dev/null 2>&1 || empty
+    printf '%s' "$payload" | jq -e '.invocationNum == 0' >/dev/null 2>&1 || inert
     nudge=$("$SCRIPT_DIR/fm-sessionstart-nudge.sh" 2>/dev/null || true)
-    [ -n "$nudge" ] || empty
+    [ -n "$nudge" ] || inert
     jq -n --arg text "$nudge" '{injectSteps:[{ephemeralMessage:$text}]}'
     ;;
   Stop)
     mapped=$(printf '%s' "$payload" | jq -ec '
       select((.executionNum | type) == "number" and .executionNum >= 0
         and .executionNum == (.executionNum | floor) and (.fullyIdle | type) == "boolean")
-      | {session_id:.conversationId, stop_hook_active:(.executionNum > 0)}' 2>/dev/null) || empty
+      | {session_id:.conversationId, stop_hook_active:(.executionNum > 0)}' 2>/dev/null) || inert
     result=$(printf '%s' "$mapped" | "$SCRIPT_DIR/fm-turnend-guard.sh" 2>&1)
     rc=$?
-    [ "$rc" -eq 2 ] || empty
+    [ "$rc" -eq 2 ] || inert
     jq -n --arg reason "$result" '{decision:"continue",reason:$reason}'
     ;;
   PreToolUse)
-    tool=$(printf '%s' "$payload" | jq -er '.toolCall.name | select(type == "string")' 2>/dev/null) || empty
+    tool=$(printf '%s' "$payload" | jq -er '.toolCall.name | select(type == "string")' 2>/dev/null) || inert
     result=$("$SCRIPT_DIR/fm-subagent-pretool-check.sh" --tool "$tool" --claude 2>&1)
     rc=$?
     if [ "$rc" -ne 2 ] && [ "$tool" = run_command ]; then
-      cmd=$(printf '%s' "$payload" | jq -er '.toolCall.args.CommandLine | select(type == "string")' 2>/dev/null) || empty
+      cmd=$(printf '%s' "$payload" | jq -er '.toolCall.args.CommandLine | select(type == "string")' 2>/dev/null) || inert
       result=$("$SCRIPT_DIR/fm-arm-pretool-check.sh" --command "$cmd" --claude 2>&1)
       rc=$?
       if [ "$rc" -ne 2 ]; then
@@ -175,9 +173,9 @@ case "$event" in
     else
       # The required ask decision preserves review and existing user grants.
       # Never emit decision=allow: that would bypass Agy's ordinary review.
-      empty
+      printf '{"decision":"ask"}\n'
     fi
     ;;
-  *) empty ;;
+  *) inert ;;
 esac
 exit 0
