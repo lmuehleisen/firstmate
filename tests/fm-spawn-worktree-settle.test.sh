@@ -302,6 +302,19 @@ test_post_acquisition_collision_never_returns_the_slot() {
   pass "a broken provider's colliding lease is retained and reported, never auto-returned"
 }
 
+test_pool_claim_with_unknown_project_refuses_before_get() {
+  local id=unknown-project-c7 old=unknown-owner-c8 out rc
+  make_claim_case unknown-project "$id"
+  fm_write_meta "$HOME_DIR/state/$old.meta" "project=$HOME_DIR" "worktree=$WT_DIR" "kind=ship"
+  if out=$(FM_FAKE_GET_LOG="$HOME_DIR/get.log" run_settle_spawn "$id"); then rc=0; else rc=$?; fi
+  [ "$rc" -ne 0 ] || fail "pool claim without a Git project identity was ignored"
+  assert_contains "$out" "$old" "unknown pool identity refusal omitted the claimant"
+  assert_contains "$out" "cannot establish the pool identity" "unknown pool identity hit an unrelated refusal"
+  assert_absent "$HOME_DIR/get.log" "unknown pool identity reached Treehouse"
+  assert_absent "$HOME_DIR/state/$id.meta" "unknown pool identity published metadata"
+  pass "a recorded pool slot with an unknown project still refuses before get"
+}
+
 test_two_spawns_serialize_acquisition_across_homes() {
   local id=race-first-c5 second=race-second-c6 first_home mate pid i rc out
   make_claim_case race "$id"
@@ -368,6 +381,7 @@ test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unleased_detached_claim_refuses_before_get
+test_pool_claim_with_unknown_project_refuses_before_get
 test_post_acquisition_collision_never_returns_the_slot
 test_two_spawns_serialize_acquisition_across_homes
 test_real_treehouse_lease_preserves_process_free_detached_work

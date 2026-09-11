@@ -935,7 +935,7 @@ SH
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
 # model/effort is invented for it even though its own project has no profile set.
 test_spawn_fallback_chain_and_crew_scout_unaffected() {
-  local w sm meta home proj wt fakebin launchlog id launch
+  local w sm meta home proj wt fakebin launchlog id launch out status
   w="$TMP_ROOT/spawn-fallback-and-crew"
   sm="$w/sm"
   launchlog="$w/launch.log"
@@ -959,6 +959,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   proj="$w/crew-project"
   wt="$w/crew-wt"
   fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
+  fm_fake_treehouse_lease "$fakebin"
   fm_git_worktree "$proj" "$wt" "wt-crew"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state"
   cat > "$home/data/$id/brief.md" <<'EOF'
@@ -970,12 +971,13 @@ Exercise an ordinary crew launch.
 Verify secondmate harness settings do not affect it.
 EOF
   : > "$launchlog"
-  PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+  out=$(PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off >/dev/null 2>&1
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off 2>&1); status=$?
+  expect_code 0 "$status" "crew-unaffected: ordinary crew spawn failed"$'\n'"$out"
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
   [ "$(meta_field "$meta" harness)" = codex ] || fail "crew-unaffected: crew harness resolution changed"

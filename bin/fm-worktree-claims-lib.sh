@@ -64,17 +64,20 @@ fm_worktree_require_leased_claims() {  # <own-meta> <state> <project-lock>
       [ -f "$meta" ] && [ ! -L "$meta" ] || continue
       [ ! "$meta" -ef "$own" ] || continue
       [ "$(fm_meta_get "$meta" backend)" != orca ] || continue
-      project=$(fm_meta_get "$meta" project)
-      lock=$(fm_treehouse_project_lock_path "$project") || {
-        echo "REFUSED: cannot establish the pool identity of task ${meta##*/}; inspect $meta before acquiring a slot." >&2
-        return 1
-      }
-      [ "$lock" = "$project_lock" ] || continue
       for field in worktree home; do
         slot=$(fm_meta_get "$meta" "$field")
         slot=$(fm_worktree_canonical_dir "$slot") || continue
         pool=$(dirname "$(dirname "$slot")")
         [ -e "$pool/treehouse-state.json" ] || [ -L "$pool/treehouse-state.json" ] || continue
+        # Non-pool homes need no allocator identity (a secondmate home may
+        # not be a Git checkout). A recorded pool slot with an unknown
+        # project still refuses: it could belong to this allocation.
+        project=$(fm_meta_get "$meta" project)
+        lock=$(fm_treehouse_project_lock_path "$project") || {
+          echo "REFUSED: cannot establish the pool identity of task ${meta##*/}; inspect $meta before acquiring a slot." >&2
+          return 1
+        }
+        [ "$lock" = "$project_lock" ] || continue
         if ! fm_worktree_durably_leased "$slot"; then
           echo "REFUSED: task ${meta##*/} still claims unleased pool slot $slot; refusing before treehouse get can reset its work." >&2
           echo "Complete its guarded teardown or reconcile its stale claim first; no pool operation was attempted." >&2

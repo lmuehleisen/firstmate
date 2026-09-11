@@ -143,6 +143,21 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
+# Abort cleanup may use either an explicit close or verified idle-shell
+# termination. Audit confirmed removal from the real server for both paths;
+# a command log alone cannot see the latter's signal-driven pane death.
+abort_task_dir=
+case "${1:-} ${2:-}" in
+  'pane get'|'pane close')
+    for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+      [ -f "$task_dir/task-pane" ] && [ ! -e "$task_dir/removal-observed" ] || continue
+      [ "${3:-}" = "$(cat "$task_dir/task-pane")" ] || continue
+      abort_task_dir=$task_dir
+      abort_focus_before=$(focus_snapshot || printf ambiguous/ambiguous)
+      break
+    done
+    ;;
+esac
 if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
   status=0
 else
@@ -187,6 +202,14 @@ fi
 if [ -n "$mutation" ]; then
   after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "$mutation_target" >> "$FOCUS_AUDIT_LOG"
+fi
+if [ -n "$abort_task_dir" ]; then
+  presence=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "${3:-}" 2>&1 || true)
+  if printf '%s' "$presence" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1; then
+    abort_focus_after=$(focus_snapshot || printf ambiguous/ambiguous)
+    printf 'pane-removed\t%s\t%s\t%s\n' "$abort_focus_before" "$abort_focus_after" "${3:-}" >> "$FOCUS_AUDIT_LOG"
+    : > "$abort_task_dir/removal-observed"
+  fi
 fi
 if [ "$refusal_probe" -eq 1 ]; then
   refusal_after=$(focus_snapshot || printf ambiguous/ambiguous)
@@ -357,7 +380,7 @@ assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name
 assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
   local start=$1 pane_id=$2 expected=$3
   sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v expected="$expected" '
-    $1 == "pane-close" && $4 == pane {
+    ($1 == "pane-close" || $1 == "pane-removed") && $4 == pane {
       saw_close = 1
       if ($2 != expected) { bad = 1 }
       else if ($3 == expected) { preserved = 1 }
@@ -880,13 +903,22 @@ ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  $1 == "pane-removed" && $4 == a { print "close-a" }
+  $1 == "pane-removed" && $4 == b { print "close-b" }
 ')
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
-  *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
+  *)
+    cat "$TMP_ROOT/abort-a.err" "$TMP_ROOT/abort-b.err" >&2
+    sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" >&2
+    fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE"
+    ;;
 esac
+ABORT_EXPLICIT_CLOSES=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
+  $1 == "pane-close" && ($4 == a || $4 == b) { count += 1 }
+  END { print count + 0 }
+')
+printf 'ok - abort removal audit: two confirmed removals, %s explicit pane closes\n' "$ABORT_EXPLICIT_CLOSES"
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "pane-close" && $4 != a && $4 != b)) && $2 != $3 { print }
 ')
