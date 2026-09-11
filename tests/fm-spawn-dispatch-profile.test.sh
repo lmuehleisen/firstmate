@@ -210,6 +210,9 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  # A distinct task receives a distinct lease, even when testing home spelling.
+  WT_DIR="$CASE_DIR/absolute-wt"
+  git -C "$PROJ_DIR" worktree add --quiet --detach "$WT_DIR"
   : > "$LAUNCH_LOG"
   out=$(
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
@@ -629,10 +632,38 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
   pass "Ultra is explicit for native Pi and Pi-signed, including direct-PR, and refuses unsupported profiles before provisioning"
 }
 
+prepare_batch_slots() {
+  local second="$CASE_DIR/batch-second"
+  git -C "$PROJ_DIR" worktree add --quiet --detach "$second"
+  printf '%s\n' "$WT_DIR" "$second" > "$FAKEBIN_DIR/lease-queue"
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux-base"
+  cat > "$FAKEBIN_DIR/tmux" <<'SH'
+#!/usr/bin/env bash
+dir=$(dirname "$0")
+if [ -s "$dir/lease-current" ]; then
+  FM_FAKE_PANE_PATH=$(cat "$dir/lease-current")
+  export FM_FAKE_PANE_PATH
+fi
+exec "$dir/tmux-base" "$@"
+SH
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ]; then
+  dir=$(dirname "$0")
+  head -n 1 "$dir/lease-queue" > "$dir/lease-current"
+  tail -n +2 "$dir/lease-queue" > "$dir/lease-next"
+  mv "$dir/lease-next" "$dir/lease-queue"
+  cat "$dir/lease-current"
+fi
+SH
+  chmod +x "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/treehouse"
+}
+
 test_batch_preserves_native_ultra() {
   local rec id1=ultra-batch-a id2=ultra-batch-b out launch
   rec=$(make_spawn_case ultra-batch pi "$id1" "$id2")
   read_case_record "$rec"
+  prepare_batch_slots
   enable_dispatch_profile "$HOME_DIR"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)
@@ -792,6 +823,7 @@ test_batch_forwards_shared_profile_flags() {
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
+  prepare_batch_slots
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \

@@ -1400,6 +1400,22 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_refuses_another_tasks_worktree_claim() {
+  local dir out rc
+  dir=$(new_case shared-claim rl43)
+  add_ship_task "$dir" rl43 claude
+  printf 'zsh' > "$dir/fake/command"
+  fm_write_meta "$dir/home/state/other-claim.meta" \
+    "project=$dir/proj" "worktree=$dir/wt" "kind=ship"
+  if out=$(run_spawn "$dir" rl43 --relaunch --harness claude); then rc=0; else rc=$?; fi
+  expect_code 1 "$rc" "relaunch must refuse another task's claim"
+  assert_contains "$out" other-claim "relaunch refusal must name the other claimant"
+  assert_present "$dir/home/state/rl43.meta" "relaunch refusal lost its own record"
+  assert_present "$dir/home/state/other-claim.meta" "relaunch refusal lost the competing record"
+  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "relaunch started a worker in a contested copy"
+  pass "fm-spawn --relaunch: reuses its own claim but refuses a competing task's claim"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1602,6 +1618,7 @@ test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
+test_spawn_relaunch_refuses_another_tasks_worktree_claim
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close

@@ -144,14 +144,11 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
         || fail "spawn did not refresh the genuine scout copy"
     else
       [ "$status" -ne 0 ] || fail "linked spawning home accepted $returned as a disposable copy"
-      # None of these is an isolated copy, so the worktree poll never adopts one
-      # and the wait runs out instead: the spawning directory fails the poll's
-      # own project comparison, and the repository primary (named directly or
-      # through a symlink) fails the isolation screen the poll shares with the
-      # guard. The refusal names the last path the pane reported.
-      assert_contains "$out" "did not enter an isolated worktree" \
+      # The provider returns an exact path before the pane changes directory,
+      # so isolation is rejected immediately, before any cd or base refresh.
+      assert_contains "$out" "did not yield an isolated worktree" \
         "spawn did not explain its isolation refusal"
-      assert_contains "$out" "last seen" "refusal did not name the path the pane reported"
+      assert_contains "$out" "$POOL_DIR" "refusal did not name the provider's path"
       [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
       [ ! -e "$primary/.git/FETCH_HEAD" ] || fail "refused spawn fetched before proving isolation"
     fi
@@ -185,6 +182,10 @@ test_stale_pool_base_refreshes_before_branching() {
 
   id='pool-current-base-repeat-r1'
   fm_test_spawn_brief "$HOME_DIR" "$id"
+  # The first task still owns its lease. Give the next task a different slot
+  # already at the current base, so repeated refresh does not model a collision.
+  POOL_DIR="$CASE_DIR/pool-repeat"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$POOL_DIR" "$current"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"
@@ -528,6 +529,10 @@ strand_submodule_pin_via_spawn() {  # <seed-id>
     || fail "the first spawn did not move the pooled base across the moved submodule pin"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
     || fail "the first spawn did not strand the submodule on the pin the old base recorded"
+  # This fixture models an unclaimed legacy slot carrying that residue. A
+  # recorded owner's slot now refuses earlier at the acquisition claim guard,
+  # which has its own collision regressions in fm-spawn-worktree-settle.test.sh.
+  rm -f "$HOME_DIR/state/$id.meta"
 }
 
 test_stale_submodule_pin_explains_itself() {

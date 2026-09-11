@@ -1366,6 +1366,10 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
+    bin/fm-worktree-claims-lib.sh)
+      printf '%s\n' "__script__:fm-spawn-worktree-settle.test.sh"
+      printf '%s\n' "__script__:fm-teardown-endpoint-safety.test.sh"
+      ;;
     bin/fm-control-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' session-bootstrap
