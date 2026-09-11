@@ -26,6 +26,15 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
+LEASE_TEST_TMUX_SOCKET=
+LEASE_TEST_TMUX_BIN=
+cleanup_settle() {
+  if [ -n "$LEASE_TEST_TMUX_SOCKET" ]; then
+    "$LEASE_TEST_TMUX_BIN" -L "$LEASE_TEST_TMUX_SOCKET" kill-server 2>/dev/null || true
+  fi
+  fm_test_cleanup
+}
+trap cleanup_settle EXIT
 
 # make_settle_fakebin <dir> builds a fake tmux whose `#{pane_current_path}`
 # query returns FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
@@ -60,8 +69,9 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_LEASE_ENV_LOG:-}" ]; then
       for arg in "$@"; do
         case "$arg" in
-          'export TREEHOUSE_DIR='*)
-            /bin/bash -c "$arg; printenv TREEHOUSE_DIR" > "$FM_FAKE_LEASE_ENV_LOG"
+          '(cd -- '*)
+            printf '%s\n' "$arg" > "$FM_FAKE_LEASE_ENV_LOG.command"
+            (cd "$FM_FAKE_PROJECT_PATH" && SHELL="$(dirname "$0")/lease-shell-probe" /bin/bash -c "$arg; pwd -P") > "$FM_FAKE_LEASE_ENV_LOG"
             ;;
         esac
       done
@@ -71,6 +81,12 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/lease-shell-probe" <<'SH'
+#!/usr/bin/env bash
+printenv TREEHOUSE_DIR
+pwd -P
+SH
+  chmod +x "$fakebin/lease-shell-probe"
   fm_fake_treehouse_lease "$fakebin"
   printf '%s\n' "$fakebin"
 }
@@ -118,7 +134,7 @@ run_settle_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
+    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" FM_FAKE_PROJECT_PATH="$PROJ_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -161,10 +177,46 @@ test_already_settled_pane_costs_one_confirm_read() {
     "meta did not record the already-settled worktree"
   assert_absent "$HOME_DIR/state/$id.treehouse-lease" "committed dispatch retained an unresolved receipt"
   assert_present "$HOME_DIR/lease-env" "lease launch did not set its slot environment"
-  [ "$(cat "$HOME_DIR/lease-env")" = "$WT_DIR" ] || fail "lease launch inherited another slot's TREEHOUSE_DIR"
+  [ "$(sed -n '1p' "$HOME_DIR/lease-env")" = "$WT_DIR" ] || fail "lease launch inherited another slot's TREEHOUSE_DIR"
+  [ "$(sed -n '2p' "$HOME_DIR/lease-env")" = "$WT_DIR" ] || fail "lease child shell did not enter its worktree"
+  [ "$(sed -n '3p' "$HOME_DIR/lease-env")" = "$PROJ_DIR" ] || fail "lease launch moved the outer shell into the worktree"
   reads=$(cat "$COUNTFILE")
   [ "$reads" -eq 2 ] || fail "already-settled pane took $reads reads to confirm - expected the first read plus one confirmation"
   pass "an already-settled pane confirms on the next read, not a whole extra cycle"
+}
+
+test_real_pane_survives_lease_child_exit() {
+  local rec id=lease-shell-c9 out command target path i
+  LEASE_TEST_TMUX_BIN=$(command -v tmux || true)
+  [ -n "$LEASE_TEST_TMUX_BIN" ] || { echo "skip: tmux not found for real lease shell boundary"; return 0; }
+  rec=$(make_settle_case lease-shell "$id" 0)
+  read_settle_record "$rec"
+  out=$(FM_FAKE_LEASE_ENV_LOG="$HOME_DIR/lease-env" run_settle_spawn "$id") \
+    || fail "lease shell fixture spawn failed: $out"
+  command=$(cat "$HOME_DIR/lease-env.command")
+  LEASE_TEST_TMUX_SOCKET="fm-lease-shell-$$"
+  target=lease-shell:0.0
+  "$LEASE_TEST_TMUX_BIN" -L "$LEASE_TEST_TMUX_SOCKET" -f /dev/null new-session -d -s lease-shell -c "$PROJ_DIR" /bin/bash \
+    || fail "could not create the private tmux shell fixture"
+  "$LEASE_TEST_TMUX_BIN" -L "$LEASE_TEST_TMUX_SOCKET" send-keys -t "$target" -l "SHELL=/bin/bash; $command"
+  "$LEASE_TEST_TMUX_BIN" -L "$LEASE_TEST_TMUX_SOCKET" send-keys -t "$target" Enter
+  for ((i=0; i<100; i++)); do
+    path=$("$LEASE_TEST_TMUX_BIN" -L "$LEASE_TEST_TMUX_SOCKET" display-message -p -t "$target" '#{pane_current_path}')
+    [ "$path" != "$WT_DIR" ] || break
+    sleep 0.1
+  done
+  [ "$path" = "$WT_DIR" ] || fail "real pane did not enter the lease child shell"
+  "$LEASE_TEST_TMUX_BIN" -L "$LEASE_TEST_TMUX_SOCKET" send-keys -t "$target" -l exit
+  "$LEASE_TEST_TMUX_BIN" -L "$LEASE_TEST_TMUX_SOCKET" send-keys -t "$target" Enter
+  for ((i=0; i<100; i++)); do
+    path=$("$LEASE_TEST_TMUX_BIN" -L "$LEASE_TEST_TMUX_SOCKET" display-message -p -t "$target" '#{pane_current_path}' 2>/dev/null || true)
+    [ "$path" != "$PROJ_DIR" ] || break
+    sleep 0.1
+  done
+  [ "$path" = "$PROJ_DIR" ] || fail "exiting the lease shell removed the pane before guarded backend cleanup"
+  "$LEASE_TEST_TMUX_BIN" -L "$LEASE_TEST_TMUX_SOCKET" kill-server
+  LEASE_TEST_TMUX_SOCKET=
+  pass "a real pane survives lease child exit with its outer shell still in the project"
 }
 
 # make_primary_case <name> <id> <stale_reads> builds the linked-home shape: the
@@ -378,6 +430,7 @@ test_real_treehouse_lease_preserves_process_free_detached_work() {
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
+test_real_pane_survives_lease_child_exit
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unleased_detached_claim_refuses_before_get

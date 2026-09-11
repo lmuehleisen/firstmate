@@ -39,6 +39,7 @@ On 2026-09-10, Treehouse v2.0.0 (build revision `68fa3d2556542add76bf80255787b86
 In an isolated local pool, a process-free leased slot kept its clean detached unlanded commit and file while a second lease acquired a different slot.
 The same suite drives the real spawn entry point with fake providers and endpoints to verify refusal before acquisition for an unleased recorded claim, cross-home project-lock contention, and preservation of a colliding lease without automatic return.
 It also refuses a recorded pool slot whose project identity cannot be established; `tests/fm-secondmate-harness.test.sh` checks that an unrelated non-Git secondmate home does not block an ordinary crew spawn.
+The generated lease command is also exercised in a real private tmux pane: the child enters the worktree, and exiting it leaves the outer project shell alive for guarded backend cleanup.
 `bin/fm-spawn.sh` owns acquisition and receipt mechanics; `bin/fm-worktree-claims-lib.sh` owns the shared local-home claim inventory.
 
 `tests/fm-teardown-endpoint-safety.test.sh` verifies record-only recovery without reset, return, branch deletion, or endpoint termination, followed by ordinary cleanup of the remaining owner.

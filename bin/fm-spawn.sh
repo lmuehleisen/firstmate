@@ -124,8 +124,10 @@
 #   authorizes automatic return/reset. A partial or empty receipt is unresolved,
 #   not proof no lease exists. This script never edits Treehouse's own state.
 #   The exact returned path is checked for isolation and competing local-home
-#   claims before the pane enters it and receives its own TREEHOUSE_DIR, replacing
-#   any inherited parent-slot value. Teardown holds the same project lock
+#   claims before a child shell enters it with its own TREEHOUSE_DIR, replacing
+#   any inherited parent-slot value. The pane's outer shell stays in the project,
+#   so cwd-based process reaping cannot bypass guarded backend pane cleanup.
+#   Child-shell exit never resets or releases the lease. Teardown holds the same project lock
 #   through release; relaunch keeps its existing lease and control-lock scope.
 #   The root comes from fm_firstmate_root_home, including remote-seeded homes;
 #   contention refuses rather than waits.
@@ -3261,10 +3263,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   fi
   acquired_wt_real=$(real_path_or_raw "$WT")
-  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")"
-  # Preserve the interactive provider's slot environment. Treehouse return
-  # without an explicit path prefers TREEHOUSE_DIR over cwd.
-  spawn_send_text_line "$WT_TARGET" "export TREEHOUSE_DIR=$(shell_quote "$WT")"
+  # Preserve the interactive provider's child-shell boundary: the pane's
+  # outer shell stays in the project while the worker shell owns the slot.
+  # Teardown reaps cwd-owned processes before the backend's focus-safe pane
+  # close; cd in the outer shell would kill the pane before that guard runs.
+  # Exiting this child never returns/resets the lease. Also bind TREEHOUSE_DIR:
+  # Treehouse return without an explicit path prefers it over cwd.
+  spawn_send_text_line "$WT_TARGET" "(cd -- $(shell_quote "$WT") && export TREEHOUSE_DIR=$(shell_quote "$WT") && exec \"\${SHELL:-/bin/sh}\")"
 
   # Verify the pane entered the exact leased path, using its stable endpoint.
   # Two consecutive isolated reads must agree with the provider's result: tmux
