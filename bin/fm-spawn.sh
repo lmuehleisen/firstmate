@@ -129,6 +129,10 @@
 #   so cwd-based process reaping cannot bypass guarded backend pane cleanup.
 #   Child-shell exit never resets or releases the lease. Teardown holds the same project lock
 #   through release; relaunch keeps its existing lease and control-lock scope.
+#   Herdr's existing journal recovery also keeps the recorded worktree, with
+#   control/meta locks and the existing session-locked endpoint proof. It never
+#   acquires or freshens a replacement copy; after endpoint recovery it uses
+#   relaunch's wiring and record publication, preserving existing task fields.
 #   The root comes from fm_firstmate_root_home, including remote-seeded homes;
 #   contention refuses rather than waits.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
@@ -919,6 +923,7 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_TREEHOUSE_RECEIPT=
+HERDR_RECLAIM_WT=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -2345,20 +2350,59 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
-    echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
-    exit 1
-  }
-  if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
-    echo "error: another Treehouse slot allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
-    exit 1
-  fi
-  SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
   if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
-    echo "REFUSED: task $ID already has a record; use --relaunch or guarded teardown before a fresh acquisition, which would orphan its existing worktree or lease." >&2
-    exit 1
+    # Herdr's existing presentation recovery replaces a stopped task's exact
+    # endpoint. It is record replacement, never another slot acquisition.
+    # Like --relaunch, keep its control/meta locks and recorded path throughout;
+    # the backend's session-locked identity and death proofs still run below.
+    if [ "$BACKEND" != herdr ] || [ ! -f "$STATE/$ID.herdr-presentation" ]; then
+      echo "REFUSED: task $ID already has a record; use --relaunch or guarded teardown before a fresh acquisition, which would orphan its existing worktree or lease." >&2
+      exit 1
+    fi
+    SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
+    fm_lock_try_acquire "$SPAWN_CONTROL_LOCK" || {
+      echo "error: another lifecycle action is already running for task $ID" >&2
+      exit 1
+    }
+    SPAWN_CONTROL_LOCK_HELD=1
+    RELAUNCH_META="$STATE/$ID.meta"
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$RELAUNCH_META") || exit 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+    fm_backlog_record_present "$RELAUNCH_META" "task record" "$STATE" || exit 1
+    fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
+    if [ "$FM_BACKEND_VALIDATED_BACKEND" != herdr ] \
+       || [ "$(fm_meta_get "$RELAUNCH_META" kind)" != "$KIND" ] \
+       || [ "$(fm_meta_get "$RELAUNCH_META" mode)" != "$MODE" ] \
+       || [ "$(fm_meta_get "$RELAUNCH_META" yolo)" != "$YOLO" ] \
+       || [ "$(fm_worktree_canonical_dir "$(fm_meta_get "$RELAUNCH_META" project)")" != "$(fm_worktree_canonical_dir "$PROJ_ABS")" ]; then
+      echo "REFUSED: Herdr recovery must preserve task $ID's recorded backend, kind, project, and delivery contract." >&2
+      exit 1
+    fi
+    HERDR_RECLAIM_WT=$(fm_worktree_canonical_dir "$(fm_meta_get "$RELAUNCH_META" worktree)") || {
+      echo "REFUSED: task $ID's recorded worktree is missing; recovery cannot allocate a replacement for its work." >&2
+      exit 1
+    }
+    RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+    [ -n "$RELAUNCH_PRIOR_HARNESS" ] || exit 1
+    fm_worktree_claims_for_path "$RELAUNCH_META" "$STATE" "$HERDR_RECLAIM_WT" || exit 1
+    if [ "${#FM_WORKTREE_CLAIMS[@]}" -gt 0 ]; then
+      echo "REFUSED: cannot recover $ID into $HERDR_RECLAIM_WT while other tasks still claim it: ${FM_WORKTREE_CLAIMS[*]}." >&2
+      exit 1
+    fi
   fi
-  fm_worktree_require_leased_claims "$STATE/$ID.meta" "$STATE" "$SPAWN_TREEHOUSE_PROJECT_LOCK" || exit 1
+  if [ -z "$HERDR_RECLAIM_WT" ]; then
+    SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
+      echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
+      exit 1
+    }
+    if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+      echo "error: another Treehouse slot allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
+      exit 1
+    fi
+    SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+    fm_worktree_require_leased_claims "$STATE/$ID.meta" "$STATE" "$SPAWN_TREEHOUSE_PROJECT_LOCK" || exit 1
+  fi
   if [ -e "$STATE/$ID.treehouse-lease" ] || [ -L "$STATE/$ID.treehouse-lease" ]; then
     echo "error: task $ID has an unresolved lease receipt at $STATE/$ID.treehouse-lease; inspect the prior acquisition before retrying" >&2
     exit 1
@@ -2743,6 +2787,15 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       ;;
   esac
 }
+
+if [ -n "$HERDR_RECLAIM_WT" ]; then
+  WT=$HERDR_RECLAIM_WT
+  validate_spawn_worktree "Herdr recorded worktree recovery" "$FM_BACKEND_VALIDATED_TARGET"
+  fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE" || {
+    echo "REFUSED: task $ID's Herdr presentation recovery is disabled; use --relaunch for its recorded endpoint." >&2
+    exit 1
+  }
+fi
 
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
@@ -3240,22 +3293,26 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  # Acquire outside the pane: --lease has a bare-path stdout contract, so the
-  # exact provider result is known before any cd, refresh, or worker launch.
-  # Preserve the receipt on every failure. Release and even an interactive get
-  # subshell's exit reset work; neither is a safe automatic rollback.
-  SPAWN_TREEHOUSE_RECEIPT="$STATE/$ID.treehouse-lease"
-  ( set -C; : > "$SPAWN_TREEHOUSE_RECEIPT" ) || exit 1
-  if ! ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$FM_HOME:$ID" ) >> "$SPAWN_TREEHOUSE_RECEIPT"; then
-    echo "error: Treehouse lease acquisition failed; retained $SPAWN_TREEHOUSE_RECEIPT for inspection; no automatic return attempted" >&2
-    exit 1
+  if [ -n "$HERDR_RECLAIM_WT" ]; then
+    WT=$HERDR_RECLAIM_WT
+  else
+    # Acquire outside the pane: --lease has a bare-path stdout contract, so the
+    # exact provider result is known before any cd, refresh, or worker launch.
+    # Preserve the receipt on every failure. Release and even an interactive get
+    # subshell's exit reset work; neither is a safe automatic rollback.
+    SPAWN_TREEHOUSE_RECEIPT="$STATE/$ID.treehouse-lease"
+    ( set -C; : > "$SPAWN_TREEHOUSE_RECEIPT" ) || exit 1
+    if ! ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$FM_HOME:$ID" ) >> "$SPAWN_TREEHOUSE_RECEIPT"; then
+      echo "error: Treehouse lease acquisition failed; retained $SPAWN_TREEHOUSE_RECEIPT for inspection; no automatic return attempted" >&2
+      exit 1
+    fi
+    WT=$(cat "$SPAWN_TREEHOUSE_RECEIPT")
+    echo "spawn: lease receipt $SPAWN_TREEHOUSE_RECEIPT is retained until dispatch commits; failures never auto-return the slot" >&2
+    [ -n "$WT" ] || {
+      echo "error: treehouse get --lease returned no worktree path; inspect $SPAWN_TREEHOUSE_RECEIPT before recovery; no automatic return attempted" >&2
+      exit 1
+    }
   fi
-  WT=$(cat "$SPAWN_TREEHOUSE_RECEIPT")
-  echo "spawn: lease receipt $SPAWN_TREEHOUSE_RECEIPT is retained until dispatch commits; failures never auto-return the slot" >&2
-  [ -n "$WT" ] || {
-    echo "error: treehouse get --lease returned no worktree path; inspect $SPAWN_TREEHOUSE_RECEIPT before recovery; no automatic return attempted" >&2
-    exit 1
-  }
   validate_spawn_worktree "treehouse get --lease" "$T"
   fm_worktree_claims_for_path "$STATE/$ID.meta" "$STATE" "$WT" || exit 1
   if [ "${#FM_WORKTREE_CLAIMS[@]}" -gt 0 ]; then
@@ -3303,6 +3360,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+if [ -n "$HERDR_RECLAIM_WT" ]; then
+  # Endpoint recovery is complete. From here reuse the existing relaunch
+  # wiring/publication path: retain prior metadata on failure, preserve its
+  # non-owned fields, and never freshen/reset the task's existing work.
+  RELAUNCH=1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
