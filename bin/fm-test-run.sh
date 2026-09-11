@@ -255,7 +255,7 @@ cpu_count() {
 # lands in `unclassified` and stays serial until someone proves it.
 family_for_basename() {
   case "$1" in
-    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
+    fm-agy-harness.test.sh|fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
@@ -323,7 +323,7 @@ family_for_basename() {
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
-    fm-agy-signals-live-e2e.test.sh|\
+    fm-agy-signals-live-e2e.test.sh|fm-agy-primary-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
@@ -1321,6 +1321,11 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-agy-hook.sh|.agents/hooks.json|tests/agy-primary-live-probe.py)
+      printf '%s\n' __script__:fm-agy-harness.test.sh
+      printf '%s\n' __script__:fm-agy-signals-live-e2e.test.sh
+      printf '%s\n' __script__:fm-agy-primary-live-e2e.test.sh
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

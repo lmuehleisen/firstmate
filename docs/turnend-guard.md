@@ -69,6 +69,8 @@ Every other direct `FM_GUARD_GRACE` reader (`bin/fm-guard.sh`, the strict-watche
 
 ## Harness integrations
 
+- Agy registers native `Stop` in `.agents/hooks.json`; `bin/fm-agy-hook.sh` maps `executionNum > 0` to the shared loop guard and translates exit 2 into `decision: "continue"` with the recovery reason.
+  Native background-command completion begins a fresh execution, so normal watcher wakes do not consume the one-recovery-continuation budget of a prior execution.
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
@@ -163,6 +165,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Compatibility limits
 
+- Agy does not emit `Stop` on manual interruption; that boundary is unguarded, as on omp, and lifecycle control makes no semantic cancellation claim.
+- Agy primary supervision is interactive only; its headless streaming protocol has no verified Firstmate primary integration.
 - Child crewmate and scout worktrees are outside scope.
 - A valid secondmate home is in scope; an idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
 - The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.

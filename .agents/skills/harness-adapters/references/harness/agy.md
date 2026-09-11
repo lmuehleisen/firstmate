@@ -1,8 +1,8 @@
 # agy (Antigravity CLI)
 
 Google's Antigravity CLI, verified end to end on 2026-09-10 with agy 1.2.0 on macOS.
-Launch shape: `agy --mode accept-edits --model <model> --effort <level> --add-dir <worktree> --add-dir <state> --add-dir <brief-dir> -i "<brief>"`.
-Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it, and the router owns that boundary.
+Verified for interactive primary, secondmate, crewmate, and scout work.
+`../../../../../bin/fm-spawn.sh` owns the concrete launch and grant mechanics.
 agy self-updates aggressively and without asking - it moved 1.1.25 -> 1.1.28 -> 1.2.0 during the session that verified it - so treat every version-scoped fact here as refreshable rather than settled, and re-run the live guard after an upgrade.
 
 ## Operating facts
@@ -13,16 +13,16 @@ agy self-updates aggressively and without asking - it moved 1.1.25 -> 1.1.28 -> 
 | Launch | `-i "<prompt>"` runs the opening prompt and KEEPS the interactive session. `-p` is a one-shot headless run and is never used for a worker. |
 | Directory grants | `--add-dir`, repeatable, and MANDATORY - see "The worktree grant" below. |
 | Approvals | No reviewed-auto mode. `--mode accept-edits` covers file edits only; shell commands always prompt. See "Approvals" below. |
-| Busy state | None. agy has no working hook surface and no wired semantic source, so state comes from the runtime backend's own agent-state classifier (`bin/backends/tmux.sh`). |
+| Busy state | `agy-hook`: PreInvocation opens; fullyIdle Stop closes. The worker binds its generation and main conversation; interruption emits no Stop and conservatively leaves busy. |
 | Rendered tail | Not a state source, but the running turn's footer is the one ASCII busy token: `esc to cancel` while a turn runs, `? for shortcuts` when idle. The right of the footer names the active mode and model, e.g. `accept-edits · Gemini 3.8 Flash · medium`. |
-| Turn end | None. See "No turn-end hook" below. |
+| Turn end | Native Stop; see "Native hooks and primary integration" below. |
 | Exit | `/exit` (alias `quit`), one Enter; prints `Resume with -c (or command below): agy --conversation=<uuid>`. |
 | Interrupt | Single `Escape`, which prints `Interrupted · What should Antigravity CLI do instead?` and leaves the composer EMPTY, so no clear key is needed. |
 | Resume | `agy -c` / `--continue` for the most recent conversation, or `agy --conversation=<uuid>` from the id printed at exit. |
 | Models | `--model <model>`; `agy models` lists the account's ids. Effort is also encoded as a model-id suffix - see "Model and effort". |
 | Effort | `--effort low|medium|high` ONLY; anything above is refused. See "Model and effort". |
 | Marker | `JETSKI_APP_DATA_DIR=antigravity-cli` on tool subprocesses, alongside `ANTIGRAVITY_LS_VERSION=cli-<version>`, `ANTIGRAVITY_PROJECT_ID`, `ANTIGRAVITY_TRAJECTORY_ID`, `ANTIGRAVITY_LS_ADDRESS`, and `ANTIGRAVITY_SOURCE_METADATA`. agy does NOT set `GEMINI_CLI`. |
-| Composer | Bordered `>` prompt. Under accept-edits it carries the ghost placeholder `Accept-edits mode: file edits auto-approved (shift+tab to cycle)`. |
+| Composer | `>` between solid rules and the native footer; `../../../../../bin/fm-composer-lib.sh` owns shape and placeholder classification. |
 | Skill | `/<skill>`; typing `/` opens a filtered command menu and ONE Enter selects and submits. |
 | Config | Global user settings at `~/.gemini/antigravity-cli/settings.json`; shared customization (hooks, skills, plugins, per-project settings) under `~/.gemini/config/`. Firstmate writes none of it. |
 
@@ -46,7 +46,7 @@ A resolved grant also keeps agy's workspace-trust dialog off the launch path ent
 That dialog is not merely an extra keystroke: accepting it appends the path to `trustedWorkspaces` in the operator's own global settings, so a launch that raises it grows a file Firstmate does not own, once per task worktree, forever.
 Trust is not inherited from a parent directory, so every fresh worktree would raise it.
 
-`../../../../../bin/fm-spawn.sh` grants the worktree, this home's state directory, and the brief's directory, each resolved.
+`../../../../../bin/fm-spawn.sh` owns the resolved directory grants, including the worker hook directory.
 
 ## Approvals
 
@@ -99,24 +99,37 @@ An operator who wants a quieter agy worker can add their own allow rules there d
 
 Headless `-p` runs behave differently and are not the worker path: a tool needing approval is auto-denied with a stderr notice naming the missing rule, and the run still exits 0.
 
-## No turn-end hook
+## Native hooks and primary integration
 
-agy's hook surface loads but does not execute.
-`~/.gemini/config/hooks.json` is read and `/hooks` lists its entries as `enabled`, yet neither a `Stop` hook on completed turns nor a `PreToolUse` hook on a tool that actually ran ever fired - headless or interactive.
-A workspace-local `<workspace>/.agents/hooks.json`, which agy's own release notes document, is not loaded at all.
-`enable_json_hooks` appears in the binary as a feature flag, so this may be gated rather than absent.
+The working hook schema is a named definition in `.agents/hooks.json`, with direct handlers for PreInvocation and Stop and matcher groups for PreToolUse.
+Hooks run from the customization directory containing that file, so the tracked primary registration addresses its executable relative to `.agents/`.
+Local hooks in a separately granted directory also execute; `../../../../../bin/fm-agy-hook.sh` uses that capability to keep worker hooks in owned state without modifying project or global configuration.
+The earlier no-hook conclusion is superseded by the positive live guards.
 
-So agy installs no hook and mints no per-task wiring: there is nothing for a relaunch to retire, and `state/<id>.turn-ended` is never written.
-This is the muse precedent, minus muse's session-log fold: agy tasks have no semantic busy record at all, and their state comes from the backend's agent-state classifier.
-Because that classifier is the ONLY state source for an agy task, `bin/backends/tmux.sh` must recognize the `agy` process name; without it every control verb refuses on an `ambiguous` endpoint.
+Primary support composes the existing startup nudge, shared pre-tool policies, and turn-end predicate through the native transport.
+`../../../../../docs/sessionstart-nudge.md` owns the nudge tier and unverified compaction boundary.
+`../../../../../docs/turnend-guard.md` owns Stop continuation, its executionNum loop bound, and the manual-interruption gap.
+`../../../../../docs/supervision-protocols/agy.md` owns the verified native background-command wake protocol.
+A completed native command re-enters the model automatically.
+The session-lock owner recognizes the exact agy process, including the long-lived language-server process that parents hook and tool commands.
 
-The absence of a turn-end signal, together with the absence of a reviewed-auto approval mode, is why agy is refused for secondmate and primary work: both are exactly what unattended supervision depends on.
-agy does keep a durable per-conversation transcript at `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl`, whose records carry `step_index`, `source`, `type`, `status`, and `created_at`, with `history.jsonl` mapping workspace to conversation id.
-That is a plausible future busy source in the shape of muse's and cursor's, but it is recorded here as an observation only; nothing folds it today.
+Worker hooks report through the semantic busy owner and emit turn-ended notifications only after an accepted fullyIdle Stop.
+PreInvocation may repeat during a turn, and Stop with fullyIdle=false does not clear busy while background work remains.
+Escape supplies no semantic cancellation acknowledgement; lifecycle control reports delivery and endpoint liveness only.
+Missing or invalid hook data never manufactures idle.
+
+Composer delivery needs the native footer or accept-edits mode cell as well as the rule pair and prompt.
+An unstyled accept-edits hint, a manual-mode row with no identifying footer, and rendered busy-only acknowledgement of a queued Enter remain unproven; the adapter does not manufacture a successful delivery for them.
+Native background-task observation uses the returned log with `view_file`; delegation-shaped native tools retain the shared pre-tool guard.
+
+Unsupported surfaces remain explicit: headless primary supervision, native SessionStart and compaction refresh, semantic interrupt completion, automatic shell approval, and a quota-provider mapping in the optional `fm-quota-choose.sh` helper are not supported by this integration.
+Use the current Agy catalog and agent-side quota procedure instead of inferring its provider from another Google harness.
+Runtime backend lifecycle guarantees remain those of each backend's capability table; the live verification here covers tmux on macOS.
+Remote secondmate launch and relaunch remain unsupported and are refused by `../../../../../bin/fm-remote-secondmate-control.sh`; that Herdr-only path is separate from the verified local secondmate integration.
 
 ## Model and effort
 
-The captain's named model is `gemini-3.8-flash`, and `../../../../../bin/fm-spawn.sh` passes whatever model it is given rather than pinning one.
+`../../../../../bin/fm-spawn.sh` passes the selected model without pinning a default.
 
 Effort is published TWICE and the two forms conflict:
 
@@ -146,4 +159,5 @@ Treat it as another reason an agy pane can sit idle-looking with work outstandin
 ## Verification
 
 `../../../../../docs/verification/runtime-backends.md` owns the dated evidence.
-`tests/fm-agy-harness.test.sh` is the portable regression; `tests/fm-agy-signals-live-e2e.test.sh` is the credentialed live guard (`FM_AGY_SIGNALS_LIVE=1`) that refreshes these facts against the installed binary.
+`tests/fm-agy-harness.test.sh` is the portable regression.
+The credentialed guards are `tests/fm-agy-signals-live-e2e.test.sh` (`FM_AGY_SIGNALS_LIVE=1`) and `tests/fm-agy-primary-live-e2e.test.sh` (`FM_AGY_PRIMARY_LIVE=1`).

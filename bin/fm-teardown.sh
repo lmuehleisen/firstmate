@@ -3446,6 +3446,9 @@ remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+if [ -e "$STATE/$ID.agy-hooks" ] || [ -L "$STATE/$ID.agy-hooks" ]; then
+  "$SCRIPT_DIR/fm-agy-hook.sh" retire-worker "$STATE" "$ID" || exit 1
+fi
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" "$STATE/$ID.treehouse-lease" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \

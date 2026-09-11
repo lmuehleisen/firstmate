@@ -95,7 +95,7 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, agy, and rovo
+# Which task kinds an adapter is verified to run. muse, gemini, and rovo
 # are crewmate/scout adapters only: none has a primary supervision protocol,
 # and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
@@ -105,7 +105,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|agy|rovo) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -250,6 +250,9 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # is written into the worktree, whose own .gemini/settings.json belongs to
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
+    # The directory and per-generation session bindings are retired through
+    # fm-agy-hook.sh retire-worker; only this file is a flat wiring artifact.
+    agy) printf '%s\n' "$state/$id.agy-hooks/.agents/hooks.json" ;;
   esac
 }
 

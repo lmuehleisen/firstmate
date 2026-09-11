@@ -306,15 +306,12 @@
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse and gemini are crewmate/scout only and are refused for --secondmate.
-# agy installs no hook either, and unlike muse it has no substitute signal wired:
-# its hook surface loads and lists entries as enabled but never executes them
-# (verified agy 1.2.0), so agy tasks carry no turn-end file and no semantic busy
-# record, and their state is read from the runtime backend's own agent-state
-# classifier. agy is crewmate/scout only and is refused for --secondmate. Every
-# agy launch must carry --add-dir for the task worktree, and every agy grant must
-# be a physically resolved path: without the grant agy silently writes into its
-# own scratch directory instead of the task's local copy, and with an unresolved
-# one it treats its own worktree as non-workspace access and parks on a prompt.
+# agy installs native hooks through fm-agy-hook.sh in an owned state directory;
+# PreInvocation opens semantic busy and fullyIdle Stop closes it and signals
+# turn-end. The same transport composes primary and secondmate supervision.
+# Every agy launch grants physically resolved worktree and hook paths: without
+# the worktree grant agy writes into its own scratch, and an unresolved path
+# parks on a non-workspace approval prompt.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1121,6 +1118,9 @@ clear_relaunch_harness_wiring() {
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
+  if [ "$harness" = agy ]; then
+    "$SCRIPT_DIR/fm-agy-hook.sh" retire-worker "$state" "$id" || return 1
+  fi
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -1626,9 +1626,8 @@ launch_template() {
     # worktree, this home's state directory, and the brief's directory - because
     # each has to be a PHYSICALLY RESOLVED path; see the substitution below.
     #
-    # The approval posture is $permission_flags above; agy installs no turn-end
-    # hook because it has none that works (see the header and the harness
-    # reference), so nothing here arms one.
+    # The approval posture is $permission_flags above; native worker hooks are
+    # installed separately through fm-agy-hook.sh below.
     #
     # Foreign primary markers are cleared for the same reason as muse and omp:
     # agy publishes its own JETSKI_APP_DATA_DIR/ANTIGRAVITY_* markers, but an
@@ -1734,7 +1733,7 @@ case "$ARG3" in
     ;;
 esac
 
-# muse, gemini, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -1743,13 +1742,8 @@ esac
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed. agy has none either,
-# and it is the strongest case of the three: its hook surface loads and reports
-# entries as enabled but never executes them (verified on agy 1.2.0 - a Stop
-# hook did not fire on completed turns and a PreToolUse hook did not fire on a
-# tool that actually ran), so there is no turn-end signal a primary supervision
-# cycle could be built on at all.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
+# secondmate whose supervision cycle could never be armed.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -3457,7 +3451,7 @@ if [ "$KIND" != secondmate ]; then
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
-    gemini)
+    gemini|agy)
       if [ "$RAW_LAUNCH" -eq 0 ]; then
         BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
           echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -3478,6 +3472,14 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
+    agy)
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        "$FM_ROOT/bin/fm-agy-hook.sh" install-worker "$STATE_REAL" "$ID" "$BUSY_GEN" "$WT" || {
+          echo "error: could not install agy worker hooks for $ID" >&2
+          exit 1
+        }
+      fi
+      ;;
     claude*)
       # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
       # a turn; Stop (normal completion), StopFailure (API-error turn end),
@@ -4055,6 +4057,9 @@ case "$HARNESS" in
     # way as the other two, and so cursor's --workspace and omp's --cwd keep
     # taking the recorded path unchanged.
     permission_dirs="--add-dir $(shell_quote "$(cd "$WT" && pwd -P)") --add-dir $(shell_quote "$STATE_REAL") --add-dir $(shell_quote "$(cd "$(dirname "$BRIEF")" && pwd -P)") "
+    if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+      permission_dirs="$permission_dirs--add-dir $(shell_quote "$STATE_REAL/$ID.agy-hooks") "
+    fi
     LAUNCH=${LAUNCH//__PERMISSIONDIRS__/$permission_dirs}
     ;;
 esac
@@ -4063,6 +4068,11 @@ case "$HARNESS" in
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac
+# Preserve identity when an Agy primary launches another harness; Agy itself
+# re-establishes its own marker after this boundary.
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  LAUNCH="env -u JETSKI_APP_DATA_DIR $LAUNCH"
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
