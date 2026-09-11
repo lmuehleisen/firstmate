@@ -34,6 +34,7 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf 'zsh\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -89,7 +90,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse_lease "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -117,8 +118,12 @@ make_spawn_case() {
 # is decided ONLY by the home's config/trace-context, whether the runner's own
 # environment enables or disables trace context.
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 relaunch=0 arg
   shift 4
+  for arg in "$@"; do
+    [ "$arg" != --relaunch ] || relaunch=1
+  done
+  [ "$relaunch" = 1 ] || set -- "$@" --mode no-mistakes --yolo off
   : > "$launchlog"
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
@@ -134,7 +139,7 @@ run_spawn() {
     FM_FAKE_TRACE_METADATA_APPEND_FAIL="${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" \
     FM_FAKE_META_PATH="$home/state/$1.meta" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$@" 2>&1
 }
 
 # Same, but with an explicit FM_TRACE_CONTEXT override, to prove the env decides.
@@ -421,9 +426,10 @@ test_relaunch_reuses_recorded_carrier() {
   # Relaunch the same task: the recorded carrier must be reused verbatim for both
   # the meta and the injected export, so an observer keeps one identity across
   # restarts.
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+  out=$(FM_FAKE_DUPLICATE_WINDOW="fm-$CASE_ID" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" --relaunch)
   status=$?
-  expect_code 0 "$status" "relaunch spawn should succeed"
+  expect_code 0 "$status" "relaunch spawn should succeed: $out"
   assert_contains "$out" "spawned $CASE_ID" "relaunch spawn should report success"
   second=$(meta_traceparent "$meta")
   injected=$(injected_traceparent "$LAUNCH_LOG")
@@ -555,7 +561,8 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
 
   # Same environment, same task: a relaunch must reuse task A's recorded
   # carrier verbatim, so the per-task boundary never costs recovery identity.
-  out=$(TRACEPARENT="$sm_tp" run_spawn "$sm" "$wt_a" "$fakebin" "$log_a" "$id_a" "$proj_a")
+  out=$(TRACEPARENT="$sm_tp" FM_FAKE_DUPLICATE_WINDOW="fm-$id_a" \
+    run_spawn "$sm" "$wt_a" "$fakebin" "$log_a" "$id_a" --relaunch)
   status=$?
   expect_code 0 "$status" "routed task A relaunch should succeed"
   relaunch_tp=$(meta_traceparent "$sm/state/$id_a.meta")

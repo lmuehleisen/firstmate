@@ -345,6 +345,23 @@ SH
   done
 }
 
+# A Treehouse lease returns a bare worktree path, independently of pane cwd.
+# Spawn tests can diverge the two to exercise the exact-path handoff guard.
+fm_fake_treehouse_lease() {
+  local fakebin=$1
+  printf '%s\n' "${2:-}" > "$fakebin/treehouse-lease-path"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ] && [ "${2:-}" = --lease ]; then
+  path=${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}
+  [ -n "$path" ] || IFS= read -r path < "$(dirname "$0")/treehouse-lease-path"
+  printf '%s\n' "$path"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

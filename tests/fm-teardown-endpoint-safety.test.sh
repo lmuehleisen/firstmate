@@ -563,6 +563,194 @@ test_sole_slot_record_still_tears_down() {
   pass "fm-teardown: a task that solely holds its slot still returns it"
 }
 
+make_stale_claim_case() {  # <name> <old-landed> <current-landed>
+  local dir old=claim-old new=claim-current id
+  dir=$(make_case "$1")
+  mark_case_as_treehouse_pool "$dir"
+  rm "$dir/worktree/sentinel"
+  git -C "$dir/project" branch -M main
+  git clone --quiet --bare "$dir/project" "$dir/origin.git"
+  git -C "$dir/project" remote add origin "$dir/origin.git"
+  git -C "$dir/worktree" checkout -qb "fm/$old"
+  printf 'old claimant work\n' > "$dir/worktree/old-work"
+  git -C "$dir/worktree" add old-work
+  git -C "$dir/worktree" -c user.name=test -c user.email=t@t commit -qm old
+  [ "$2" != yes ] || git -C "$dir/worktree" push -q origin "fm/$old"
+  git -C "$dir/worktree" checkout -qb "fm/$new" main
+  printf 'current claimant work\n' > "$dir/worktree/current-work"
+  git -C "$dir/worktree" add current-work
+  git -C "$dir/worktree" -c user.name=test -c user.email=t@t commit -qm current
+  [ "$3" != yes ] || git -C "$dir/worktree" push -q origin "fm/$new"
+  for id in "$old" "$new"; do
+    fm_write_meta "$dir/home/state/$id.meta" "window=firstmate:fm-$id" \
+      "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+      "kind=ship" "mode=direct-PR"
+  done
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$dir/fakebin/gh"
+  printf '%s\n' "$dir"
+}
+
+run_stale_claim_case() {
+  local dir=$1; shift
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEARDOWN_GUARD_DONE=1 \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" claim-old --retire-stale-claim "$@"
+}
+
+assert_stale_claim_preserved() {
+  local dir=$1 before=$2
+  assert_present "$dir/home/state/claim-old.meta" "refusal lost the old claim"
+  assert_present "$dir/home/state/claim-current.meta" "refusal lost the current claim"
+  [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$before" ] || fail "refusal changed shared HEAD"
+  ! grep -Eq 'treehouse <return>|kill-window' "$dir/runtime.log" || fail "stale-claim refusal reached destructive cleanup"
+}
+
+test_stopped_landed_stale_claim_retires_without_touching_the_slot() {
+  local dir before old_ref current_ref out
+  dir=$(make_stale_claim_case stale-landed yes yes)
+  before=$(git -C "$dir/worktree" rev-parse HEAD)
+  old_ref=$(git -C "$dir/worktree" rev-parse refs/heads/fm/claim-old)
+  current_ref=$(git -C "$dir/worktree" symbolic-ref HEAD)
+  printf '%s\n' "$dir/worktree" > "$dir/home/state/claim-old.treehouse-lease"
+  printf '%s\n' "$dir/worktree" > "$dir/home/state/claim-current.treehouse-lease"
+  out=$(run_stale_claim_case "$dir" 2>&1) || fail "landed stale claim refused: $out"
+  assert_absent "$dir/home/state/claim-old.meta" "stale claim was not retired"
+  assert_absent "$dir/home/state/claim-old.treehouse-lease" "stale claim retained its receipt"
+  assert_present "$dir/home/state/claim-current.treehouse-lease" "retirement removed the owner's receipt"
+  assert_present "$dir/home/state/claim-current.meta" "current claim was retired"
+  [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$before" ] || fail "retirement changed HEAD"
+  [ "$(git -C "$dir/worktree" symbolic-ref HEAD)" = "$current_ref" ] || fail "retirement detached the owner"
+  [ "$(git -C "$dir/worktree" rev-parse refs/heads/fm/claim-old)" = "$old_ref" ] || fail "retirement deleted the old branch"
+  assert_present "$dir/worktree/current-work" "retirement reset the current copy"
+  ! grep -Eq 'treehouse <return>|kill-window' "$dir/runtime.log" || fail "record-only retirement called return or kill"
+  assert_contains "$out" 'stale claim retired' "record-only outcome was not explicit"
+  # Once the stale record is gone, ordinary guarded teardown can return the owner.
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEARDOWN_GUARD_DONE=1 \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" claim-current > "$dir/owner.out" 2>&1 \
+    || fail "current owner stayed deadlocked: $(cat "$dir/owner.out")"
+  assert_absent "$dir/home/state/claim-current.meta" "current owner's cleanup stayed deadlocked"
+  assert_absent "$dir/home/state/claim-current.treehouse-lease" "owner cleanup retained its receipt"
+  assert_grep 'treehouse <return>' "$dir/runtime.log" "ordinary owner teardown did not release its slot"
+  pass "stopped landed stale claim retires without resetting the shared slot, then ordinary owner cleanup succeeds"
+}
+
+test_stale_claim_never_borrows_another_claimants_landed_head() {
+  local dir before out rc pair
+  for pair in 'no yes' 'yes no'; do
+    # shellcheck disable=SC2086 # two intentional fixture booleans
+    dir=$(make_stale_claim_case "unlanded-${pair// /-}" $pair)
+    before=$(git -C "$dir/worktree" rev-parse HEAD)
+    if out=$(run_stale_claim_case "$dir" 2>&1); then rc=0; else rc=$?; fi
+    [ "$rc" -ne 0 ] || fail "retired a claim with an unlanded claimant branch"
+    assert_contains "$out" unlanded "unlanded claim refusal omitted its cause"
+    assert_stale_claim_preserved "$dir" "$before"
+  done
+  # A clean detached unlanded HEAD must remain ambiguous even though both
+  # named claimant refs were pushed. It cannot be reported as landed or reset.
+  dir=$(make_stale_claim_case detached-unlanded yes yes)
+  git -C "$dir/worktree" checkout --detach -q
+  printf 'detached work\n' > "$dir/worktree/detached-work"
+  git -C "$dir/worktree" add detached-work
+  git -C "$dir/worktree" -c user.name=test -c user.email=t@t commit -qm detached
+  before=$(git -C "$dir/worktree" rev-parse HEAD)
+  [ -z "$(git -C "$dir/worktree" status --porcelain)" ] || fail "detached recovery fixture is dirty"
+  if out=$(run_stale_claim_case "$dir" 2>&1); then rc=0; else rc=$?; fi
+  [ "$rc" -ne 0 ] || fail "detached unlanded HEAD was called stale and landed"
+  assert_contains "$out" 'detached HEAD' "detached ownership refusal missing"
+  assert_stale_claim_preserved "$dir" "$before"
+  assert_present "$dir/worktree/detached-work" "detached unlanded work was lost"
+  pass "stale recovery refuses unlanded work from either claimant and preserves clean detached unlanded HEADs"
+}
+
+test_stale_claim_refuses_live_dirty_and_forced_recovery() {
+  local dir before out rc
+  dir=$(make_stale_claim_case live-claimant yes yes)
+  before=$(git -C "$dir/worktree" rev-parse HEAD)
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf 'fm-claim-current\n' ;;
+  display-message)
+    case "$*" in *pane_current_command*) printf 'codex\n' ;; esac
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tmux"
+  if out=$(run_stale_claim_case "$dir" 2>&1); then rc=0; else rc=$?; fi
+  [ "$rc" -ne 0 ] || fail "live claimant allowed stale retirement"
+  assert_contains "$out" 'claim-current' "live refusal omitted claimant"
+  assert_contains "$out" 'alive' "live recovery classifier was not used"
+  assert_stale_claim_preserved "$dir" "$before"
+
+  dir=$(make_stale_claim_case dirty-claimant yes yes)
+  before=$(git -C "$dir/worktree" rev-parse HEAD)
+  printf 'uncommitted\n' >> "$dir/worktree/current-work"
+  if out=$(run_stale_claim_case "$dir" 2>&1); then rc=0; else rc=$?; fi
+  [ "$rc" -ne 0 ] || fail "dirty claimant allowed retirement"
+  assert_contains "$out" 'uncommitted' "dirty refusal missing"
+  assert_stale_claim_preserved "$dir" "$before"
+  if out=$(run_stale_claim_case "$dir" --force 2>&1); then rc=0; else rc=$?; fi
+  [ "$rc" -ne 0 ] || fail "force bypassed stale-claim evidence"
+  assert_contains "$out" 'cannot be combined' "force boundary not explicit"
+  assert_stale_claim_preserved "$dir" "$before"
+  pass "live claimants, dirty copies and force all refuse record-only collision recovery"
+}
+
+test_stale_claim_serializes_with_other_claimants_relaunch() {
+  local dir lock holder i before out rc
+  dir=$(make_stale_claim_case claimant-relaunch-lock yes yes)
+  before=$(git -C "$dir/worktree" rev-parse HEAD)
+  lock="$dir/home/state/.control-claim-current.lock"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    trap 'fm_lock_release "$lock"' EXIT
+    : > "$dir/ready"
+    for _ in $(seq 1 300); do
+      [ ! -e "$dir/release" ] || break
+      sleep 0.1
+    done
+  ) &
+  holder=$!
+  for i in $(seq 1 300); do
+    [ ! -e "$dir/ready" ] || break
+    sleep 0.1
+  done
+  if [ ! -e "$dir/ready" ]; then
+    : > "$dir/release"; wait "$holder" || true
+    fail "could not stage claimant's relaunch lock"
+  fi
+  if out=$(run_stale_claim_case "$dir" 2>&1); then rc=0; else rc=$?; fi
+  : > "$dir/release"; wait "$holder" || true
+  [ "$rc" -ne 0 ] || fail "stale retirement raced a claimant relaunch"
+  assert_contains "$out" 'another lifecycle or metadata operation' "claimant lifecycle lock was not respected"
+  assert_stale_claim_preserved "$dir" "$before"
+  pass "record-only collision recovery refuses while another claimant holds its relaunch lock"
+}
+
+test_stale_claim_uses_its_own_content_without_a_remote_branch() {
+  local dir out current_head
+  dir=$(make_stale_claim_case stale-content-fallback no yes)
+  current_head=$(git -C "$dir/worktree" rev-parse HEAD)
+  # Only main has the older claimant's content; the current shared checkout
+  # lacks it. This drives the ref-specific content-in-default proof.
+  git -C "$dir/project" merge --squash refs/heads/fm/claim-old >/dev/null
+  git -C "$dir/project" -c user.name=test -c user.email=t@t commit -qm squash-old
+  git -C "$dir/project" push -q origin main
+  ! git -C "$dir/worktree" merge-base --is-ancestor refs/heads/fm/claim-old refs/remotes/origin/main || fail "fixture accidentally landed the old commit by ancestry"
+  [ ! -f "$dir/worktree/old-work" ] || fail "current copy unexpectedly contains old claimant content"
+  out=$(run_stale_claim_case "$dir" 2>&1) || fail "branch-specific content fallback refused: $out"
+  assert_absent "$dir/home/state/claim-old.meta" "landed old branch did not retire"
+  [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$current_head" ] || fail "content proof changed the shared checkout"
+  pass "stale-claim recovery proves its own branch content in default without borrowing shared HEAD"
+}
+
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
   local dir id=moved-task
 
@@ -837,6 +1025,11 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
+test_stopped_landed_stale_claim_retires_without_touching_the_slot
+test_stale_claim_never_borrows_another_claimants_landed_head
+test_stale_claim_refuses_live_dirty_and_forced_recovery
+test_stale_claim_serializes_with_other_claimants_relaunch
+test_stale_claim_uses_its_own_content_without_a_remote_branch
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
