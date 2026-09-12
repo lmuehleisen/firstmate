@@ -43,6 +43,12 @@
 # question gates over minting a new row. The command records a UTC `Captain
 # hold set:` timestamp in the task body: repeating an active hold preserves the
 # existing timestamp, while re-holding released work starts a new lifecycle.
+# Re-holding with a CHANGED reason preserves the outgoing one before replacing
+# it: the superseded text is recorded in the body beneath that stamp and the
+# pristine previous body is archived through `tasks-axi --archive-body`, and
+# the replacement is refused if that preservation cannot be read back, so a
+# reason is never lost to a reconciliation. An identical re-hold is tasks-axi's
+# own no-op and preserves nothing, because nothing is being replaced.
 # A task already closed is refused rather than reopened. `--until` records the
 # captain's own deferral date through `tasks-axi hold --until`, so a "revisit
 # later" answer is stored as a date instead of a live card.
@@ -188,7 +194,9 @@
 # decision digest, and a `Resolution mode:` of answered, released, repaired, or
 # reconciled. Records written by the retired fm-decision-hold.sh (routed,
 # declined, answered, repaired) are recognized everywhere a record is read, so
-# nothing already closed needs rewriting.
+# nothing already closed needs rewriting. A superseded hold reason carries its
+# own leader and a `Record kind: re-hold` instead, so it is never counted as a
+# recorded answer nor read as the captain's words.
 #
 # Parent channel: inside a secondmate home a task held for the captain, and its
 # answer, are captain-facing facts the moment they are recorded, so `hold`
@@ -494,6 +502,50 @@ resolution_block() {  # <mode>
     "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
 }
 
+# A superseded captain-hold reason. `tasks-axi hold` overwrites the reason in
+# place and keeps no record of what it replaced, so a reconciling re-hold used
+# to destroy reasoning that was frequently still correct. The record is
+# deliberately unlike a resolution record - a different leader, no decision
+# digest, and its own `Record kind:` - because an archived hold reason is not
+# the captain's answer and must never be read as one.
+superseded_hold_block() {  # <task-id> <timestamp> <previous-reason>
+  printf 'Superseded captain hold reason recorded by fm-captain-hold.\nTask: %s\nSuperseded at: %s\nRecord kind: re-hold\n\nPrevious hold reason:\n%s\n' \
+    "$1" "$2" "$3"
+}
+
+# Proof, read back from the backlog itself, that a superseded reason survived.
+# The reason is matched as a whole line so the exact prior bytes are what was
+# preserved, not a loose substring of them.
+body_has_superseded_hold_record() {  # <decoded-body> <timestamp> <previous-reason>
+  printf '%s\n' "$1" \
+    | grep -Fxq 'Superseded captain hold reason recorded by fm-captain-hold.' || return 1
+  printf '%s\n' "$1" | grep -Fxq "Superseded at: $2" || return 1
+  printf '%s\n' "$1" | grep -Fxq "$3"
+}
+
+# Preserve an outgoing hold reason before a re-hold replaces it, through the
+# same `tasks-axi --archive-body` mechanism write_resolution_record uses: the
+# pristine previous body is archived (its archived row line still carries the
+# outgoing reason verbatim) and the live body keeps the dated record. Every
+# failure path refuses rather than losing the reason, because the caller has
+# not replaced it yet.
+write_superseded_hold_record() {  # <task-id> <shown-body> <timestamp> <previous-reason>
+  local id=$1 body=$2 stamp=$3 previous=$4 new_body tmp
+  new_body=$(body_with_record "$body" "$(superseded_hold_block "$id" "$stamp" "$previous")") \
+    || fail "could not decode the existing body for $id; its hold reason was left unchanged"
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-superseded.XXXXXX") \
+    || fail "cannot stage the superseded hold reason; the hold reason on $id was left unchanged"
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot stage the superseded hold reason for $id; its hold reason was left unchanged"
+  fi
+  if ! tasks_axi update "$id" --body-file "$tmp" --archive-body >/dev/null; then
+    rm -f -- "$tmp"
+    fail "could not preserve the previous hold reason on $id; its hold reason was left unchanged"
+  fi
+  rm -f -- "$tmp"
+}
+
 # A backlog hold alone cannot move a plain done event off the terminal stale
 # path. Only the explicitly held ship itself may acquire this declaration;
 # investigations and unrelated inventory entries retain their own semantics.
@@ -792,7 +844,7 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 superseded_reason=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -834,6 +886,12 @@ command_hold() {
     if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
       preserve_hold_set=1
     fi
+    # An identical re-hold is tasks-axi's own no-op, so only a reason that
+    # actually changes is about to be destroyed and needs preserving.
+    if [ "$existing_held" = yes ]; then
+      superseded_reason=$(show_field_value "$show" hold_reason)
+      [ "$superseded_reason" != "$reason" ] || superseded_reason=''
+    fi
     if [ -n "$title" ]; then
       existing_title=$(show_field_value "$show" title)
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
@@ -865,6 +923,15 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while recording its hold-set stamp"
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id did not retain its hold-set stamp"
+  # Preservation is proved from the backlog before the reason is replaced, so a
+  # failed archive refuses the re-hold instead of losing the outgoing reason.
+  if [ -n "$superseded_reason" ]; then
+    write_superseded_hold_record "$id" "$(show_field "$show" body)" "$hold_set" "$superseded_reason"
+    show=$(task_show "$id") \
+      || fail "task $id disappeared while preserving its previous hold reason"
+    body_has_superseded_hold_record "$(show_field_value "$show" body)" "$hold_set" "$superseded_reason" \
+      || fail "task $id did not retain its previous hold reason; its hold reason was left unchanged"
+  fi
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
       || fail "could not hold task $id for the captain"
@@ -883,14 +950,13 @@ command_hold() {
   printf '%s\n' "$id"
 }
 
-# Record a resolution block beneath any leading active hold-set stamp,
-# preserving the previous body below it and archiving the pristine original.
-# Successful closure removes the stamp to restore resolution-first ordering.
-write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp hold_set
-  new_body=$(resolution_block "$mode")
-  body=$(decode_shown_value "$body") \
-    || fail "could not decode the existing body for $id"
+# Compose a body carrying <record> beneath any leading active hold-set stamp,
+# with the previous body preserved below it. Returns nonzero when the shown
+# body cannot be decoded, so the caller reports the failure in its own words
+# rather than exiting from inside a command substitution.
+body_with_record() {  # <shown-body> <record>
+  local body=$1 new_body=$2 hold_set
+  body=$(decode_shown_value "$body") || return 1
   hold_set=$(body_hold_set_timestamp "$body")
   if [ -n "$hold_set" ]; then
     body=${body#"Captain hold set: $hold_set"}
@@ -903,6 +969,16 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
+  printf '%s' "$new_body"
+}
+
+# Record a resolution block beneath any leading active hold-set stamp,
+# preserving the previous body below it and archiving the pristine original.
+# Successful closure removes the stamp to restore resolution-first ordering.
+write_resolution_record() {  # <task-id> <mode> <shown-body>
+  local id=$1 mode=$2 body=$3 new_body tmp
+  new_body=$(body_with_record "$body" "$(resolution_block "$mode")") \
+    || fail "could not decode the existing body for $id"
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-body.XXXXXX") \
     || fail "cannot stage the resolution record"
   if ! printf '%s\n' "$new_body" > "$tmp"; then

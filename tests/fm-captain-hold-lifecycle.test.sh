@@ -950,6 +950,130 @@ EOF
   pass "captain holds become visible only after their hold-set timestamp is durable"
 }
 
+# Re-holding a captain call with a changed reason used to overwrite the
+# outgoing one with no record of it anywhere, destroying reasoning that was
+# often still correct. The replacement must now be preceded by a proved
+# preservation of the exact prior bytes.
+test_rehold_preserves_the_superseded_reason() {
+  local home show archive first second
+  home=$(make_home rehold-preserves-reason)
+  first='Luminis ground truth says A; spend floor is quadratic in tool rounds; options 1, 2 or 3'
+  second='re-verified 23:08Z: Luminis ground truth is B, so options 1 and 3 are moot'
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-reverify - Which verification route (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T21:29:00Z run_captain "$home" hold sample-reverify \
+    --reason "$first" >/dev/null || fail "the first captain hold failed"
+  assert_absent "$home/data/note-archive.md" \
+    "a first hold with no previous reason archived something"
+
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T23:08:31Z run_captain "$home" hold sample-reverify \
+    --reason "$second" >/dev/null || fail "the re-hold failed"
+  show=$(tasks_in "$home" show sample-reverify --full)
+  assert_contains "$show" "hold_reason: \"$second\"" "the re-hold did not write the new reason"
+  assert_contains "$show" 'Superseded captain hold reason recorded by fm-captain-hold.' \
+    "the superseded hold reason was not recorded"
+  assert_contains "$show" 'Task: sample-reverify' "the superseded record does not name its task"
+  assert_contains "$show" 'Superseded at: 2026-07-14T23:08:31Z' \
+    "the superseded record does not say when the reason was replaced"
+  assert_contains "$show" 'Record kind: re-hold' \
+    "the superseded record cannot be told apart from a resolution"
+  assert_contains "$show" "$first" "the exact previous reason bytes were not preserved"
+  assert_contains "$show" 'Captain hold set: 2026-07-14T21:29:00Z' \
+    "the re-hold restarted the hold lifecycle age"
+  # The archived pristine body carries the outgoing reason in its own row line.
+  archive=$(cat "$home/data/note-archive.md") || fail "the previous body was not archived"
+  assert_contains "$archive" "(hold: $first)" "the archived row lost the outgoing hold reason"
+  # A superseded hold reason is never counted or read as a captain answer.
+  assert_not_contains "$show" 'Resolution recorded by fm-captain-hold.' \
+    "the superseded record was written as a resolution record"
+  run_captain "$home" open sample-reverify --identity > "$home/identity.out" \
+    || fail "the re-held task is no longer an open captain call"
+  assert_equals '2026-07-14T21:29:00Z#0' "$(cat "$home/identity.out")" \
+    "the superseded record was counted as a recorded answer"
+  pass "a re-hold with a changed reason preserves the exact previous reason first"
+}
+
+# tasks-axi's own hold is a no-op when nothing changed, so a replayed identical
+# re-hold must add no record and no archive entry.
+test_identical_rehold_archives_nothing() {
+  local home before_body before_archive after_body after_archive
+  home=$(make_home rehold-identical)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-steady - A settled question (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-steady \
+    --reason 'captain route choice pending' >/dev/null || fail "the first hold failed"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T13:00:00Z run_captain "$home" hold sample-steady \
+    --reason 'captain route choice pending' >/dev/null || fail "the first replay failed"
+  before_body=$(tasks_in "$home" show sample-steady --full | sed -n 's/^  body: //p')
+  before_archive=$(cat "$home/data/note-archive.md" 2>/dev/null || printf 'absent')
+
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T14:00:00Z run_captain "$home" hold sample-steady \
+    --reason 'captain route choice pending' >/dev/null || fail "the second replay failed"
+  after_body=$(tasks_in "$home" show sample-steady --full | sed -n 's/^  body: //p')
+  after_archive=$(cat "$home/data/note-archive.md" 2>/dev/null || printf 'absent')
+  assert_equals "$before_body" "$after_body" "an identical re-hold rewrote the task body"
+  assert_equals "$before_archive" "$after_archive" "an identical re-hold wrote an archive entry"
+  assert_equals 'absent' "$after_archive" "an identical re-hold archived a body at all"
+  assert_not_contains "$after_body" 'Superseded captain hold reason' \
+    "an identical re-hold recorded a superseded reason"
+  pass "an identical re-hold stays a no-op and archives nothing"
+}
+
+# Losing the outgoing reason is the failure this seam exists to prevent, so a
+# refused preservation must refuse the replacement rather than proceed.
+test_failed_preservation_refuses_the_rehold() {
+  local home show err
+  home=$(make_home rehold-preservation-failure)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-fragile - A question whose archive fails (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-fragile \
+    --reason 'the original analysis worth keeping' >/dev/null || fail "the first hold failed"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" = --archive-body ] || continue
+  exit 91
+done
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  if FM_CAPTAIN_HOLD_NOW=2026-07-14T13:00:00Z run_captain "$home" hold sample-fragile \
+    --reason 'a replacement reason' > "$home/rehold.out" 2> "$home/rehold.err"; then
+    fail "the re-hold succeeded after preservation failed"
+  fi
+  err=$(cat "$home/rehold.err")
+  assert_contains "$err" 'could not preserve the previous hold reason' \
+    "the refusal does not say the previous reason could not be preserved"
+  assert_contains "$err" 'its hold reason was left unchanged' \
+    "the refusal does not say the hold reason survived"
+  rm -f "$home/fakebin/tasks-axi"
+  show=$(tasks_in "$home" show sample-fragile --full)
+  assert_contains "$show" 'hold_reason: the original analysis worth keeping' \
+    "a refused preservation still replaced the hold reason"
+  assert_not_contains "$show" 'a replacement reason' \
+    "the refused replacement reason was written anyway"
+  pass "a failed preservation refuses the re-hold and leaves the previous reason intact"
+}
+
 test_interrupted_answer_preserves_hold_age() {
   local home snap show
   home=$(make_home interrupted-answer-age)
@@ -3817,6 +3941,9 @@ test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility
+test_rehold_preserves_the_superseded_reason
+test_identical_rehold_archives_nothing
+test_failed_preservation_refuses_the_rehold
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
