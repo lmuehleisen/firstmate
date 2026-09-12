@@ -47,8 +47,14 @@
 # it: the superseded text is recorded in the body beneath that stamp and the
 # pristine previous body is archived through `tasks-axi --archive-body`, and
 # the replacement is refused if that preservation cannot be read back, so a
-# reason is never lost to a reconciliation. An identical re-hold is tasks-axi's
-# own no-op and preserves nothing, because nothing is being replaced.
+# reason is never lost to a reconciliation. Whether a reason is at risk is read
+# from the surviving captain-hold annotation, not from the live-held bit, so a
+# call whose `--until` has lapsed - the population that re-holds most often -
+# is preserved like any other. If the replacement itself then fails, the
+# supersession record is withdrawn again, because a body may never claim a
+# reason was replaced while that reason is still the live one. An identical
+# re-hold is tasks-axi's own no-op and preserves nothing, because nothing is
+# being replaced.
 # A task already closed is refused rather than reopened. `--until` records the
 # captain's own deferral date through `tasks-axi hold --until`, so a "revisit
 # later" answer is stored as a date instead of a live card.
@@ -515,12 +521,14 @@ superseded_hold_block() {  # <task-id> <timestamp> <previous-reason>
 
 # Proof, read back from the backlog itself, that a superseded reason survived.
 # The reason is matched as a whole line so the exact prior bytes are what was
-# preserved, not a loose substring of them.
+# preserved, not a loose substring of them. Every pattern is passed with `-e`
+# because a hold reason may legitimately begin with a dash, and grep would
+# otherwise read it as another option and abort the run mid-mutation.
 body_has_superseded_hold_record() {  # <decoded-body> <timestamp> <previous-reason>
   printf '%s\n' "$1" \
-    | grep -Fxq 'Superseded captain hold reason recorded by fm-captain-hold.' || return 1
-  printf '%s\n' "$1" | grep -Fxq "Superseded at: $2" || return 1
-  printf '%s\n' "$1" | grep -Fxq "$3"
+    | grep -Fxqe 'Superseded captain hold reason recorded by fm-captain-hold.' || return 1
+  printf '%s\n' "$1" | grep -Fxqe "Superseded at: $2" || return 1
+  printf '%s\n' "$1" | grep -Fxqe "$3"
 }
 
 # Preserve an outgoing hold reason before a re-hold replaces it, through the
@@ -544,6 +552,26 @@ write_superseded_hold_record() {  # <task-id> <shown-body> <timestamp> <previous
     fail "could not preserve the previous hold reason on $id; its hold reason was left unchanged"
   fi
   rm -f -- "$tmp"
+}
+
+# Withdraw a supersession record whose replacement never landed, then fail.
+# The record states that a reason WAS superseded, so leaving it behind after a
+# failed replacement would put a false claim in the durable record and make a
+# retry prepend a second record for the same outgoing reason. The pristine body
+# is restored without archiving, because write_superseded_hold_record already
+# archived exactly that content. A withdrawal that cannot be completed is
+# reported as the inconsistency it is rather than passed off as a clean refusal.
+withdraw_superseded_hold_record() {  # <task-id> <pristine-body> <failure-message>
+  local id=$1 body=$2 message=$3 stuck tmp
+  stuck="$message, and its supersession record could not be withdrawn; task $id now records a supersession that did not happen"
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-withdraw.XXXXXX") || fail "$stuck"
+  if ! printf '%s\n' "$body" > "$tmp" \
+    || ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    fail "$stuck"
+  fi
+  rm -f -- "$tmp"
+  fail "$message"
 }
 
 # A backlog hold alone cannot move a plain done event off the terminal stale
@@ -845,6 +873,7 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 superseded_reason=''
+  local pristine_body='' hold_failed=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -886,9 +915,13 @@ command_hold() {
     if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
       preserve_hold_set=1
     fi
-    # An identical re-hold is tasks-axi's own no-op, so only a reason that
-    # actually changes is about to be destroyed and needs preserving.
-    if [ "$existing_held" = yes ]; then
+    # What is about to be destroyed is decided by the surviving captain-hold
+    # annotation, never by the live-held bit: a lapsed `--until` makes tasks-axi
+    # report `held: no` while the annotation and its reason survive intact, and
+    # deferred calls are exactly the ones that re-hold again and again. Releasing
+    # a task clears the annotation, so a released call has no reason to preserve.
+    # An identical re-hold is tasks-axi's own no-op and replaces nothing.
+    if [ "$existing_hold_kind" = captain ]; then
       superseded_reason=$(show_field_value "$show" hold_reason)
       [ "$superseded_reason" != "$reason" ] || superseded_reason=''
     fi
@@ -925,19 +958,31 @@ command_hold() {
     || fail "task $id did not retain its hold-set stamp"
   # Preservation is proved from the backlog before the reason is replaced, so a
   # failed archive refuses the re-hold instead of losing the outgoing reason.
+  # The pristine body is held until the replacement lands, because until then
+  # the record's own claim is not yet true and must be withdrawable.
   if [ -n "$superseded_reason" ]; then
+    pristine_body=$(decode_shown_value "$(show_field "$show" body)") \
+      || fail "could not decode the existing body for $id; its hold reason was left unchanged"
     write_superseded_hold_record "$id" "$(show_field "$show" body)" "$hold_set" "$superseded_reason"
     show=$(task_show "$id") \
-      || fail "task $id disappeared while preserving its previous hold reason"
+      || withdraw_superseded_hold_record "$id" "$pristine_body" \
+        "task $id disappeared while preserving its previous hold reason"
     body_has_superseded_hold_record "$(show_field_value "$show" body)" "$hold_set" "$superseded_reason" \
-      || fail "task $id did not retain its previous hold reason; its hold reason was left unchanged"
+      || withdraw_superseded_hold_record "$id" "$pristine_body" \
+        "task $id did not retain its previous hold reason; its hold reason was left unchanged"
   fi
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
-      || fail "could not hold task $id for the captain"
+      || hold_failed=1
   else
     tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
-      || fail "could not hold task $id for the captain"
+      || hold_failed=1
+  fi
+  if [ "$hold_failed" = 1 ]; then
+    [ -z "$superseded_reason" ] \
+      || withdraw_superseded_hold_record "$id" "$pristine_body" \
+        "could not hold task $id for the captain; its hold reason was left unchanged"
+    fail "could not hold task $id for the captain"
   fi
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)

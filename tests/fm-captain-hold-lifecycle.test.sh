@@ -1074,6 +1074,133 @@ EOF
   pass "a failed preservation refuses the re-hold and leaves the previous reason intact"
 }
 
+# A lapsed `--until` makes tasks-axi report a captain call as no longer held
+# while its captain-hold annotation and reason survive intact. Deferred calls
+# are exactly the ones that re-hold again and again, so preservation keyed on
+# the live-held bit would have missed the population it exists to protect.
+test_lapsed_deferral_rehold_preserves_the_reason() {
+  local home show reason_now first second
+  home=$(make_home rehold-lapsed-deferral)
+  first='deferred: route A still looks right until the August numbers land'
+  second='the August numbers landed and route A is now the expensive one'
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-weekly - A weekly revisit (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-weekly \
+    --reason "$first" --until 2020-01-01 >/dev/null || fail "the deferred hold failed"
+  show=$(tasks_in "$home" show sample-weekly --full)
+  # The divergence this case turns on: not held, yet the reason is still there.
+  assert_contains "$show" 'held: no' "a lapsed deferral is no longer reported as held"
+  assert_contains "$show" 'hold_kind: captain' "the lapsed deferral lost its captain-hold annotation"
+
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T13:00:00Z run_captain "$home" hold sample-weekly \
+    --reason "$second" --until 2020-01-01 >/dev/null \
+    || fail "re-holding a lapsed deferral failed"
+  show=$(tasks_in "$home" show sample-weekly --full)
+  reason_now=$(printf '%s\n' "$show" | sed -n 's/^  hold_reason: //p')
+  assert_contains "$reason_now" "$second" "the re-hold did not write the new reason"
+  assert_not_contains "$reason_now" "$first" "the previous reason is somehow still the live one"
+  assert_contains "$show" "$first" "a lapsed deferral's previous reason was destroyed"
+  assert_contains "$show" 'Record kind: re-hold' \
+    "the lapsed deferral's preserved reason carries no provenance"
+  pass "re-holding a call whose deferral date has lapsed still preserves its reason"
+}
+
+# A hold reason may legitimately begin with a dash. The preservation proof reads
+# the reason back as a grep pattern, and an unguarded pattern would be parsed as
+# an option instead - aborting the run after the body was already rewritten but
+# before the replacement was applied.
+test_rehold_preserves_a_reason_beginning_with_a_dash() {
+  local home show reason_now first second
+  home=$(make_home rehold-dash-reason)
+  first='-n was the safe default when this question was filed'
+  second='the default flipped, so the question is now which flag replaces it'
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-flagcall - Which flag default (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-flagcall \
+    --reason "$first" >/dev/null || fail "a hold reason beginning with a dash was refused"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T13:00:00Z run_captain "$home" hold sample-flagcall \
+    --reason "$second" >/dev/null \
+    || fail "re-holding over a reason beginning with a dash failed"
+  show=$(tasks_in "$home" show sample-flagcall --full)
+  reason_now=$(printf '%s\n' "$show" | sed -n 's/^  hold_reason: //p')
+  assert_contains "$reason_now" "$second" "the replacement reason was not applied"
+  assert_contains "$show" "$first" "a previous reason beginning with a dash was destroyed"
+  pass "a previous hold reason beginning with a dash is preserved, not read as an option"
+}
+
+# The record states that a reason WAS superseded. Until the replacement lands
+# that claim is false, so a failed replacement must withdraw it rather than
+# leave the body asserting a supersession that never happened - and a retry must
+# then leave exactly one record, not a second one for the same outgoing reason.
+test_failed_replacement_withdraws_the_supersession_record() {
+  local home show err records reason_now first second
+  home=$(make_home rehold-replacement-failure)
+  first='the original analysis worth keeping'
+  second='a replacement reason'
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-halfway - A question whose replacement fails (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-halfway \
+    --reason "$first" >/dev/null || fail "the first hold failed"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = hold ] && [ "${2:-}" = sample-halfway ]; then
+  exit 92
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  if FM_CAPTAIN_HOLD_NOW=2026-07-14T13:00:00Z run_captain "$home" hold sample-halfway \
+    --reason "$second" > "$home/rehold.out" 2> "$home/rehold.err"; then
+    fail "the re-hold reported success after the replacement failed"
+  fi
+  err=$(cat "$home/rehold.err")
+  assert_contains "$err" 'could not hold task sample-halfway for the captain' \
+    "the refusal does not name the failed replacement"
+  assert_contains "$err" 'its hold reason was left unchanged' \
+    "the refusal does not say the hold reason survived"
+  rm -f "$home/fakebin/tasks-axi"
+  show=$(tasks_in "$home" show sample-halfway --full)
+  reason_now=$(printf '%s\n' "$show" | sed -n 's/^  hold_reason: //p')
+  assert_contains "$reason_now" "$first" "a failed replacement still replaced the hold reason"
+  assert_not_contains "$show" 'Superseded captain hold reason' \
+    "the body claims a supersession that never happened"
+  assert_contains "$show" 'Captain hold set: 2026-07-14T12:00:00Z' \
+    "withdrawing the record did not restore the pristine body"
+
+  # The retry now succeeds, and leaves one record rather than a duplicate for
+  # the same outgoing reason. The archive may hold more than one snapshot of
+  # that pristine body; each was true when written, unlike a live false claim.
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T14:00:00Z run_captain "$home" hold sample-halfway \
+    --reason "$second" >/dev/null || fail "the retry after a failed replacement failed"
+  show=$(tasks_in "$home" show sample-halfway --full)
+  reason_now=$(printf '%s\n' "$show" | sed -n 's/^  hold_reason: //p')
+  assert_contains "$reason_now" "$second" "the retry did not apply the replacement reason"
+  assert_contains "$show" "$first" "the retry lost the outgoing reason"
+  records=$(printf '%s' "$show" \
+    | grep -oe 'Superseded captain hold reason recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  assert_equals 1 "$records" "the retry wrote duplicate supersession provenance"
+  pass "a failed replacement withdraws its supersession record and the retry records it once"
+}
+
 test_interrupted_answer_preserves_hold_age() {
   local home snap show
   home=$(make_home interrupted-answer-age)
@@ -3944,6 +4071,9 @@ test_hold_stamp_precedes_hold_visibility
 test_rehold_preserves_the_superseded_reason
 test_identical_rehold_archives_nothing
 test_failed_preservation_refuses_the_rehold
+test_lapsed_deferral_rehold_preserves_the_reason
+test_rehold_preserves_a_reason_beginning_with_a_dash
+test_failed_replacement_withdraws_the_supersession_record
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
