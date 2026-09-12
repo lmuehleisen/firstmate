@@ -122,7 +122,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, immediate budget archiving, and autonomous offload do not apply to it.
    The sole exception is relocation to a JIT owner after explicit, per-item captain approval under the offload flow below, and that entry remains in memory until its destination is live.
 8. Run `bin/fm-stow-audit.sh verify` after the last memory-file edit.
-   It diffs this pass's snapshot against the edited files plus the cold archive and refuses while any removed entry's fact is absent from both, naming each unaccounted entry; the script header owns the exact comparison rule.
+   It diffs this pass's snapshot against the edited files, the cold archive, and every relocation destination recorded under the offload flow below, and refuses while any removed entry's fact is absent from all of them, naming each unaccounted entry; the script header owns the exact comparison rule.
    This check is blocking, not advisory: do not write the completion receipt or call the session reset-safe while it refuses, because the incident that motivated it was exactly a stated no-plain-removal rule that nothing checked, and an advisory result would be skipped under the same pressure that caused the loss.
    The audit refuses rather than archiving on your behalf, so the discrepancy is seen: reconcile a refusal by judging each named entry and archiving it with provenance or restoring it, never by paraphrasing it away until the check passes.
    The audit proves a removed fact's words survived somewhere recoverable, not that surviving prose still means the same thing, so a rewrite that inverts a preference remains yours to catch in step 3's retention plan.
@@ -202,6 +202,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 1. Reduce non-pinned material now.
    For each eligible non-pinned candidate, record its first line, source file, estimated tokens, one-line trigger, live destination, privacy and visibility verdict, and actual budget relief in the completion receipt.
    Autonomously relocate it only by adding it to an already-existing allowed JIT note, or by routing it through a project's established delivery path to its existing owning `AGENTS.md`, then confirming that destination holds the quoted entry before removing the memory entry.
+   Record each confirmed destination with `bin/fm-stow-audit.sh relocated <destination-file>` as the entry leaves memory, so step 8's removal audit accounts the legitimate relocation instead of refusing it.
    A destination that needs creation, uncompleted project delivery, or any other future work is not live and cannot count as relief, so continue with the next archival or eviction rung instead of leaving an over-budget proposal pending.
 2. Propose pinned relocation only.
    For a pinned candidate, append a `proposed-offload` section with the same fields to the completion receipt, create or refresh one durable backlog item with `tasks-axi add`, `tasks-axi show <id> --full`, and `tasks-axi update <id> --body-file <path>` as appropriate, then hold it through `bin/fm-captain-hold.sh hold`.
@@ -217,6 +218,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 4. Remove only once live.
    The memory entry leaves its always-injected file only after the destination is live: the local skill exists with its verified line in the active home's resolved repository-local exclude file, or the project change has landed.
    Until then the entry stays, so knowledge is never in limbo between owners.
+   When that removal happens inside a stow pass, record the live destination with `bin/fm-stow-audit.sh relocated <destination-file>` for the same removal-audit accounting.
    Leave no pointer behind by default, and at most one line only when the destination's discoverability is genuinely doubtful.
 
 ## Knowledge sweep and routing

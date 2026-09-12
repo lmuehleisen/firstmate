@@ -316,9 +316,9 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
   root=$(fm_backlog_root "$data") || return 1
   backend=$(fm_tasks_axi_backend "$root") || return 2
   if [ "$backend" = markdown ]; then
-    (cd "$root" 2>/dev/null && tasks-axi list "$@" --file "$file" 2>&1)
+    (cd "$root" 2>/dev/null && fm_tasks_axi list "$@" --file "$file" 2>&1)
   else
-    (cd "$root" 2>/dev/null && tasks-axi list "$@" 2>&1)
+    (cd "$root" 2>/dev/null && fm_tasks_axi list "$@" 2>&1)
   fi
 }
 
