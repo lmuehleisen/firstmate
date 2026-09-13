@@ -652,8 +652,10 @@ test_secondmate_standalone_clone_home_is_trusted() {
   assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
     "the claude secondmate spawn did not pre-register trust for its standalone-clone home"
   assert_present "$case_dir/launch.log" "the claude secondmate spawn sent no launch command"
-  assert_grep 'claude --dangerously-skip-permissions' "$case_dir/launch.log" \
+  assert_grep 'claude --permission-mode auto' "$case_dir/launch.log" \
     "the launch command was not the claude secondmate launch"
+  assert_not_contains "$(cat "$case_dir/launch.log")" '--dangerously-skip-permissions' \
+    "the secondmate launch bypassed the fork's reviewed permission policy"
   assert_grep "$home/data/charter.md" "$case_dir/launch.log" \
     "the launch command did not carry the charter the secondmate must read"
   # The pane must read the SAME store the registration wrote, or the trust would
