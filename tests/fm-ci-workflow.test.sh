@@ -133,7 +133,9 @@ CAPS
 }
 
 # Cancellation makes an undersized cap costlier: a falsely tripped job now also
-# discards a run nobody replaced. These bounds were measured, not guessed.
+# discards a run nobody replaced. These bounds were measured, not guessed; this
+# fork's portable parallel shard 1 crossed a 10-minute cap on 2026-09-11 once
+# setup and artifact finalization were counted, so it keeps 15.
 test_measured_lanes_keep_their_existing_bounds() {
   local job expected actual
   while read -r job expected; do
@@ -142,7 +144,7 @@ test_measured_lanes_keep_their_existing_bounds() {
     [ "$actual" = "$expected" ] \
       || fail "$job timeout must stay $expected minutes, got $actual"
   done <<'CAPS'
-tests-portable-parallel-1 10
+tests-portable-parallel-1 15
 tests-portable-parallel-2 10
 tests-portable-serial 30
 tests-herdr 75
