@@ -113,7 +113,18 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ -n "${FM_FAKE_COMPOSER:-}" ]; then
+    if [ -n "${FM_FAKE_COMPOSER:-}" ] && [ "${FM_FAKE_COMPOSER_SHAPE:-}" = wordwrap ]; then
+      # Codex's shape: a bare prompt row whose buffer word-wraps, dropping the
+      # space at each break and indenting continuation rows, above a footer.
+      printf 'previous transcript line\n'
+      prefix='› '
+      fold -s -w 56 "$FM_FAKE_COMPOSER/buffer" 2>/dev/null | sed 's/ *$//' | while IFS= read -r row || [ -n "$row" ]; do
+        printf '%s%s\n' "$prefix" "$row"
+        prefix='  '
+      done
+      [ -s "$FM_FAKE_COMPOSER/buffer" ] || printf '›\n'
+      printf '\n  model default · ~/project\n'
+    elif [ -n "${FM_FAKE_COMPOSER:-}" ]; then
       # A bordered composer wrapping its ASCII buffer at 60 cells; the cursor
       # row the stub reports (1) is its first content row.
       rest=$(cat "$FM_FAKE_COMPOSER/buffer" 2>/dev/null) width=60
@@ -515,7 +526,9 @@ test_ring_ladder_policy() {
 
 # The stateful composer fixture (FM_FAKE_COMPOSER in the fake tmux): <dir>/buffer
 # is the typed text, <dir>/swallow how many Enters to swallow, and
-# <dir>/submit.log every SUBMITTED or SWALLOWED-ENTER event.
+# <dir>/submit.log every SUBMITTED or SWALLOWED-ENTER event. The rendered shape
+# is a bordered box, or Codex's word-wrapped bare prompt when
+# FM_FAKE_COMPOSER_SHAPE=wordwrap.
 make_composer() {  # <dir> <buffer-text> <swallow-count>
   mkdir -p "$1"
   printf '%s' "$2" > "$1/buffer"
@@ -523,10 +536,10 @@ make_composer() {  # <dir> <buffer-text> <swallow-count>
   : > "$1/submit.log"
 }
 
-composer_ring() {  # <case-dir> <state> <record> -> ring result code
-  local dir=$1 state=$2 rec=$3 rc=0
+composer_ring() {  # <case-dir> <state> <record> [shape] -> ring result code
+  local dir=$1 state=$2 rec=$3 shape=${4:-} rc=0
   PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$dir/send.log" FM_KEY_LOG="$dir/key.log" \
-    FM_FAKE_TMUX_AGENT=claude FM_FAKE_COMPOSER="$dir/composer" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_COMPOSER_SHAPE="$shape" \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   printf '%s' "$rc"
 }
@@ -536,22 +549,23 @@ composer_ring() {  # <case-dir> <state> <record> -> ring result code
 # That ring must say so, and the next ring must submit the doorbell already in
 # the composer with Enter alone rather than protecting it as foreign text.
 test_ring_submits_stranded_doorbell_with_enter_alone() {
-  local dir state rec doorbell rc
-  dir="$TMP_ROOT/ring-stranded"; state="$dir/state"; mkdir -p "$state"
+  local shape dir state rec doorbell rc
+  for shape in box wordwrap; do
+  dir="$TMP_ROOT/ring-stranded-$shape"; state="$dir/state"; mkdir -p "$state"
   make_watch_stubs "$dir" >/dev/null
   : > "$dir/send.log"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
   make_composer "$dir/composer" "" 99
-  rc=$(composer_ring "$dir" "$state" "$rec")
-  [ "$rc" = 4 ] || fail "a ring whose Enter was swallowed should report the stranded doorbell (4), got $rc"
+  rc=$(composer_ring "$dir" "$state" "$rec" "$shape")
+  [ "$rc" = 4 ] || fail "$shape: a ring whose Enter was swallowed should report the stranded doorbell (4), got $rc"
   [ "$(cat "$dir/composer/buffer")" = "$doorbell" ] || fail "the stranded doorbell should sit in the composer exactly once"
   [ -e "$state/t1.inbox/.stranded" ] || fail "a stranded ring must be remembered for the next attempt"
   ! grep -q '^SUBMITTED' "$dir/composer/submit.log" || fail "nothing should have been submitted yet"
 
   printf '0\n' > "$dir/composer/swallow"
-  rc=$(composer_ring "$dir" "$state" "$rec")
-  [ "$rc" = 5 ] || fail "the next ring should submit the stranded doorbell with Enter alone (5), got $rc"
+  rc=$(composer_ring "$dir" "$state" "$rec" "$shape")
+  [ "$rc" = 5 ] || fail "$shape: the next ring should submit the stranded doorbell with Enter alone (5), got $rc"
   [ "$(grep -c '^SUBMITTED' "$dir/composer/submit.log")" = 1 ] \
     || fail "expected exactly one submission:"$'\n'"$(cat "$dir/composer/submit.log")"
   grep -qxF "SUBMITTED $doorbell" "$dir/composer/submit.log" \
@@ -560,23 +574,26 @@ test_ring_submits_stranded_doorbell_with_enter_alone() {
     || fail "the retry must not retype the doorbell:"$'\n'"$(cat "$dir/send.log")"
   [ ! -e "$state/t1.inbox/.stranded" ] || fail "a proven-empty composer should clear the stranded memory"
   [ -f "$rec" ] || fail "the durable record stays until the worker acknowledges it"
-  pass "inbox: a stranded doorbell is reported, then submitted by the next ring with Enter alone"
+  done
+  pass "inbox: a stranded doorbell (bordered or word-wrapped composer) is reported, then submitted by the next ring with Enter alone"
 }
 
 test_ring_protects_foreign_pending_text() {
-  local dir state rec doorbell rc
-  dir="$TMP_ROOT/ring-foreign-pending"; state="$dir/state"; mkdir -p "$state"
+  local shape dir state rec doorbell rc draft
+  for shape in box wordwrap; do
+  dir="$TMP_ROOT/ring-foreign-pending-$shape"; state="$dir/state"; mkdir -p "$state"
   make_watch_stubs "$dir" >/dev/null
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
   # Even with the stranded memory present, text that is not exactly the doorbell
   # is someone's draft: no key, nothing typed, the buffer untouched.
   : > "$state/t1.inbox/.stranded"
-  for draft in "rm -rf the production database" "$doorbell finish the release notes"; do
+  for draft in "rm -rf the production database" "$doorbell finish the release notes" \
+    "${doorbell/numeric/numerlc}" "${doorbell%.}"; do
     : > "$dir/send.log"
     make_composer "$dir/composer" "$draft" 0
-    rc=$(composer_ring "$dir" "$state" "$rec")
-    [ "$rc" = 1 ] || fail "foreign pending text should defer the ring (1), got $rc for: $draft"
+    rc=$(composer_ring "$dir" "$state" "$rec" "$shape")
+    [ "$rc" = 1 ] || fail "$shape: foreign pending text should defer the ring (1), got $rc for: $draft"
     [ "$(cat "$dir/composer/buffer")" = "$draft" ] || fail "foreign pending text must stay untouched: $draft"
     [ ! -s "$dir/composer/submit.log" ] || fail "foreign pending text was submitted: $draft"
     [ ! -s "$dir/send.log" ] || fail "foreign pending text was typed over: $draft"
@@ -585,9 +602,10 @@ test_ring_protects_foreign_pending_text() {
   # ring of this inbox, so it is protected too.
   rm -f "$state/t1.inbox/.stranded"
   make_composer "$dir/composer" "$doorbell" 0
-  rc=$(composer_ring "$dir" "$state" "$rec")
-  [ "$rc" = 1 ] || fail "an unremembered doorbell should defer the ring (1), got $rc"
-  [ ! -s "$dir/composer/submit.log" ] || fail "an unremembered doorbell must not be submitted"
+  rc=$(composer_ring "$dir" "$state" "$rec" "$shape")
+  [ "$rc" = 1 ] || fail "$shape: an unremembered doorbell should defer the ring (1), got $rc"
+  [ ! -s "$dir/composer/submit.log" ] || fail "$shape: an unremembered doorbell must not be submitted"
+  done
   pass "inbox: pending text that is not this inbox's remembered stranded doorbell is never submitted"
 }
 

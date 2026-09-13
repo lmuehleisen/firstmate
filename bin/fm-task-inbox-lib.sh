@@ -66,8 +66,9 @@
 # Inbox paths containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
 #
-# fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
-# other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
+# fm_task_inbox_ring requires bin/fm-backend.sh's dispatch and, for its
+# stranded-doorbell identity check, bin/fm-composer-lib.sh (both sourced below);
+# the other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
 # and tests. No side effects on source beyond its sourced libraries.
 #
 # Tunables (env):
@@ -279,13 +280,17 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # fm_task_inbox_composer_holds_doorbell: true only when the composer's OWN
 # region carries exactly this inbox's complete doorbell line and nothing else.
 # Only the composer region is consulted, never the whole capture: an
-# already-submitted doorbell stays visible in the transcript above it. Wrapped
-# rows are rejoined without adding whitespace, and only proven UI furniture
-# (border cells, one padding cell, the prompt glyph) is removed, so a draft a
-# person appended to or edited inside the doorbell never matches. Every failure
-# - unreadable capture, unidentifiable composer shape, no exact match - is
-# false, which keeps the protective skip. Ported from upstream
-# kunchenguid/firstmate PR #4002.
+# already-submitted doorbell stays visible in the transcript above it. Proven UI
+# furniture (border cells, one padding cell, the prompt glyph) is removed and
+# every visible character of a row must match the doorbell exactly, so a draft a
+# person appended to or edited inside the doorbell never matches. Whitespace is
+# forgiven only at a row boundary, because a word-wrapping composer (Codex)
+# drops the space it breaks at and indents continuation rows: there a
+# difference can only be whitespace, and submitting it still submits nothing but
+# the doorbell. Every failure - unreadable capture, unidentifiable composer
+# shape, no match - is false, which keeps the protective skip. Adapted from
+# upstream kunchenguid/firstmate PR #4002, whose exact cell join cannot match a
+# word-wrapped doorbell.
 fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cap caps row raw content glyph
   local remaining framed left right prompt_seen=0 width
@@ -336,22 +341,17 @@ fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [e
       pi) ;;
       *) return 1 ;;
     esac
-    width=${#content}
-    if [ "${#remaining}" -ge "$width" ]; then
-      [ "$content" = "${remaining:0:$width}" ] || return 1
-      remaining=${remaining:$width}
-    else
-      [ "${content:0:${#remaining}}" = "$remaining" ] || return 1
-      content=${content:${#remaining}}
-      # A bordered box paints blank cells through its right edge; any other
-      # shape's trailing cell is editable content and prevents a match.
-      if [ "$FM_COMPOSER_SELECTED_KIND" = box ]; then
-        [ -z "${content// /}" ] || return 1
-      else
-        [ -z "$content" ] || return 1
-      fi
-      remaining=
+    # Row-boundary whitespace: trailing padding, a continuation indent, and the
+    # space a word wrap consumed.
+    content=${content%"${content##*[! ]}"}
+    if [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
+      content=${content#"${content%%[! ]*}"}
+      remaining=${remaining#"${remaining%%[! ]*}"}
     fi
+    width=${#content}
+    [ "${#remaining}" -ge "$width" ] || return 1
+    [ "$content" = "${remaining:0:$width}" ] || return 1
+    remaining=${remaining:$width}
     row=$((row + 1))
   done
   [ -z "$remaining" ]
