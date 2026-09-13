@@ -396,5 +396,94 @@ fi
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
 
+# --- endpoint presence: an exact inventory, never display-message's exit ------
+# `tmux display-message -t` exits 0 for any target while a server runs, so the
+# cheap presence probe behind the session-start digest, the fleet snapshot
+# (Bearings and the heartbeat view), and fm-crew-state must read the exact
+# session inventory instead. Each case asserts that divergence first, so the
+# probe cannot pass by accident on a tmux whose display-message fails.
+new_window fm-present "$SLEEP_BIN" 900
+new_window fm-present-2 "$SLEEP_BIN" 900
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s "${SESSION}-longer" -n fm-other -c "$LAB/wt" -- "$SLEEP_BIN" 900 \
+  || fail "could not create the prefix-named session"
+
+tmux display-message -p -t "$SESSION:fm-gone" '#{pane_id}' >/dev/null 2>&1 \
+  || fail "precondition: this tmux no longer answers display-message for a missing window, so the case below proves nothing"
+fm_backend_target_exists tmux "$SESSION:fm-present" \
+  || fail "a present window must read as existing"
+if fm_backend_target_exists tmux "$SESSION:fm-gone"; then
+  fail "a missing window on a live server must not read as existing"
+fi
+if fm_backend_target_exists tmux "$SESSION:fm-pres"; then
+  fail "a prefix of a live window name must not stand in for the recorded window"
+fi
+pass "tmux presence: a present window exists; a missing window or a name prefix on a live server does not"
+
+tmux display-message -p -t "no-such-session:fm-present" '#{pane_id}' >/dev/null 2>&1 \
+  || fail "precondition: this tmux no longer answers display-message for a missing session"
+if fm_backend_target_exists tmux "no-such-session:fm-present"; then
+  fail "a window in a missing session must not read as existing"
+fi
+if fm_backend_target_exists tmux "${SESSION}-lo:fm-other"; then
+  fail "a session-name prefix must not stand in for the recorded session"
+fi
+[ "$(fm_backend_agent_state tmux "${SESSION}-lo:fm-other")" = missing ] \
+  || fail "the recovery classifier must not resolve a session-name prefix either"
+pass "tmux presence: a missing session or a session-name prefix does not exist"
+
+pane_id=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "=$SESSION:=fm-present" '#{pane_id}') \
+  || fail "could not read the present window's pane id"
+window_index=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "=$SESSION:=fm-present" '#{window_index}') \
+  || fail "could not read the present window's index"
+fm_backend_target_exists tmux "$pane_id" || fail "a live pane id (the supervisor's \$TMUX_PANE shape) must read as existing"
+fm_backend_target_exists tmux "$SESSION:$window_index" || fail "a live window index must read as existing"
+fm_backend_target_exists tmux "$SESSION:fm-present.0" || fail "a live pane-qualified window must read as existing"
+if fm_backend_target_exists tmux "%999999" 2>"$LAB/presence.err"; then
+  fail "an unknown pane id must not read as existing"
+fi
+[ ! -s "$LAB/presence.err" ] || fail "the presence probe must answer an unknown pane id cleanly under set -u: $(cat "$LAB/presence.err")"
+pass "tmux presence: pane ids, window indexes, and pane-qualified windows are checked against the same inventory"
+
+# fm-crew-state routes through the same probe: a gone window with a stale busy
+# record from a turn killed mid-flight must read gone, never working.
+mkdir -p "$LAB/crew/state" "$LAB/crew/shim"
+cat > "$LAB/crew/shim/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$LAB/crew/shim/no-mistakes"
+printf 'window=%s\nworktree=%s\nkind=ship\nharness=claude\n' "$SESSION:fm-crew-gone" "$LAB/wt" > "$LAB/crew/state/crew-gone.meta"
+printf 'working: implementing\n' > "$LAB/crew/state/crew-gone.status"
+gen=$("$ROOT/bin/fm-busy-event.sh" arm "$LAB/crew/state" crew-gone) || fail "could not arm the busy record"
+"$ROOT/bin/fm-busy-event.sh" apply "$LAB/crew/state" crew-gone busy --gen "$gen" \
+  --source claude-hook --event user-prompt-submit || fail "could not write the stale busy record"
+crew_out=$(PATH="$LAB/crew/shim:$PATH" FM_STATE_OVERRIDE="$LAB/crew/state" "$ROOT/bin/fm-crew-state.sh" crew-gone 2>&1)
+case "$crew_out" in
+  *"backend target gone: $SESSION:fm-crew-gone"*) ;;
+  *) fail "a gone window with a stale busy record must read gone, got: $crew_out" ;;
+esac
+case "$crew_out" in
+  *"state: working"*) fail "a gone window must never read working from a stale busy record: $crew_out" ;;
+esac
+pass "tmux presence: fm-crew-state reads a gone window as gone before consulting a stale busy record"
+
+# A reboot restarts the server and firstmate recreates its same-name session,
+# but not the worker windows the records name.
+"$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+if fm_backend_target_exists tmux "$SESSION:fm-present"; then
+  fail "with no server running, a recorded window must not read as existing"
+fi
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n main -c "$LAB/wt" -- "$SLEEP_BIN" 900 \
+  || fail "could not recreate the same-name session"
+tmux display-message -p -t "$SESSION:fm-present" '#{pane_id}' >/dev/null 2>&1 \
+  || fail "precondition: this tmux no longer answers display-message after a restart"
+if fm_backend_target_exists tmux "$SESSION:fm-present"; then
+  fail "a recorded window must not read as existing after its server restarted with a same-name session"
+fi
+[ "$(fm_backend_agent_state tmux "$SESSION:fm-present")" = missing ] \
+  || fail "the recovery classifier must read the recorded window missing after a restart"
+fm_backend_target_exists tmux "$SESSION:main" || fail "the recreated session's own window must read as existing"
+pass "tmux presence: a same-name session recreated after a server restart does not revive recorded windows"
+
 cleanup_all
 trap - EXIT

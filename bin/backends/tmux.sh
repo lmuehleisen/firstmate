@@ -237,39 +237,50 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
-# fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
-# recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
-# shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
-# the empirical basis. Tmux silently falls back to the active window when a
-# named target is absent, so the exact recorded window must appear in a
-# successful session inventory before its foreground command can be trusted.
-# An omitted window or a definitive missing-session/server response is
-# `missing`; any other inventory or pane read failure is `unreadable`, so a
-# transient tmux problem never licenses a duplicate.
+# fm_backend_tmux_target_presence: the one owner of tmux endpoint presence.
+# Prints `present`, `missing`, or `unreadable` for <target>, and both the cheap
+# probe (bin/fm-backend.sh's fm_backend_target_exists, which fm-crew-state.sh
+# also routes through) and the recovery-grade classifier below consume it.
 #
-# The verdict combines two independent name sources rather than trusting either
-# alone. Either source naming a verified harness is enough for `alive`, because
-# a false `dead` is the one outcome that can launch a duplicate agent onto a
-# live worktree, while the foreground process group - when it is readable - is
-# authoritative for the negative verdicts, since it is the only source that can
-# distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
-  local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
+# Presence is decided from an exact inventory, never from whether an addressed
+# read exits 0: `tmux display-message -t` exits 0 for ANY target while a server
+# runs (a missing window falls back to the session's active window, a missing
+# session prints empty fields), so a closed window or a restarted server read
+# alive. Unanchored targets also prefix-match, so the session is anchored with
+# `=`: `list-windows -t =<session>` is exact, while `list-panes -s -t
+# =<session>` is not unless the target ends in `:` (verified on tmux 3.7c).
+#
+# Accepted shapes: `<session>:<window-name>` (the recorded task form, one call),
+# `<session>:<index>`, `<session>:<window>.<pane-index|%pane-id>`,
+# `<session>:@window-id|%pane-id`, and a bare `%pane-id` or `@window-id` (the
+# supervisor pane from $TMUX_PANE). Anything else is `unreadable`.
+# A definitive no-session/no-server/no-socket answer is `missing`; any other
+# inventory failure is `unreadable`, so a transient tmux problem never
+# licenses a duplicate.
+fm_backend_tmux_target_presence() {  # <target> -> present|missing|unreadable
+  local target=$1 session='' window inventory status idx name pidx pid wid
   case "$target" in
+    %?*)
+      if inventory=$(LC_ALL=C tmux list-panes -a -F '#{pane_id}' 2>&1); then status=0; else status=$?; fi
+      window=$target
+      ;;
+    @?*)
+      if inventory=$(LC_ALL=C tmux list-windows -a -F '#{window_id}' 2>&1); then status=0; else status=$?; fi
+      window=$target
+      ;;
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
-    *:*) ;;
+    *:*)
+      session=${target%%:*}
+      session=${session#=}
+      window=${target#*:}
+      window=${window#=}
+      [ -n "$session" ] && [ -n "$window" ] || { printf 'unreadable'; return 0; }
+      if inventory=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>&1); then status=0; else status=$?; fi
+      ;;
     *) printf 'unreadable'; return 0 ;;
   esac
-  session=${target%%:*}
-  window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
-  else
-    inventory_status=$?
-  fi
-  if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
+  if [ "$status" -ne 0 ]; then
+    case "$inventory" in
       *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
         printf 'missing'
         ;;
@@ -279,10 +290,66 @@ fm_backend_tmux_agent_state() {  # <target>
     esac
     return 0
   fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
+  if printf '%s\n' "$inventory" | grep -Fqx -- "$window"; then
+    printf 'present'
     return 0
   fi
+  # Only an index, a pane-qualified window, or an id can still name a pane the
+  # name inventory did not list, so a plain recorded name costs one call.
+  case "$session:$window" in
+    ?*:[0-9]*|?*:*.*|?*:[%@]*) ;;
+    *) printf 'missing'; return 0 ;;
+  esac
+  # `:` separates the fixed fields and the window name comes last, so any
+  # character in a name survives the read (tmux rewrites control-character
+  # separators under LC_ALL=C).
+  if inventory=$(LC_ALL=C tmux list-panes -s -t "=$session:" \
+      -F '#{window_index}:#{pane_index}:#{pane_id}:#{window_id}:#{window_name}' 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 0 ] || { printf 'unreadable'; return 0; }
+  while IFS=: read -r idx pidx pid wid name; do
+    [ -n "$pid" ] || continue
+    case "$window" in
+      "$idx"|"$wid"|"$pid"|"$idx.$pidx"|"$name.$pidx"|"$idx.$pid"|"$name.$pid")
+        printf 'present'
+        return 0
+        ;;
+    esac
+  done <<EOF
+$inventory
+EOF
+  printf 'missing'
+}
+
+# fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
+# recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
+# shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
+# the empirical basis. The recorded endpoint must be proven present by
+# fm_backend_tmux_target_presence above before its foreground command can be
+# trusted, and that owner's `missing` versus `unreadable` split carries through.
+#
+# The verdict combines two independent name sources rather than trusting either
+# alone. Either source naming a verified harness is enough for `alive`, because
+# a false `dead` is the one outcome that can launch a duplicate agent onto a
+# live worktree, while the foreground process group - when it is readable - is
+# authoritative for the negative verdicts, since it is the only source that can
+# distinguish a truly idle pane from a rewritten process title.
+fm_backend_tmux_agent_state() {  # <target>
+  local target=$1 comm
+  local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
+  case "$target" in
+    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
+    *:*) ;;
+    *) printf 'unreadable'; return 0 ;;
+  esac
+  case "$(fm_backend_tmux_target_presence "$target")" in
+    present) ;;
+    missing) printf 'missing'; return 0 ;;
+    *) printf 'unreadable'; return 0 ;;
+  esac
 
   foreground=$(fm_backend_tmux_foreground_comms "$target")
   while IFS= read -r name; do
