@@ -404,6 +404,7 @@ pass "cursor composer: a stale Cursor screen over a dead shell never reads empty
 # probe cannot pass by accident on a tmux whose display-message fails.
 new_window fm-present "$SLEEP_BIN" 900
 new_window fm-present-2 "$SLEEP_BIN" 900
+new_window fm-dotted.id "$SLEEP_BIN" 900
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "${SESSION}-longer" -n fm-other -c "$LAB/wt" -- "$SLEEP_BIN" 900 \
   || fail "could not create the prefix-named session"
 
@@ -417,7 +418,9 @@ fi
 if fm_backend_target_exists tmux "$SESSION:fm-pres"; then
   fail "a prefix of a live window name must not stand in for the recorded window"
 fi
-pass "tmux presence: a present window exists; a missing window or a name prefix on a live server does not"
+fm_backend_target_exists tmux "$SESSION:fm-dotted.id" \
+  || fail "a present window whose name contains a dot (task ids may) must read as existing"
+pass "tmux presence: a present window exists, dotted names included; a missing window or a name prefix on a live server does not"
 
 tmux display-message -p -t "no-such-session:fm-present" '#{pane_id}' >/dev/null 2>&1 \
   || fail "precondition: this tmux no longer answers display-message for a missing session"
