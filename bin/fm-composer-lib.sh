@@ -317,11 +317,12 @@ fm_composer_strip_ghost() {
 # part of that union for the same reason the others are: without it a cursor
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
-# agy's `esc to cancel` belongs for the same delivery reason: when its composer
-# becomes unreadable during a turn, the idle-to-busy footer transition must
-# acknowledge the submit so callers do not retry an already accepted command.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc to cancel'
-FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc to cancel'
+# agy's `esc to cancel` is part of the union for the same delivery reason: an
+# explicit tmux agy endpoint reaches the submit core with no recorded harness,
+# and when its composer becomes unreadable during a turn the idle-to-busy footer
+# transition must acknowledge the submit so callers do not retry an already
+# accepted command.
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
@@ -352,6 +353,14 @@ FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # injection. Cursor's recorded worker state comes from its transcript fold in
 # bin/fm-busy-lib.sh, never from this row.
 FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
+# agy (Antigravity CLI) renders a pinned status row while a turn runs: the
+# `esc to cancel` token on the left and the model cell on the right (verified
+# live, agy 1.2.0; the idle row shows `? for shortcuts` instead). The
+# `Generating...` spinner word beside it is a free-floating output line and is
+# deliberately not matched, so echoed worker output cannot fake an
+# acknowledgement. Delivery guard only; recorded worker state comes from the
+# native agy hooks through bin/fm-busy-lib.sh.
+FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]

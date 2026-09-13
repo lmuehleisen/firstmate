@@ -38,9 +38,10 @@
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
-#   or herdr), refuses unless the endpoint's shell is sitting in the recorded
-#   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   or herdr), and clears the previous harness's per-task wiring before arming
+#   the new incarnation. The replacement still never starts outside the copy
+#   holding the work: a Herdr shell that has drifted out of the recorded
+#   worktree is told once to return, and only a shell that will not go refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -328,13 +329,13 @@
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
-# hooks are written, a non-secondmate claude launch pre-registers the worktree in
-# the launching user's own Claude trust store through bin/fm-claude-trust.sh,
-# because Claude's interactive workspace-trust dialog gates a fresh worktree and
-# firstmate cannot answer it. That helper's header owns the structural scope test
-# and every refusal; a failed registration stops this spawn rather than launching
-# a worker that would wedge on the dialog. A --secondmate launch never runs it,
-# so a claude secondmate home keeps its own one-time trust decision.
+# hooks are written, every claude launch pre-registers the directory the pane
+# starts in - the task worktree, or the secondmate home for a --secondmate spawn -
+# in the launching user's own Claude trust store through bin/fm-claude-trust.sh,
+# because Claude's interactive workspace-trust dialog gates a folder it has never
+# seen and firstmate cannot answer it. That helper's header owns the structural
+# scope test for both shapes and every refusal; a failed registration stops this
+# spawn rather than launching a worker that would wedge on the dialog.
 # Every claude launch also carries the attribution-off policy in its per-launch
 # --settings JSON, so a spawned worker never writes a Co-Authored-By trailer,
 # Claude-Session link, or generated-with line into a commit or PR body;
@@ -351,9 +352,10 @@
 # re-running the transition, so an eligible In-flight item is left untouched.
 # The transition is
 # skipped entirely for --secondmate spawns (persistent agents are not work
-# items), on a config/backlog-backend=manual home, and in a home that keeps no
-# data/backlog.md. An automatic-backend home with a backlog but no compatible
-# tasks-axi refuses before creating any lifecycle state.
+# items), on a config/backlog-backend=manual home, and in a markdown home that
+# keeps no data/backlog.md. A configured non-markdown adapter remains
+# active without a markdown file; any active automatic backend without
+# compatible tasks-axi refuses before creating lifecycle state.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -1663,7 +1665,12 @@ launch_template() {
     # plugin engine is off in the default build, so firstmate folds muse's own
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
-    # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
+    # codex, opencode, and kimi are markerless too and inherit foreign markers the
+    # same way, but detection no longer depends on this launch-side clearing:
+    # bin/fm-harness.sh lets a markerless harness's structural ancestor outrank an
+    # inherited marker. The clearing stays on the cursor and muse templates as the
+    # verified launch behavior their evidence records, not as the only thing
+    # standing between a retained marker and a misidentified worker.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # rovo (Atlassian Rovo CLI): a positional brief is dead-on-arrival - rovo
     # loads, never enters a working state, and drops back to an idle shell within
@@ -2765,8 +2772,13 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
     }
     old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
     case "$old_state" in
+      # A stale registration over a shell-only pane is agent-free for RECOVERY
+      # (--relaunch reuses the pane, issue #4115), but the duplicate-launch
+      # corridor keeps refusing it like every other non-husk state, so a fresh
+      # spawn is refused here consistently with the reclaim and presentation
+      # gates downstream.
       dead|no-agent) return 0 ;;
-      live|unknown)
+      live|stale-agent|unknown)
         echo "error: existing herdr endpoint for $ID is $old_state; refusing duplicate launch" >&2
         return 1
         ;;
@@ -2803,7 +2815,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   if fm_backlog_row_probe "$DATA" "$ID"; then
     BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
   elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
-    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (tasks-axi add $ID '<title>' --kind $KIND) and re-run" >&2
+    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (bin/fm-tasks-axi.sh add $ID '<title>' --kind $KIND) and re-run" >&2
     exit 1
   else
     echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
@@ -3249,14 +3261,18 @@ rovo_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
-# No task record is ever published on this failure path, so nothing else
-# (teardown, the watcher) will ever learn this endpoint exists to close it:
-# without this, the already-launched --yolo rovo process keeps running as an
-# orphaned autonomous agent outside task control. Mirrors fm-teardown.sh's own
-# generic non-orca kill call; orca's worktree+terminal are owned by the
-# separate ORCA_ABORT_CLEANUP trap path and are out of scope here.
+# The launch-then-confirm gates run after the task record is published, when
+# ORCA_ABORT_CLEANUP is already cleared and neither the abort trap nor a
+# teardown owns this endpoint yet, so a gate failure must close the launched
+# process here or it keeps running as an orphaned autonomous agent outside
+# task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
+# the exact terminal is closed: that stops the CLI while its worktree stays
+# for the record's own teardown, which owns worktree deletion.
 rovo_endpoint_cleanup() {
-  [ "$BACKEND" = orca ] && return 0
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_kill orca "$T" 2>/dev/null || true
+    return 0
+  fi
   local tab_id=
   [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
@@ -3275,8 +3291,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
     sleep 0.5
   done
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-    echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
-    exit 1
+    if [ "$BACKEND" != herdr ]; then
+      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
+      exit 1
+    fi
+    relaunch_cd_path=${WT//\'/\'\\\'\'}
+    spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'" || {
+      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
+      exit 1
+    }
+    for _ in $(seq 1 10); do
+      relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+      [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
+      sleep 0.5
+    done
+    if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
+      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and did not return to its recorded worktree '$WT' when told to; refusing to relaunch an agent outside the copy holding its work" >&2
+      exit 1
+    fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
   if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
@@ -3354,6 +3386,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
 fi
 if [ -n "$HERDR_RECLAIM_WT" ]; then
   # Endpoint recovery is complete. From here reuse the existing relaunch
@@ -3365,27 +3398,35 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Pre-register Claude's workspace trust for the worktree, at the first point the
-# worktree is known and before any per-task state is created below. The dialog
-# gates the pane before the brief is ever read, and it also gates loading the
-# project settings written further down, so nothing armed below takes effect
-# without it. bin/fm-claude-trust.sh owns the structural scope test and refuses
-# any path that is not this project's own isolated worktree; a refusal blocks the
-# spawn rather than launching a worker that would wedge on a dialog firstmate
-# cannot answer. Refusing here rather than beside the arm keeps this in the same
-# class as the two worktree refusals just above: no temp root, no retired
-# relaunch wiring and no busy record exists yet to strand, so the refusal names
-# the endpoint the same way they do and leaves nothing else behind.
-if [ "$KIND" != secondmate ]; then
-  case "$HARNESS" in
-    claude*)
-      if ! "$FM_ROOT/bin/fm-claude-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
-        echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
-        exit 1
-      fi
-      ;;
-  esac
-fi
+# Pre-register Claude's workspace trust for the directory this launch starts in,
+# at the first point that directory is known and before any per-task state is
+# created below. The dialog gates the pane before the brief is ever read, and it
+# also gates loading the project settings written further down, so nothing armed
+# below takes effect without it. EVERY claude launch needs it, a secondmate's
+# included: its home is just as unseen by Claude as a fresh worktree, and
+# skipping the step for that kind left a standalone-clone secondmate home with
+# nothing registered and a pane wedged on a dialog firstmate cannot answer.
+# bin/fm-claude-trust.sh owns the structural scope test for both shapes and
+# refuses anything that is neither this project's own isolated worktree nor a
+# seeded secondmate home marked for this id; a refusal blocks the spawn rather
+# than launching a worker that would wedge. Refusing here rather than beside the
+# arm keeps this in the same class as the two worktree refusals just above: no
+# temp root, no retired relaunch wiring and no busy record exists yet to strand,
+# so the refusal names the endpoint the same way they do and leaves nothing else
+# behind.
+case "$HARNESS" in
+  claude*)
+    if [ "$KIND" = secondmate ]; then
+      spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    else
+      spawn_trust_args=("$WT" "$PROJ_ABS")
+    fi
+    if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+      echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
