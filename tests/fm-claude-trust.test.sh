@@ -238,13 +238,42 @@ JSON
   pass "fm-claude-trust.sh: preserves unrelated keys on the project-root entry"
 }
 
-# hasClaudeMdExternalIncludesApproved===false on the project-root entry is a
-# human's explicit "No, disable" answer, recorded in the SAME store their own
-# interactive sessions read. A spawn must never flip that to true on their
-# behalf: doing so would grant every later interactive session in that
-# checkout silent external-file inclusion the human declined. The whole
-# registration refuses instead, and the store - including the worktree entry,
-# which is never reached - must come back byte-for-byte unchanged.
+# Claude persists approved===false before it has shown the external-imports
+# warning. That default is not a human decision, so it must not block trust
+# registration or be propagated to the new worktree entry. Both import flags
+# on the existing project entry must remain byte-for-value untouched too.
+test_project_root_default_false_without_warning_registers_trust() {
+  local rec store
+  rec=$(make_case project-default-false)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  cat > "$store" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false,"allowedTools":["Read"]}}}
+JSON
+  run_trust "$CONFIG" "$WT" "$PROJ" >/dev/null \
+    || fail "registration failed against a project whose external-import flags are untouched defaults"
+  assert_trusted "$store" "$WT" "the worktree was not registered as trusted"
+  assert_store_value "$store" 'undefined' \
+    "the worktree gained an external-import approval value" projects "$WT" hasClaudeMdExternalIncludesApproved
+  assert_store_value "$store" 'undefined' \
+    "the worktree gained an external-import warning-shown value" projects "$WT" hasClaudeMdExternalIncludesWarningShown
+  assert_store_value "$store" 'false' \
+    "the project entry's default external-import approval changed" projects "$PROJ" hasClaudeMdExternalIncludesApproved
+  assert_store_value "$store" 'false' \
+    "the project entry's default warning-shown value changed" projects "$PROJ" hasClaudeMdExternalIncludesWarningShown
+  assert_store_value "$store" '["Read"]' \
+    "the project entry's unrelated settings were lost" projects "$PROJ" allowedTools
+  pass "fm-claude-trust.sh: a default false import flag without a shown warning does not block trust"
+}
+
+# The paired state warning-shown===true and approved===false on the
+# project-root entry is a human's explicit "No, disable" answer, recorded in
+# the SAME store their own interactive sessions read. A spawn must never flip
+# that to true on their behalf: doing so would grant every later interactive
+# session in that checkout silent external-file inclusion the human declined.
+# The whole registration refuses instead, and the store - including the
+# worktree entry, which is never reached - must come back byte-for-byte
+# unchanged.
 test_project_root_entry_declined_external_imports_is_not_overridden() {
   local rec store out before after
   rec=$(make_case project-decline)
@@ -256,8 +285,10 @@ JSON
   before=$(cat "$store")
   out=$(run_trust "$CONFIG" "$WT" "$PROJ")
   expect_code 1 $? "a project that already declined external imports must be refused: $out"
-  assert_contains "$out" "declined external CLAUDE.md imports" \
+  assert_contains "$out" "records a human decline of external CLAUDE.md imports" \
     "the refusal did not name the declined-consent reason"
+  assert_contains "$out" "approve external imports in an interactive Claude session before spawning" \
+    "the refusal did not explain how the human can change the decision"
   after=$(cat "$store")
   [ "$before" = "$after" ] || fail "the store was modified despite the refusal"
   assert_not_trusted "$store" "$WT" "the worktree entry was registered despite the refusal"
@@ -799,6 +830,7 @@ test_fresh_worktree_is_trusted
 test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
 test_project_root_entry_preserves_other_keys
+test_project_root_default_false_without_warning_registers_trust
 test_project_root_entry_declined_external_imports_is_not_overridden
 test_registration_is_idempotent
 test_primary_checkout_is_refused
