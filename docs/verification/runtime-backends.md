@@ -574,6 +574,25 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+### Stranded-doorbell recovery
+
+The same guard also types a doorbell with no Enter, records the stranded memory, and requires one ordinary re-ring to submit it with Enter alone.
+Verified on 2026-09-13, tmux 3.7c, macOS 25.6.0, private socket:
+
+```sh
+FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=codex bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+```text
+ok - codex (codex-cli 0.154.0): the doorbell reached a real worker, which acted and acked with the mv
+ok - codex (codex-cli 0.154.0): a stranded doorbell was submitted by one re-ring (result 5), and the worker acted and acked
+```
+
+Codex 0.154.0 and Claude Code 2.1.270 both word-wrap a long composer line, dropping the space at each break and indenting continuation rows by two cells, which is why the identity check forgives whitespace only at row boundaries.
+On both, a composer holding the exact doorbell matched, and appending text or deleting one character did not.
+Claude Code 2.1.270 could not run inside this guard on the verification machine: its `--dangerously-skip-permissions` launch stops at a bypass-permissions acceptance dialog that the guard never confirms, so both Claude checks failed as unready.
+Claude was instead checked by hand without that flag: the same typed doorbell plus stranded memory made `fm_task_inbox_ring` return 5, and the worker acknowledged the record 14 seconds later.
+
 ## agy (Antigravity CLI)
 
 The agy crewmate adapter was verified on 2026-09-10 with agy 1.2.0 on macOS 25.6.0, tmux 3.6a.
