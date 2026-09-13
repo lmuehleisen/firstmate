@@ -613,7 +613,7 @@ declare_completed_ship_hold() {  # <task-id>
   last=$(last_status_line "$status_file")
   [ "$(status_line_verb "$last")" = 'done' ] || return 0
   [ -z "$(status_open_decisions "$status_file")" ] || return 0
-  show=$(task_show "$id") || fail "cannot verify completed ship $id before declaring its wait"
+  task_show_or_fail "$id" "cannot verify completed ship $id before declaring its wait"
   [ "$(show_field "$show" state)" != 'done' ] || return 0
   [ "$(show_field_value "$show" hold_kind)" = captain ] || return 0
   [ "$(show_field_value "$show" held)" = yes ] || return 0
@@ -1019,9 +1019,10 @@ command_hold() {
     pristine_body=$(decode_shown_value "$(show_field "$show" body)") \
       || fail "could not decode the existing body for $id; its hold reason was left unchanged"
     write_superseded_hold_record "$id" "$(show_field "$show" body)" "$hold_set" "$superseded_reason"
-    show=$(task_show "$id") \
+    task_show "$id" \
       || withdraw_superseded_hold_record "$id" "$pristine_body" \
         "task $id disappeared while preserving its previous hold reason"
+    show=$TASK_SHOW_OUTPUT
     body_has_superseded_hold_record "$(show_field_value "$show" body)" "$hold_set" "$superseded_reason" \
       || withdraw_superseded_hold_record "$id" "$pristine_body" \
         "task $id did not retain its previous hold reason; its hold reason was left unchanged"
