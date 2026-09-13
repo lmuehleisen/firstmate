@@ -425,13 +425,14 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # as that same stale wake exactly once. If the attempt's ladder write fails while
 # its record remains unhandled, that unwritable state surfaces through the same
 # stale path instead of silently re-ringing forever; acknowledgement or teardown
-# still makes the race quiet. The attempt is data-plane typing or a
-# composer-protected skip, never a wake, so normal retries keep the watcher
+# still makes the race quiet. The attempt is data-plane typing, an Enter-only
+# submit of a stranded doorbell, or a composer-protected skip, never a wake, so
+# normal retries keep the watcher
 # blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason ring_rc ring_spend backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -463,7 +464,11 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
-      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
+      # Result 5 only submitted a doorbell an earlier ring stranded, so it
+      # completes that attempt instead of spending another.
+      ring_spend=
+      [ "$ring_rc" -ne 5 ] || ring_spend=completed
+      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec" "$ring_spend"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
           return 0
