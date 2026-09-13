@@ -47,6 +47,19 @@ run_lavish() {  # <home> <command args...>
     "$ROOT/bin/fm-procevent-lavish.sh" "$@"
 }
 
+# The generic process-event runner, run against this suite's isolated home and
+# its own claim root, so a review armed here can never contend with a real one.
+run_procevent() {  # <home> <command args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" "$@"
+}
+
 run_bearings() {  # <home> [extra args]
   local home=$1
   shift
@@ -90,7 +103,15 @@ configure_merged_github() {  # <home>
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
-  "pr view") printf '%s\n' 1111111111111111111111111111111111111111 ;;
+  "pr view")
+    case " $* " in
+      *statusCheckRollup*)
+        printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
+        ;;
+      *headRefOid*) printf '%s\n' 1111111111111111111111111111111111111111 ;;
+    esac
+    ;;
+  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
   "api graphql")
     printf '%s\n' 'state=MERGED' 'merged=true' 'queued=false' 'base=main'
     ;;
@@ -100,7 +121,6 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
-  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
   "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
 esac
 SH
@@ -2409,6 +2429,63 @@ test_legacy_identities_keep_working() {
   pass "legacy identities, metadata, bindings, and the shim keep working"
 }
 
+# A board answer must reach the keyed-answer intake through the RUNNER, not just
+# through a hand-fed `answers` call. The captain answered ten calls on a bearings
+# board, the board accepted them, and nothing collected them: the source that
+# collects a board is a supervised process, and while it was not running the
+# board went on presenting as armed. Everything between the captured result and
+# the closed task is asserted here end to end - capture, the wake that tells
+# firstmate to look, and the recorded answer - because each of those was intact
+# on its own while the chain as a whole delivered nothing.
+test_board_answer_reaches_the_keyed_answer_intake() {
+  local home sid stub out queue show
+  home=$(make_home board-channel)
+  sid=lavish-b0a4d0000000f1e2
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
+
+  run_captain "$home" hold sample-board-call --title "Choose the sample board route" \
+    --reason "captain board route choice pending" --repo sample >/dev/null \
+    || fail "could not register the board call"
+
+  # One published Lavish poll response carrying the captain's structured answer,
+  # in the shape the adapter's own reader parses: a declared field order, an
+  # indented CSV row, and the versioned answer context inside its prompt.
+  stub="$home/board-source.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+session:
+  status: feedback
+  session_ended: false
+prompts[1]{tag,text,prompt}:
+  "choice","Take the north route","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-board-call\",\"selection\":\"north\",\"note\":\"\"}"
+OUT
+SH
+  chmod +x "$stub"
+
+  run_procevent "$home" register lavish "$sid" -- "$stub" >/dev/null \
+    || fail "could not register the board source"
+  run_captain "$home" bind "$sid" >/dev/null \
+    || fail "could not bind the board source to the keyed-answer intake"
+
+  out=$(run_procevent "$home" start "$sid" 2>&1) \
+    || fail "the board source runner did not complete: $out"
+  assert_contains "$out" "$sid.1.result" "the board answer was never durably captured: $out"
+  assert_contains "$out" "answers-fed: $sid" \
+    "the captured board answer never reached the keyed-answer intake: $out"
+
+  queue=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
+  assert_contains "$queue" "check: procevent lavish $sid 1" \
+    "the captured board answer produced no wake: $queue"
+
+  show=$(tasks_in "$home" show sample-board-call --full)
+  assert_contains "$show" "state: done" "the board answer did not close the captain call"
+  assert_contains "$show" "north" "the board answer lost the captain's selection"
+  assert_contains "$show" "the captured result $sid sequence 1" \
+    "the recorded answer did not name the board result that carried it"
+  pass "a board answer reaches the keyed-answer intake and wakes firstmate"
+}
+
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
@@ -3378,8 +3455,8 @@ test_pr_merge_entrypoint_refuses_a_captain_held_task() {
   run_captain "$home" hold "$pr_id" --reason "captain merge approval pending" >/dev/null \
     || fail "could not hold the PR entrypoint fixture"
 
-  # Without the entrypoint guard, this run reaches gh and returns success
-  # even though the task is still held for the captain.
+  # Without the entrypoint guard, this run reaches gh and returns success even
+  # though the task is still held for the captain.
   set +e
   run_pr_merge "$home" "$pr_id" "$pr" > "$home/pr.out" 2> "$home/pr.err"
   rc=$?
@@ -4090,6 +4167,7 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open
 test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
+test_board_answer_reaches_the_keyed_answer_intake
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled

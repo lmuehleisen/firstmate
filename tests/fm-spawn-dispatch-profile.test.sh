@@ -1291,6 +1291,25 @@ SH
   pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
 }
 
+# An upstream-only config/claude-permission-mode file is not read in this fork:
+# config/crew-permissions is the only worker permission setting, so even an
+# explicit `bypass` value must never produce a bypass launch.
+test_upstream_claude_permission_mode_file_cannot_select_bypass() {
+  local rec id out status launch
+  id=permmode-bypass-z19
+  rec=$(make_spawn_case permmode-bypass claude "$id")
+  read_case_record "$rec"
+  printf 'bypass\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn beside an ignored claude-permission-mode file should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --permission-mode auto" "the reviewed default permission mode was not kept"
+  assert_not_contains "$launch" "--dangerously-skip-permissions" "a claude-permission-mode file must not select bypass"
+  pass "an upstream config/claude-permission-mode file cannot select a bypass launch"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
@@ -1328,5 +1347,6 @@ test_non_claude_harness_ignores_config_dir
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_upstream_claude_permission_mode_file_cannot_select_bypass
 
 echo "# all fm-spawn-dispatch-profile tests passed"
