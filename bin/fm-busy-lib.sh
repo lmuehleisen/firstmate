@@ -36,6 +36,7 @@
 #                    SessionEnd close)
 #   agy-hook         Agy PreInvocation opens; fullyIdle Stop closes (interrupt
 #                    has no Stop and deliberately leaves the record busy)
+#   devin-hook       Devin CLI lifecycle hooks (.devin/hooks.v1.json SessionStart/UserPromptSubmit/Stop/SessionEnd)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -204,6 +205,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
     agy) adapter=agy-hook ;;
+    devin*) adapter=devin-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
