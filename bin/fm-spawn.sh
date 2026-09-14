@@ -3310,7 +3310,7 @@ agy_wait_for_started() {
 # status is not proof (tmux's adapter reports success either way), so closure
 # counts only once the backend no longer finds the target.
 agy_endpoint_close_confirmed() {
-  local tab_id= i=0 max=${FM_AGY_CLOSE_POLLS:-10} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  local tab_id='' i=0 max=${FM_AGY_CLOSE_POLLS:-10} interval=${FM_AGY_POLL_INTERVAL:-0.5}
   [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
   if [ "$BACKEND" = orca ]; then
     fm_backend_kill orca "$T" 2>/dev/null || return 1
