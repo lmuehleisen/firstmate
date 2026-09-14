@@ -270,9 +270,13 @@
 #   --dangerously-skip-permissions is emitted by neither setting and is never a
 #   fallback, so an agy worker parks at a visible in-pane approval prompt rather
 #   than widening its own permissions.
-#   Empty, unreadable, or unknown settings refuse the launch.
-#   This applies to ship, scout, and secondmate launches, not an already-running
+#   The file is resolved once, before any mutation, on every spawn: surrounding
+#   whitespace (including a CRLF ending) is trimmed, proven absence means auto,
+#   and an uninspectable path, a non-file, an unreadable file, or any value other
+#   than auto or manual after trimming refuses the spawn, whatever its harness.
+#   The flags apply to ship, scout, and secondmate launches, not an already-running
 #   primary, other harnesses, or the explicit raw-command escape hatch.
+#   Secondmate homes inherit the file from the primary (bin/fm-config-inherit-lib.sh).
 #   There is no fallback to permission or sandbox bypass on failure or denial.
 #   Both modes add only the owning home's state directory and the brief's
 #   directory to the worker's existing worktree access, for status/inbox/report
@@ -444,6 +448,29 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     echo "error: config/launch-env-allowlist must contain one environment name per line, blank lines, or # comments" >&2
     exit 1
   fi
+fi
+# Worker permission mode: resolved once, before any mutation, for every spawn.
+# Absence (proven by lstat) means auto; a path that cannot be inspected, a
+# non-file, or an unreadable file refuses. Surrounding whitespace is trimmed.
+if ! CREW_PERMISSIONS_PRESENT=$(fm_config_source_present "$CONFIG/crew-permissions"); then
+  exit 1
+fi
+CREW_PERMISSION_MODE=auto
+if [ "$CREW_PERMISSIONS_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/crew-permissions" ] || [ ! -r "$CONFIG/crew-permissions" ]; then
+    echo "error: config/crew-permissions must be a readable file containing auto or manual" >&2
+    exit 1
+  fi
+  CREW_PERMISSION_MODE=$(cat "$CONFIG/crew-permissions") || exit 1
+  CREW_PERMISSION_MODE=${CREW_PERMISSION_MODE#"${CREW_PERMISSION_MODE%%[![:space:]]*}"}
+  CREW_PERMISSION_MODE=${CREW_PERMISSION_MODE%"${CREW_PERMISSION_MODE##*[![:space:]]}"}
+  case "$CREW_PERMISSION_MODE" in
+    auto|manual) ;;
+    *)
+      echo "error: invalid config/crew-permissions (expected auto or manual); refusing launch" >&2
+      exit 1
+      ;;
+  esac
 fi
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
@@ -1458,17 +1485,10 @@ omp_model_validate() {  # <omp-bin> <model>
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
-  local harness=$1 kind=${2:-ship} permission_mode=auto permission_flags
+  local harness=$1 kind=${2:-ship} permission_flags
   case "$harness" in
     claude|codex|agy)
-      if [ -e "$CONFIG/crew-permissions" ] || [ -L "$CONFIG/crew-permissions" ]; then
-        if [ ! -f "$CONFIG/crew-permissions" ] || [ ! -r "$CONFIG/crew-permissions" ]; then
-          echo "error: config/crew-permissions must be a readable file containing auto or manual" >&2
-          return 1
-        fi
-        permission_mode=$(cat "$CONFIG/crew-permissions") || return 1
-      fi
-      case "$harness:$permission_mode" in
+      case "$harness:$CREW_PERMISSION_MODE" in
         claude:auto) permission_flags='--permission-mode auto' ;;
         claude:manual) permission_flags='--permission-mode manual' ;;
         codex:auto) permission_flags='--approve-for-me' ;;
