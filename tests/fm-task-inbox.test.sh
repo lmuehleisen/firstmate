@@ -536,11 +536,14 @@ make_composer() {  # <dir> <buffer-text> <swallow-count>
   : > "$1/submit.log"
 }
 
+# Shape box-c is the bordered box read under LC_ALL=C, as the watcher runs in
+# daemon and SSH environments, where bash offsets count bytes, not characters.
 composer_ring() {  # <case-dir> <state> <record> [shape] -> ring result code
-  local dir=$1 state=$2 rec=$3 shape=${4:-} rc=0
+  local dir=$1 state=$2 rec=$3 shape=${4:-} locale=${LC_ALL:-} rc=0
+  case "$shape" in box-c) shape=box; locale=C ;; esac
   PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$dir/send.log" FM_KEY_LOG="$dir/key.log" \
     FM_FAKE_TMUX_AGENT=claude FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_COMPOSER_SHAPE="$shape" \
-    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+    LC_ALL="$locale" inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   printf '%s' "$rc"
 }
 
@@ -550,7 +553,7 @@ composer_ring() {  # <case-dir> <state> <record> [shape] -> ring result code
 # the composer with Enter alone rather than protecting it as foreign text.
 test_ring_submits_stranded_doorbell_with_enter_alone() {
   local shape dir state rec doorbell rc
-  for shape in box wordwrap; do
+  for shape in box box-c wordwrap; do
   dir="$TMP_ROOT/ring-stranded-$shape"; state="$dir/state"; mkdir -p "$state"
   make_watch_stubs "$dir" >/dev/null
   : > "$dir/send.log"
@@ -575,7 +578,7 @@ test_ring_submits_stranded_doorbell_with_enter_alone() {
   [ ! -e "$state/t1.inbox/.stranded" ] || fail "a proven-empty composer should clear the stranded memory"
   [ -f "$rec" ] || fail "the durable record stays until the worker acknowledges it"
   done
-  pass "inbox: a stranded doorbell (bordered or word-wrapped composer) is reported, then submitted by the next ring with Enter alone"
+  pass "inbox: a stranded doorbell (bordered, bordered under LC_ALL=C, or word-wrapped composer) is reported, then submitted by the next ring with Enter alone"
 }
 
 test_ring_protects_foreign_pending_text() {

@@ -293,7 +293,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # word-wrapped doorbell.
 fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cap caps row raw content glyph
-  local remaining framed left right prompt_seen=0 width
+  local remaining framed prompt_seen=0 width
   line=$(fm_task_inbox_doorbell_line "$rec") || return 1
   [ -n "$line" ] || return 1
   cap=$(fm_backend_capture "$backend" "$target" "$FM_COMPOSER_CAPTURE_LINES" "$label" 2>/dev/null) || return 1
@@ -312,11 +312,17 @@ fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [e
       box)
         framed=$content
         fm_composer_normalize_trim_var framed
-        left=${framed:0:1}; right=${framed: -1}
-        case "$left$right" in '││'|'┃┃'|'║║'|'||') ;; *) return 1 ;; esac
-        content=${framed:1:${#framed}-2}
-        case "$content" in ' '*) content=${content:1} ;; *) return 1 ;; esac
-        case "$content" in *' ') content=${content:0:${#content}-1} ;; *) return 1 ;; esac
+        # Literal pattern removal, never character offsets: under LC_ALL=C an
+        # offset slices a multibyte border glyph byte by byte.
+        case "$framed" in
+          '│'*'│') content=${framed#"│"}; content=${content%"│"} ;;
+          '┃'*'┃') content=${framed#"┃"}; content=${content%"┃"} ;;
+          '║'*'║') content=${framed#"║"}; content=${content%"║"} ;;
+          '|'*'|') content=${framed#"|"}; content=${content%"|"} ;;
+          *) return 1 ;;
+        esac
+        case "$content" in ' '*) content=${content#" "} ;; *) return 1 ;; esac
+        case "$content" in *' ') content=${content%" "} ;; *) return 1 ;; esac
         if [ "$prompt_seen" = 0 ] \
           && fm_composer_leading_prompt_glyph_var glyph "$content"; then
           content=${content#*"$glyph"}
