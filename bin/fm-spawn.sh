@@ -281,6 +281,7 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __PERMISSIONDIRS__ additional quoted state and task-data directory flags
 #     __AGYBIN__   quoted absolute agy executable resolved from PATH
+#     __DEVINBIN__ quoted absolute devin executable resolved from PATH
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -1460,7 +1461,7 @@ omp_model_validate() {  # <omp-bin> <model>
 launch_template() {
   local harness=$1 kind=${2:-ship} permission_mode=auto permission_flags
   case "$harness" in
-    claude|codex|agy)
+    claude|codex|agy|devin)
       if [ -e "$CONFIG/crew-permissions" ] || [ -L "$CONFIG/crew-permissions" ]; then
         if [ ! -f "$CONFIG/crew-permissions" ] || [ ! -r "$CONFIG/crew-permissions" ]; then
           echo "error: config/crew-permissions must be a readable file containing auto or manual" >&2
@@ -1486,6 +1487,14 @@ launch_template() {
         # owns the operating consequences.
         agy:auto) permission_flags='--mode accept-edits' ;;
         agy:manual) permission_flags= ;;
+        # devin (Devin CLI): auto selects --permission-mode smart, which uses a
+        # fast model to judge safety and auto-approves workspace edits while
+        # mutating git commands and in-repo scripts prompt. Firstmate pre-allows
+        # Exec(git commit) and Exec(git push) in .devin/config.local.json (D1).
+        # manual selects --permission-mode normal, prompting for all writes and
+        # shell commands. Neither setting ever reaches dangerous / bypass mode.
+        devin:auto) permission_flags='--permission-mode smart' ;;
+        devin:manual) permission_flags='--permission-mode normal' ;;
         *)
           echo "error: invalid config/crew-permissions (expected auto or manual); refusing launch" >&2
           return 1
@@ -1699,6 +1708,23 @@ launch_template() {
     # when a supported effort is requested, since a second --config-override
     # would silently discard the first (confirmed live).
     rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____ROVOCONFIGOVERRIDE__' ;;
+    # devin (Devin CLI): interactive session with positional prompt.
+    # --respect-workspace-trust false suppresses workspace trust prompts on
+    # fresh worktrees. --permission-mode smart (for auto) auto-approves workspace
+    # edits; mutating git and in-repo scripts still prompt, with git commit and
+    # git push pre-allowed in .devin/config.local.json. normal (for manual)
+    # prompts for all writes and bash commands. Dangerous / bypass is never emitted.
+    # Foreign primary markers are cleared so an inherited CLAUDECODE cannot outrank
+    # devin's own marker in a process that only reads the environment.
+    # Devin has no CLI reasoning-effort flag (interactive Alt+T only), so effort
+    # is omitted from launch and recorded in task metadata only.
+    # Its turn-end and busy-state signals do not ride the launch command; they are
+    # lifecycle hooks written into $WT/.devin/config.local.json below.
+    devin)
+      printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS FM_DEVIN_HARNESS=devin __DEVINBIN__ '
+      [ -n "$permission_flags" ] && printf '%s ' "$permission_flags"
+      printf '%s' '--respect-workspace-trust false __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      ;;
     *) return 1 ;;
   esac
 }
@@ -1740,17 +1766,16 @@ case "$ARG3" in
     ;;
 esac
 
-# muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
-# a firstmate instance, so it needs a primary supervision protocol.
-# gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
-# and this task verified only crewmate-side launch, busy state, interrupt, and
-# exit, so a gemini secondmate is refused rather than stood up on an unverified
-# supervision path. muse has none either, and its
+# muse, gemini, and devin are verified as CREWMATE/SCOUT adapters only. A
+# secondmate is a firstmate instance, so it needs a primary supervision protocol.
+# gemini and devin have none: docs/supervision-protocols/ carries no wake
+# protocol for either, so a secondmate is refused rather than stood up on an
+# unverified supervision path. muse has none either, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -1965,6 +1990,29 @@ resolve_agy_binary() {
   return 1
 }
 
+# devin ships as a standalone CLI executable. It is resolved to an absolute path
+# once here so the pane launches the same executable this spawn checked, and a
+# missing install refuses BEFORE any endpoint or worktree exists rather than
+# leaving a pane at a "command not found" shell.
+resolve_devin_binary() {
+  local candidate dir
+  candidate=$(command -v devin 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: devin executable not found on PATH; install the Devin CLI or select a different verified harness" >&2
+  return 1
+}
+
 muse_credential_present() {
   local auth=$1
   [ -s "$auth" ] || muse_worker_meta_api_key_present
@@ -1974,7 +2022,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp|devin)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -2073,13 +2121,20 @@ effort_flag_for_harness() {
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
     # task metadata but never reaches the launch command. Cursor encodes effort
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
-    # effort flag.
+    # effort flag. devin has interactive thinking levels (Alt+T in TUI) but no
+    # CLI launch flag; requested effort stays in task metadata per record-and-omit.
   esac
 }
 
 case "$LAUNCH" in
   *__AGYBIN__*)
     AGY_BIN=$(resolve_agy_binary) || exit 1
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__DEVINBIN__*)
+    DEVIN_BIN=$(resolve_devin_binary) || exit 1
     ;;
 esac
 
@@ -3492,7 +3547,7 @@ if [ "$KIND" != secondmate ]; then
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
-    gemini|agy)
+    gemini|agy|devin)
       if [ "$RAW_LAUNCH" -eq 0 ]; then
         BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
           echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -3575,6 +3630,34 @@ EOF
       cat > "$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
 EOF
+      fi
+      ;;
+    devin)
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
+        # a turn (busy); Stop and SessionEnd close it (idle). SessionStart is
+        # omitted so resume does not leave a false busy on an idle composer.
+        # Stop keeps the turn-ended NOTIFICATION touch for the watcher.
+        # An interrupt leaves the record busy (same as agy and Claude).
+        # Devin CLI reads .devin/config.local.json in the worktree root, which
+        # merges with project and user settings without clobbering tracked hooks
+        # or replacing ~/.config/devin/config.json (captain decision D2).
+        # Decision D1 pre-allows git commit and git push in permissions.allow.
+        # Attribution is pinned false to prevent Co-Authored-By trailers.
+        if [ -e "$WT/.devin/config.local.json" ] || [ -L "$WT/.devin/config.local.json" ] || git -C "$WT" ls-files --error-unmatch .devin/config.local.json >/dev/null 2>&1; then
+          echo "error: cannot spawn devin worker: $WT/.devin/config.local.json already exists or is tracked" >&2
+          exit 1
+        fi
+        mkdir -p "$WT/.devin"
+        busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+        busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source devin-hook"
+        d_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit >/dev/null 2>&1 || true")
+        d_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true")
+        d_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true")
+        cat > "$WT/.devin/config.local.json" <<EOF
+{"permissions":{"allow":["Exec(git commit)","Exec(git push)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"}]}]}}
+EOF
+        exclude_path '.devin/config.local.json'
       fi
       ;;
     opencode*)
@@ -4080,6 +4163,7 @@ case "$HARNESS" in
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
   agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+  devin) LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "${DEVIN_BIN:-}")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
@@ -4105,7 +4189,7 @@ case "$HARNESS" in
     ;;
 esac
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|agy|muse|rovo)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|agy|muse|rovo|devin)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac

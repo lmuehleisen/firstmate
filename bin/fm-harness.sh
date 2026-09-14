@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp|devin|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -132,6 +132,15 @@ harness_marker() {
     echo omp
     return
   fi
+  # devin (Devin CLI) does not publish a verified harness-identity marker to its
+  # tool processes. FM_DEVIN_HARNESS=devin is therefore a Firstmate-OWNED launch
+  # marker established by bin/fm-spawn.sh at the devin launch boundary (which also
+  # clears foreign markers). It is a PRECEDENCE override that wins over an inherited
+  # marker only when an exact `devin` process is genuinely in the ancestry.
+  if [ "${FM_DEVIN_HARNESS:-}" = devin ] && ancestry_names_devin; then
+    echo devin
+    return
+  fi
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -167,6 +176,20 @@ ancestry_names_omp() {
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+  done
+  return 1
+}
+
+# True when an exact `devin` process sits within eight parents of this one. The
+# same anchored match as the ancestry walk below, kept separate so the marker
+# precedence above can demand real process evidence before trusting FM_DEVIN_HARNESS.
+ancestry_names_devin() {
+  local pid=$$ comm
+  for _ in 1 2 3 4 5 6 7 8; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    [ "$(basename -- "$comm")" = devin ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -241,6 +264,9 @@ harness_process_verdict() {  # <pid>
     # carry JETSKI_APP_DATA_DIR=antigravity-cli, which harness_marker reads; the
     # two layers agree on the same harness, so detect_own keeps either verdict.
     agy) echo "comm agy"; return ;;
+    # devin (Devin CLI) is a single binary whose process name is exactly `devin`.
+    # Anchored, never *devin*, so unrelated commands cannot be misread as this harness.
+    devin) echo "comm devin"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
