@@ -861,6 +861,7 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    devin) echo "brew install --cask devin-cli  # or see https://docs.devin.ai/cli" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
@@ -1076,7 +1077,7 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","gemini","agy","muse","rovo","omp","devin"] | index($h);
     def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -1088,7 +1089,7 @@ crew_dispatch_validate() {
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "rovo" then (["low","medium","high","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
+      elif $h == "opencode" or $h == "kimi" or $h == "cursor" or $h == "gemini" or $h == "devin" then false
       else true
       end;
     def profiles($value):
@@ -1425,6 +1426,9 @@ detect_local_config() {
   # instead of failing at the first spawn.
   if [ "$crew" = cursor ] && ! fm_cursor_resolve_binary >/dev/null 2>&1; then
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
+  fi
+  if [ "$crew" = devin ] && ! command -v devin >/dev/null 2>&1; then
+    missing_tool_diagnostic devin
   fi
   crew_dispatch_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \

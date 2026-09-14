@@ -83,7 +83,7 @@ fm_control_harness_family() {  # <recorded-harness>
     pi-signed) printf 'pi-signed' ;;
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
-    devin*) printf 'devin' ;;
+    devin) printf 'devin' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -256,7 +256,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # The directory and per-generation session bindings are retired through
     # fm-agy-hook.sh retire-worker; only this file is a flat wiring artifact.
     agy) printf '%s\n' "$state/$id.agy-hooks/.agents/hooks.json" ;;
-    devin) printf '%s\n' "$wt/.devin/hooks.v1.json" ;;
+    devin) printf '%s\n' "$wt/.devin/config.local.json" ;;
   esac
 }
 

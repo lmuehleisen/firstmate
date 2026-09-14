@@ -281,6 +281,7 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __PERMISSIONDIRS__ additional quoted state and task-data directory flags
 #     __AGYBIN__   quoted absolute agy executable resolved from PATH
+#     __DEVINBIN__ quoted absolute devin executable resolved from PATH
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -1487,10 +1488,11 @@ launch_template() {
         agy:auto) permission_flags='--mode accept-edits' ;;
         agy:manual) permission_flags= ;;
         # devin (Devin CLI): auto selects --permission-mode smart, which uses a
-        # fast model to judge safety and auto-approve routine dev work (build, test,
-        # lint) while mutating git commands always prompt. manual selects
-        # --permission-mode normal, which prompts for all writes and bash commands.
-        # Neither setting ever reaches dangerous / bypass mode.
+        # fast model to judge safety and auto-approves workspace edits while
+        # mutating git commands and in-repo scripts prompt. Firstmate pre-allows
+        # Exec(git commit) and Exec(git push) in .devin/config.local.json (D1).
+        # manual selects --permission-mode normal, prompting for all writes and
+        # shell commands. Neither setting ever reaches dangerous / bypass mode.
         devin:auto) permission_flags='--permission-mode smart' ;;
         devin:manual) permission_flags='--permission-mode normal' ;;
         *)
@@ -1708,18 +1710,18 @@ launch_template() {
     rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____ROVOCONFIGOVERRIDE__' ;;
     # devin (Devin CLI): interactive session with positional prompt.
     # --respect-workspace-trust false suppresses workspace trust prompts on
-    # fresh worktrees. --permission-mode smart (for auto) uses a fast model to
-    # auto-approve routine dev work (build, test, lint) while keeping mutating git
-    # commands under review; normal (for manual) prompts for all writes and bash
-    # commands. Dangerous / bypass mode is never emitted.
+    # fresh worktrees. --permission-mode smart (for auto) auto-approves workspace
+    # edits; mutating git and in-repo scripts still prompt, with git commit and
+    # git push pre-allowed in .devin/config.local.json. normal (for manual)
+    # prompts for all writes and bash commands. Dangerous / bypass is never emitted.
     # Foreign primary markers are cleared so an inherited CLAUDECODE cannot outrank
     # devin's own marker in a process that only reads the environment.
     # Devin has no CLI reasoning-effort flag (interactive Alt+T only), so effort
     # is omitted from launch and recorded in task metadata only.
     # Its turn-end and busy-state signals do not ride the launch command; they are
-    # lifecycle hooks written into $WT/.devin/hooks.v1.json below.
+    # lifecycle hooks written into $WT/.devin/config.local.json below.
     devin)
-      printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS FM_DEVIN_HARNESS=devin devin '
+      printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS FM_DEVIN_HARNESS=devin __DEVINBIN__ '
       [ -n "$permission_flags" ] && printf '%s ' "$permission_flags"
       printf '%s' '--respect-workspace-trust false __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       ;;
@@ -1988,6 +1990,29 @@ resolve_agy_binary() {
   return 1
 }
 
+# devin ships as a standalone CLI executable. It is resolved to an absolute path
+# once here so the pane launches the same executable this spawn checked, and a
+# missing install refuses BEFORE any endpoint or worktree exists rather than
+# leaving a pane at a "command not found" shell.
+resolve_devin_binary() {
+  local candidate dir
+  candidate=$(command -v devin 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: devin executable not found on PATH; install the Devin CLI or select a different verified harness" >&2
+  return 1
+}
+
 muse_credential_present() {
   local auth=$1
   [ -s "$auth" ] || muse_worker_meta_api_key_present
@@ -2104,6 +2129,12 @@ effort_flag_for_harness() {
 case "$LAUNCH" in
   *__AGYBIN__*)
     AGY_BIN=$(resolve_agy_binary) || exit 1
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__DEVINBIN__*)
+    DEVIN_BIN=$(resolve_devin_binary) || exit 1
     ;;
 esac
 
@@ -3516,7 +3547,7 @@ if [ "$KIND" != secondmate ]; then
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
-    gemini|agy)
+    gemini|agy|devin)
       if [ "$RAW_LAUNCH" -eq 0 ]; then
         BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
           echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -3601,25 +3632,33 @@ EOF
 EOF
       fi
       ;;
-    devin*)
-      # Semantic busy-state hooks (bin/fm-busy-lib.sh): SessionStart and
-      # UserPromptSubmit open a turn (busy); Stop and SessionEnd close it (idle),
-      # so abnormal termination never leaves a stale busy record.
-      # Stop keeps the turn-ended NOTIFICATION touch for the watcher.
-      # Devin CLI reads .devin/hooks.v1.json in the worktree root.
-      # Every hook command tolerates a refused event (|| true) so a stale-gen
-      # writer can never break Devin's own lifecycle.
-      mkdir -p "$WT/.devin"
-      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
-      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source devin-hook"
-      d_start=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event session-start >/dev/null 2>&1 || true")
-      d_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit >/dev/null 2>&1 || true")
-      d_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true")
-      d_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true")
-      cat > "$WT/.devin/hooks.v1.json" <<EOF
-{"SessionStart":[{"hooks":[{"type":"command","command":"$d_start"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"}]}]}
+    devin)
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
+        # a turn (busy); Stop and SessionEnd close it (idle). SessionStart is
+        # omitted so resume does not leave a false busy on an idle composer.
+        # Stop keeps the turn-ended NOTIFICATION touch for the watcher.
+        # An interrupt leaves the record busy (same as agy and Claude).
+        # Devin CLI reads .devin/config.local.json in the worktree root, which
+        # merges with project and user settings without clobbering tracked hooks
+        # or replacing ~/.config/devin/config.json (captain decision D2).
+        # Decision D1 pre-allows git commit and git push in permissions.allow.
+        # Attribution is pinned false to prevent Co-Authored-By trailers.
+        if [ -e "$WT/.devin/config.local.json" ] || [ -L "$WT/.devin/config.local.json" ] || git -C "$WT" ls-files --error-unmatch .devin/config.local.json >/dev/null 2>&1; then
+          echo "error: cannot spawn devin worker: $WT/.devin/config.local.json already exists or is tracked" >&2
+          exit 1
+        fi
+        mkdir -p "$WT/.devin"
+        busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+        busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source devin-hook"
+        d_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit >/dev/null 2>&1 || true")
+        d_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true")
+        d_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true")
+        cat > "$WT/.devin/config.local.json" <<EOF
+{"permissions":{"allow":["Exec(git commit)","Exec(git push)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"}]}]}}
 EOF
-      exclude_path '.devin/hooks.v1.json'
+        exclude_path '.devin/config.local.json'
+      fi
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -4124,6 +4163,7 @@ case "$HARNESS" in
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
   agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+  devin) LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "${DEVIN_BIN:-}")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in

@@ -2180,3 +2180,79 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Devin CLI (devin)
+
+The Devin CLI crewmate and scout adapter was verified on 2026-09-14 with devin-cli 3000.10.21 (`devin 3000.10.21 (611c1cba)`) on macOS arm64, tmux 3.7c.
+Verified for crewmate and scout work only, never a primary or secondmate.
+The vendor binary is `/opt/homebrew/bin/devin` (single arm64 Mach-O binary from Homebrew cask `devin-cli`).
+
+### Process identity and markers
+
+The agent process runs as `devin` (`ps -o comm=` reports `devin`), spawning a child `/opt/homebrew/bin/devin`.
+Devin publishes no harness marker to child tool environments: environment inspection confirmed only `FM_*`, `GIT_EDITOR`, `GIT_TERMINAL_PROMPT`, and inherited launcher variables (`CLAUDECODE` unset).
+`DEVIN_PROJECT_DIR` appears only inside hook execution environments.
+Firstmate's launch boundary establishes `FM_DEVIN_HARNESS=devin`, which is accepted by `bin/fm-harness.sh` only under an exact `devin` ancestor process.
+`tests/fm-devin-harness.test.sh` verifies that ancestry classification identifies `devin` and ignores unrelated processes.
+
+### Approvals and permissions
+
+Devin CLI accepts `--permission-mode` options: `normal` (alias `auto`), `accept-edits`, `smart`, and `dangerous` (alias `yolo`, `bypass`).
+Firstmate maps `auto` to `--permission-mode smart` and `manual` to `--permission-mode normal`, and never emits `dangerous`.
+In smart mode, Devin CLI auto-approves workspace file writes and status line appends outside the workspace.
+It prompts on in-repo test scripts, mutating git commands (`git commit`, `git push`), and actions outside smart model confidence.
+The interactive prompt for non-git commands presents an 8-option menu:
+`1 Yes (Approve once)`, `2 Yes, allow <cmd>`, `3 Yes, always allow ... in wt`, `4 Yes, always allow ... in all projects`, `5 Yes, switch to bypass mode`, `6 Edit command`, `7 Describe change to command`, `8 No`.
+The prompt for git commands offers a 7-option menu without option 5.
+Under captain decision D1, Firstmate pre-allows `Exec(git commit)` and `Exec(git push)` in `.devin/config.local.json` so unattended worker ship turns do not park on git mutations.
+
+### Workspace trust
+
+Untrusted directories trigger an interactive blocking prompt:
+`✱ Do you trust the authors of this directory? For security, devin should not be run in directories with untrusted content. ❭ 1 Yes, trust · 2 No, exit`.
+No hooks execute while blocked on trust.
+`bin/fm-spawn.sh` passes `--respect-workspace-trust false`, bypassing the prompt on fresh task worktrees.
+
+### Configuration layers and lifecycle hooks
+
+Devin CLI reads configuration from `~/.config/devin/config.json`, committed project hooks from `.devin/hooks.v1.json`, and project local overrides from `.devin/config.local.json`.
+Passing `--config <path>` replaces the user config (`~/.config/devin/config.json`), which would discard the captain's user settings.
+Writing to `.devin/hooks.v1.json` would overwrite committed project hooks and dirty git tracking.
+Under captain decision D2, Firstmate writes its per-task configuration and lifecycle hooks to `$WT/.devin/config.local.json`.
+The file is added to `.git/info/exclude` and removed during teardown.
+`bin/fm-spawn.sh` refuses launch if `.devin/config.local.json` already exists or is tracked by git.
+The generated file sets `"attribution": false` to prevent automated agent co-author trailers, and pre-allows `Exec(git commit)` and `Exec(git push)`.
+The lifecycle hooks are:
+- `UserPromptSubmit`: applies `busy` with event `user-prompt-submit`.
+- `Stop`: touches `$TURNEND` and applies `idle` with event `stop`.
+- `SessionEnd`: applies `idle` with event `session-end`.
+
+`SessionStart` is omitted because it fires on resume (`source=resume`) with an empty composer, which would strand a false `busy` record.
+Each hook command appends `>/dev/null 2>&1 || true`.
+
+### Control, interruption, and exit
+
+Double-Escape (repeat 2 at 0.2s spacing) cancels the running turn.
+A single Escape renders `(esc again to interrupt)` for under 5 seconds, while busy thinking displays `(esc twice to interrupt)`.
+Interruption prints `✱ Canceled. What should Devin do?` and leaves the composer empty.
+Interruption emits no `Stop` hook and leaves the busy state unchanged, matching the behavior of agy and Claude.
+Typing `/exit` or `exit` quits the session cleanly, firing `SessionEnd` (reason `prompt_input_exit`).
+On exit, Devin prints `Resume this session with devin -r <id>`, where `<id>` is a hyphenated word pair (e.g. `aloud-powder`, `booming-flute`).
+
+### Composer classification
+
+Devin CLI draws a structured composer:
+Top rule carries mode text (`──── (smart mode on) ─`), the agent prompt row opens with `❭` (U+276D), the bottom rule is a solid horizontal `─` rule, and the footer row reports model and context token usage (`SWE-2 Max Context: 13k / 262k tokens (5%)`).
+`bin/fm-composer-lib.sh` classifies this structure into `empty`, `pending`, or `unknown`.
+The idle placeholder `Ask Devin to build features, fix bugs, or work on your code` and active-work placeholder `Guide Devin while it works` are recognized as composer furniture.
+While busy, the delivery token `(esc twice to interrupt)` (or `(esc again to interrupt)`) is matched by `FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT` to confirm submitted keystrokes.
+
+### Verification suite
+
+Run the portable regression and live guard with:
+
+```sh
+bin/fm-test-run.sh tests/fm-devin-harness.test.sh
+FM_DEVIN_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-devin-signals-live-e2e.test.sh
+```
+

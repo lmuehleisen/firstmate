@@ -2,7 +2,9 @@
 # Behavior tests for the devin (Devin CLI) harness adapter: harness
 # detection, ancestry anchoring, session-lock classification, approval-mode
 # mapping and refusals, launch template shape, model and effort handling,
-# lifecycle hooks generation, exclude registration, and control mechanics.
+# lifecycle hooks generation, exclude registration, control mechanics,
+# collision refusal, teardown and relaunch wiring, raw launch, dispatch
+# validation, and composer classification.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -19,6 +21,10 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT \
 . "$ROOT/bin/fm-agent-process-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$ROOT/bin/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$ROOT/bin/fm-composer-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 HARNESS="$ROOT/bin/fm-harness.sh"
@@ -90,21 +96,20 @@ test_devin_agent_process_classification() {
   res=$(fm_agent_process_classify_name "devin-worker")
   [ "$res" != agent ] || fail "devin-worker must not classify as agent"
 
-  # FM_HARNESS_RE matches devin
-  printf '%s\n' "devin" | grep -qE "$FM_HARNESS_RE" \
-    || fail "FM_HARNESS_RE must match devin"
+  # Devin cannot own primary session lock: not in FM_HARNESS_RE or FM_HARNESS_NAMES
+  ! printf '%s\n' "devin" | grep -qE "$FM_HARNESS_RE" \
+    || fail "FM_HARNESS_RE must not match devin (cannot own primary session lock)"
 
-  # FM_HARNESS_NAMES contains devin
   case " ${FM_HARNESS_NAMES[*]} " in
-    *" devin "*) ;;
-    *) fail "FM_HARNESS_NAMES must contain devin" ;;
+    *" devin "*) fail "FM_HARNESS_NAMES must not contain devin" ;;
+    *) ;;
   esac
 
-  # fm_harness_path_name recognizes devin in path
-  res=$(fm_harness_path_name "/opt/homebrew/bin/devin") || fail "fm_harness_path_name must match /opt/homebrew/bin/devin"
-  [ "$res" = devin ] || fail "fm_harness_path_name must return devin, got '$res'"
+  # fm_harness_path_name does not recognize devin (excluded from primary session lock)
+  ! fm_harness_path_name "/opt/homebrew/bin/devin" >/dev/null \
+    || fail "fm_harness_path_name must not match devin (excluded from primary lock candidates)"
 
-  pass "fm-agent-process-lib: devin process and path classification match agent"
+  pass "fm-agent-process-lib: devin process classification matches agent (excluded from primary session lock)"
 }
 
 # --- control mechanics ------------------------------------------------------
@@ -126,7 +131,7 @@ test_devin_control_contract() {
   [ "$(fm_control_exit_command devin)" = '/exit' ] || fail "devin exit command must be /exit"
 
   paths=$(fm_control_harness_wiring_paths devin "$wt" "$state" "$id")
-  [ "$paths" = "$wt/.devin/hooks.v1.json" ] || fail "devin wiring path must be hooks.v1.json, got '$paths'"
+  [ "$paths" = "$wt/.devin/config.local.json" ] || fail "devin wiring path must be .devin/config.local.json, got '$paths'"
 
   pass "fm-control-lib: devin control mechanics match specification"
 }
@@ -191,13 +196,14 @@ EOF
 run_devin_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
   local home=$1 proj=$2 wt=$3 fakebin=$4 id=$5
   shift 5
+  local harness=${DEVIN_HARNESS_ARG:-devin}
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$home/launch.log" \
-    PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" devin "$@" 2>&1
+    PATH="${FM_TEST_PATH_OVERRIDE:-$fakebin:$PATH}" \
+    "$SPAWN" "$id" "$proj" "$harness" "$@" 2>&1
 }
 
 # --- permissions & launch template ------------------------------------------
@@ -278,6 +284,24 @@ EOF
   pass "fm-spawn.sh: invalid crew-permissions refuses devin launch"
 }
 
+test_devin_missing_binary_refuses() {
+  local fields case_dir home proj wt fakebin id out
+  fields=$(make_spawn_case missing-bin)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/devin"
+  ln -sf "$(command -v git)" "$fakebin/git"
+  out=$(FM_TEST_PATH_OVERRIDE="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
+    fail "devin spawn must refuse when binary is missing from PATH"
+  case "$out" in
+    *'devin executable not found on PATH'*) ;;
+    *) fail "refusal must name devin not installed/executable, got: $out" ;;
+  esac
+  pass "fm-spawn.sh: missing devin binary refuses before spawn"
+}
+
 test_devin_launch_shape_and_model_handling() {
   local fields case_dir home proj wt fakebin id launch
   fields=$(make_spawn_case shape)
@@ -335,59 +359,257 @@ EOF
   pass "fm-spawn.sh: secondmate launch is refused on devin"
 }
 
-# --- hooks generation & git exclude -----------------------------------------
+# --- hooks generation, validation & execution -------------------------------
 
-test_devin_hooks_generation_and_exclude() {
+test_devin_hooks_generation_validation_and_execution() {
   local fields case_dir home proj wt fakebin id hook_file exclude_file
-  fields=$(make_spawn_case hooks)
+  local out cmd_submit cmd_stop cmd_end
+  fields=$(make_spawn_case hooks-exec)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $fields
 EOF
   : "$case_dir"
   run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
-  hook_file="$wt/.devin/hooks.v1.json"
+  hook_file="$wt/.devin/config.local.json"
   [ -f "$hook_file" ] || fail "hooks file was not created at $hook_file"
 
-  # Validate JSON syntax with jq
+  # Validate JSON syntax
   jq . "$hook_file" >/dev/null 2>&1 || fail "hooks file is not valid JSON: $(cat "$hook_file")"
 
-  # Check top-level events
-  jq -e '.SessionStart and .UserPromptSubmit and .Stop and .SessionEnd' "$hook_file" >/dev/null \
-    || fail "hooks file missing expected lifecycle event keys"
+  # Attribution pinned to false
+  [ "$(jq -r '.attribution' "$hook_file")" = "false" ] || fail "attribution must be false"
 
-  # Check commands inside hooks
-  local cmd_start cmd_submit cmd_stop cmd_end
-  cmd_start=$(jq -r '.SessionStart[0].hooks[0].command' "$hook_file")
-  cmd_submit=$(jq -r '.UserPromptSubmit[0].hooks[0].command' "$hook_file")
-  cmd_stop=$(jq -r '.Stop[0].hooks[0].command' "$hook_file")
-  cmd_end=$(jq -r '.SessionEnd[0].hooks[0].command' "$hook_file")
+  # Pre-allowed permissions for git commit and push
+  jq -e '.permissions.allow | index("Exec(git commit)") and index("Exec(git push)")' "$hook_file" >/dev/null \
+    || fail "permissions.allow must contain Exec(git commit) and Exec(git push)"
 
-  case "$cmd_start" in
-    *'fm-busy-event.sh'*' busy '*devin-hook*'--event session-start'*) ;;
-    *) fail "SessionStart command unexpected: $cmd_start" ;;
-  esac
-
-  case "$cmd_submit" in
-    *'fm-busy-event.sh'*' busy '*devin-hook*'--event user-prompt-submit'*) ;;
-    *) fail "UserPromptSubmit command unexpected: $cmd_submit" ;;
-  esac
-
-  case "$cmd_stop" in
-    *'touch '*"$id.turn-ended"*'fm-busy-event.sh'*' idle '*devin-hook*'--event stop'*) ;;
-    *) fail "Stop command unexpected: $cmd_stop" ;;
-  esac
-
-  case "$cmd_end" in
-    *'fm-busy-event.sh'*' idle '*devin-hook*'--event session-end'*) ;;
-    *) fail "SessionEnd command unexpected: $cmd_end" ;;
-  esac
+  # Hooks events: UserPromptSubmit, Stop, SessionEnd present; SessionStart absent
+  jq -e '.hooks.UserPromptSubmit and .hooks.Stop and .hooks.SessionEnd' "$hook_file" >/dev/null \
+    || fail "hooks missing expected lifecycle events in .hooks"
+  ! jq -e '.hooks.SessionStart' "$hook_file" >/dev/null \
+    || fail "SessionStart hook must be absent to prevent false busy on resume"
 
   # Verify git exclude
   exclude_file=$(git -C "$wt" rev-parse --git-path info/exclude)
-  grep -qxF '.devin/hooks.v1.json' "$exclude_file" \
-    || fail ".devin/hooks.v1.json must be in git info/exclude"
+  grep -qxF '.devin/config.local.json' "$exclude_file" \
+    || fail ".devin/config.local.json must be in git info/exclude"
 
-  pass "fm-spawn.sh: devin hooks generated with valid JSON and excluded from git"
+  # Verify busy generation was armed
+  [ -f "$home/state/$id.busy-gen" ] || fail "busy generation was not armed: missing $id.busy-gen"
+  [ -f "$home/state/$id.busy-state" ] || fail "busy state missing: $id.busy-state"
+
+  # Initial classification after spawn seed is 'busy fm-spawn'
+  out=$(fm_busy_classify tmux fake:w devin "$id" "$home/state")
+  [ "$out" = "busy fm-spawn" ] || fail "initial state after spawn must be 'busy fm-spawn', got '$out'"
+
+  # Extract hook commands
+  cmd_submit=$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$hook_file")
+  cmd_stop=$(jq -r '.hooks.Stop[0].hooks[0].command' "$hook_file")
+  cmd_end=$(jq -r '.hooks.SessionEnd[0].hooks[0].command' "$hook_file")
+
+  # Execute UserPromptSubmit hook
+  sh -c "$cmd_submit" || fail "UserPromptSubmit hook command failed: $cmd_submit"
+  out=$(fm_busy_classify tmux fake:w devin "$id" "$home/state")
+  [ "$out" = "busy devin-hook" ] || fail "after UserPromptSubmit state must be 'busy devin-hook', got '$out'"
+
+  # Execute Stop hook: touches turn-ended and transitions to idle
+  rm -f "$home/state/$id.turn-ended"
+  sh -c "$cmd_stop" || fail "Stop hook command failed: $cmd_stop"
+  [ -f "$home/state/$id.turn-ended" ] || fail "Stop hook did not touch turn-ended file"
+  out=$(fm_busy_classify tmux fake:w devin "$id" "$home/state")
+  [ "$out" = "idle devin-hook" ] || fail "after Stop state must be 'idle devin-hook', got '$out'"
+
+  # Execute SessionEnd hook: closes turn (idle)
+  sh -c "$cmd_end" || fail "SessionEnd hook command failed: $cmd_end"
+  out=$(fm_busy_classify tmux fake:w devin "$id" "$home/state")
+  [ "$out" = "idle devin-hook" ] || fail "after SessionEnd state must be 'idle devin-hook', got '$out'"
+
+  pass "fm-spawn.sh: devin hooks generated, verified, and executed with correct busy transitions"
+}
+
+# --- collision refusal ------------------------------------------------------
+
+test_devin_collision_refusal() {
+  local fields case_dir home proj wt fakebin id out exclude_file
+  fields=$(make_spawn_case collision-untracked)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+
+  # Case 1: .devin/config.local.json already exists untracked (excluded so pool refresh is clean)
+  mkdir -p "$wt/.devin"
+  echo '{"existing":true}' > "$wt/.devin/config.local.json"
+  exclude_file=$(git -C "$wt" rev-parse --git-path info/exclude)
+  echo '.devin/config.local.json' >> "$exclude_file"
+  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
+    fail "spawn must refuse when .devin/config.local.json already exists"
+  case "$out" in
+    *'.devin/config.local.json already exists or is tracked'*) ;;
+    *) fail "refusal must mention .devin/config.local.json, got: $out" ;;
+  esac
+
+  # Case 2: .devin/config.local.json is tracked on the project's default branch.
+  # Spawn refreshes the leased worktree to origin's tip, so the file must be on
+  # origin/main rather than only on the pre-created worktree branch.
+  fields=$(make_spawn_case collision-tracked)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  mkdir -p "$proj/.devin"
+  echo '{"tracked":true}' > "$proj/.devin/config.local.json"
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' add .devin/config.local.json
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "Track devin config"
+  git -C "$proj" push origin main >/dev/null 2>&1
+  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
+    fail "spawn must refuse when .devin/config.local.json is tracked"
+  case "$out" in
+    *'.devin/config.local.json already exists or is tracked'*) ;;
+    *) fail "refusal must mention tracked .devin/config.local.json, got: $out" ;;
+  esac
+
+  pass "fm-spawn.sh: devin spawn refuses when .devin/config.local.json exists or is tracked"
+}
+
+# --- teardown & relaunch wiring ---------------------------------------------
+
+test_devin_teardown_and_relaunch() {
+  local fields case_dir home proj wt fakebin id dirty
+  fields=$(make_spawn_case teardown-relaunch)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
+  [ -f "$wt/.devin/config.local.json" ] || fail "expected .devin/config.local.json to exist"
+
+  # Test that fm_control_harness_wiring_paths covers .devin/config.local.json so relaunch clears it
+  local p
+  for p in $(fm_control_harness_wiring_paths devin "$wt" "$home/state" "$id"); do
+    [ -n "$p" ] && rm -f -- "$p"
+  done
+  [ ! -f "$wt/.devin/config.local.json" ] || fail "fm_control_harness_wiring_paths must cover .devin/config.local.json"
+
+  # Teardown safety: ensure teardown uncommitted changes check does NOT ignore untracked .devin/ content
+  # Create an actual untracked file in .devin/
+  mkdir -p "$wt/.devin/skills/foo"
+  touch "$wt/.devin/skills/foo/SKILL.md"
+  dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  [ -n "$dirty" ] || fail "teardown dirty check must NOT ignore untracked .devin/ files (hard rule 3)"
+  case "$dirty" in
+    *'.devin/'*) ;;
+    *) fail "dirty must detect untracked .devin/ content, got: $dirty" ;;
+  esac
+
+  pass "fm-teardown / fm-control: relaunch wiring cleared and teardown protects unlanded .devin content"
+}
+
+# --- raw launch -------------------------------------------------------------
+
+test_devin_raw_launch() {
+  local fields case_dir home proj wt fakebin id
+  fields=$(make_spawn_case raw)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  DEVIN_HARNESS_ARG="devin --raw-escape" run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
+  [ ! -f "$wt/.devin/config.local.json" ] || fail "raw launch must not generate .devin/config.local.json"
+  [ ! -f "$home/state/$id.busy-gen" ] || fail "raw launch must not arm busy generation"
+  pass "fm-spawn.sh: raw launch skips devin hook wiring and busy generation"
+}
+
+# --- bootstrap dispatch validation ------------------------------------------
+
+test_devin_bootstrap_dispatch_validation() {
+  local dir="$TMP_ROOT/bootstrap-dispatch" config_dir="$TMP_ROOT/bootstrap-dispatch/config" out
+  mkdir -p "$config_dir"
+  eval "$(sed -n '/^crew_dispatch_validate() {/,/^}/p' "$ROOT/bin/fm-bootstrap.sh")"
+
+  cat > "$config_dir/crew-dispatch.json" <<'EOF'
+{"default":{"harness":"devin","model":"claude-sonnet-4"}}
+EOF
+  out=$(CONFIG="$config_dir" crew_dispatch_validate 2>&1)
+  [ -z "$out" ] || fail "crew_dispatch_validate must accept devin harness, got: $out"
+
+  cat > "$config_dir/crew-dispatch.json" <<'EOF'
+{"default":{"harness":"gemini","model":"gemini-2.5-flash"}}
+EOF
+  out=$(CONFIG="$config_dir" crew_dispatch_validate 2>&1)
+  [ -z "$out" ] || fail "crew_dispatch_validate must accept gemini harness, got: $out"
+
+  cat > "$config_dir/crew-dispatch.json" <<'EOF'
+{"default":{"harness":"bogus_harness","model":"some-model"}}
+EOF
+  out=$(CONFIG="$config_dir" crew_dispatch_validate 2>&1)
+  case "$out" in
+    *'unverified harness: bogus_harness'*) ;;
+    *) fail "crew_dispatch_validate must reject bogus_harness, got: $out" ;;
+  esac
+
+  cat > "$config_dir/crew-dispatch.json" <<'EOF'
+{"default":{"harness":"devin","effort":"high"}}
+EOF
+  out=$(CONFIG="$config_dir" crew_dispatch_validate 2>&1)
+  case "$out" in
+    *'invalid effort: devin:high'*) ;;
+    *) fail "crew_dispatch_validate must reject effort for devin, got: $out" ;;
+  esac
+
+  pass "fm-bootstrap.sh: crew_dispatch_validate accepts devin and gemini, rejects unverified harnesses and unsupported effort"
+}
+
+# --- composer classification ------------------------------------------------
+
+test_devin_composer_classification() {
+  local top='──── (smart mode on) ─' rule='────────────────────'
+  local footer='SWE-2 Max        Context: 13k / 262k tokens (5%)'
+  local screen out
+
+  # 1. Idle composer: placeholder rendered dim under styled capture
+  screen=$(printf '%s\n❭ \033[2mAsk Devin to build features, fix bugs, or work on your code\033[0m\n%s\n%s\n' "$top" "$rule" "$footer")
+  out=$(fm_composer_classify_screen 'styled=1' "$screen")
+  [ "$out" = empty ] || fail "styled idle devin composer must classify empty, got '$out'"
+
+  # 1b. Idle composer without styling (styled=0)
+  screen=$(printf '%s\n❭ Ask Devin to build features, fix bugs, or work on your code\n%s\n%s\n' "$top" "$rule" "$footer")
+  out=$(fm_composer_classify_screen 'styled=0' "$screen")
+  [ "$out" = empty ] || fail "unstyled idle devin composer must classify empty, got '$out'"
+
+  # 2. Busy placeholder Guide Devin while it works
+  screen=$(printf '%s\n❭ \033[2mGuide Devin while it works\033[0m\n%s\n%s\n' "$top" "$rule" "$footer")
+  out=$(fm_composer_classify_screen 'styled=1' "$screen")
+  [ "$out" = empty ] || fail "styled busy-placeholder devin composer must classify empty, got '$out'"
+
+  # 3. Pending typed input
+  screen=$(printf '%s\n❭ fix the tests\n%s\n%s\n' "$top" "$rule" "$footer")
+  out=$(fm_composer_classify_screen 'styled=1' "$screen")
+  [ "$out" = pending ] || fail "devin composer with typed input must classify pending, got '$out'"
+
+  # 4. Extract selected content
+  out=$(fm_composer_extract_selected_content 'styled=1' "$screen")
+  [ "$out" = "fix the tests" ] || fail "fm_composer_extract_selected_content must extract 'fix the tests', got '$out'"
+
+  # 5. Cursor on footer or top rule reads unknown
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1' "$screen" 0)
+  [ "$out" = unknown ] || fail "cursor on top rule must classify unknown, got '$out'"
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1' "$screen" 3)
+  [ "$out" = unknown ] || fail "cursor on footer must classify unknown, got '$out'"
+
+  # 6. Cursor inside content row reads pending
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1' "$screen" 1)
+  [ "$out" = pending ] || fail "cursor on content row must classify pending, got '$out'"
+
+  # 7. Delivery busy regex matches (esc twice to interrupt) and (esc again to interrupt)
+  printf '%s\n' "Thinking · 1s (esc twice to interrupt)" | fm_busy_lines_match devin \
+    || fail "fm_busy_lines_match devin must match '(esc twice to interrupt)'"
+  printf '%s\n' "Thinking · 2s (esc again to interrupt)" | fm_busy_lines_match devin \
+    || fail "fm_busy_lines_match devin must match '(esc again to interrupt)'"
+  ! printf '%s\n' "Thinking · 2s" | fm_busy_lines_match devin \
+    || fail "fm_busy_lines_match devin must not match generic thinking line without esc token"
+
+  pass "fm-composer-lib: devin composer shapes classify empty, pending, and unknown correctly"
 }
 
 # --- run all tests ----------------------------------------------------------
@@ -400,6 +622,12 @@ test_devin_auto_uses_smart_and_never_bypass
 test_devin_manual_uses_normal_and_never_bypass
 test_devin_absent_setting_defaults_to_smart
 test_devin_invalid_setting_refuses
+test_devin_missing_binary_refuses
 test_devin_launch_shape_and_model_handling
 test_devin_secondmate_refusal
-test_devin_hooks_generation_and_exclude
+test_devin_hooks_generation_validation_and_execution
+test_devin_collision_refusal
+test_devin_teardown_and_relaunch
+test_devin_raw_launch
+test_devin_bootstrap_dispatch_validation
+test_devin_composer_classification
