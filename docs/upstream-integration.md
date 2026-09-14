@@ -25,8 +25,9 @@ This page is the maintainer checklist for one integration run; the fork's invari
    It lists helpers whose definition line upstream changed and every fork-only line that calls one of them.
    Read each reported caller against upstream's new definition, fix any caller whose convention changed, and account for every reported call site in the pull request body.
    The script's `--help` owns the exact matching rules and their limits.
-4. Verify the fork's dropped dependencies stay dropped: `git grep -n -E 'gh-axi|lavish-axi|chrome-devtools-axi|no-mistakes' -- bin .agents/skills AGENTS.md README.md`, and account for every new hit upstream introduced.
+4. Verify the fork's dropped dependencies stay dropped and review what upstream changed under the opt-in: `git grep -n -E 'gh-axi|lavish-axi|chrome-devtools-axi|no-mistakes' -- bin .agents/skills AGENTS.md README.md`, and account for every new hit upstream introduced.
+   gh-axi, chrome-devtools-axi, and lavish-axi stay dropped, while `no-mistakes` is an optional opt-in through `config/no-mistakes`, so an upstream change to its pipeline can now belong in the fork instead of being stripped.
 5. Check that README "Personal fork: what differs" and `AGENTS.md` section 7 still describe the fork, and look for fork-tuned values inside upstream-owned files that an upstream test now pins.
-6. Run `bin/fm-test-run.sh --changed`, then each portable lane from `bin/fm-test-run.sh --list-lanes`, and `bin/fm-lint.sh`.
+6. Run `bin/fm-test-run.sh --changed` and `bin/fm-test-run.sh --check-coverage`, then each portable lane from `bin/fm-test-run.sh --list-lanes`, and `bin/fm-lint.sh`.
 7. Open the pull request against the fork with `gh pr create --repo lmuehleisen/firstmate --base main`, always passing `--repo` because this checkout also carries the upstream remote.
    Its body states the upstream source commit, that a merge commit is required, every conflict and its resolution, every upstream change dropped or adapted, the call-site scan result, the invariant evidence, and the test results.
