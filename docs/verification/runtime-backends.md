@@ -2200,11 +2200,11 @@ Firstmate's launch boundary establishes `FM_DEVIN_HARNESS=devin`, which is accep
 Devin CLI accepts `--permission-mode` options: `normal` (alias `auto`), `accept-edits`, `smart`, and `dangerous` (alias `yolo`, `bypass`).
 Firstmate maps `auto` to `--permission-mode smart` and `manual` to `--permission-mode normal`, and never emits `dangerous`.
 In smart mode, Devin CLI auto-approves workspace file writes and status line appends outside the workspace.
-It prompts on in-repo test scripts, mutating git commands (`git commit`, `git push`), and actions outside smart model confidence.
+It prompts on commands outside smart model confidence and outside the pre-allowed set.
 The interactive prompt for non-git commands presents an 8-option menu:
 `1 Yes (Approve once)`, `2 Yes, allow <cmd>`, `3 Yes, always allow ... in wt`, `4 Yes, always allow ... in all projects`, `5 Yes, switch to bypass mode`, `6 Edit command`, `7 Describe change to command`, `8 No`.
 The prompt for git commands offers a 7-option menu without option 5.
-Under captain decision D1, Firstmate pre-allows `Exec(git commit)` and `Exec(git push)` in `.devin/config.local.json` so unattended worker ship turns do not park on git mutations.
+Under captain decision D1 (extended 2026-09-14), Firstmate pre-allows the approved non-destructive `Exec(...)` set in `.devin/config.local.json` so unattended worker turns do not park on routine commands; the harness-adapters devin reference owns the list.
 
 ### Workspace trust
 
@@ -2219,9 +2219,9 @@ Devin CLI reads configuration from `~/.config/devin/config.json`, committed proj
 Passing `--config <path>` replaces the user config (`~/.config/devin/config.json`), which would discard the captain's user settings.
 Writing to `.devin/hooks.v1.json` would overwrite committed project hooks and dirty git tracking.
 Under captain decision D2, Firstmate writes its per-task configuration and lifecycle hooks to `$WT/.devin/config.local.json`.
-The file is added to `.git/info/exclude` and removed during teardown.
-`bin/fm-spawn.sh` refuses launch if `.devin/config.local.json` already exists or is tracked by git.
-The generated file sets `"attribution": false` to prevent automated agent co-author trailers, and pre-allows `Exec(git commit)` and `Exec(git push)`.
+Both files are added to `.git/info/exclude` and removed during teardown.
+`bin/fm-spawn.sh` refuses launch if `.devin/config.local.json` or `.devin/rules/firstmate-attribution.md` already exists or is tracked by git.
+The generated file pins `"attribution": false` (documented user-scope only by the vendor) and carries the approved `Exec(...)` allow set plus `git push` force-spelling denies; the same no-attribution policy is also installed as the always-on rule `.devin/rules/firstmate-attribution.md`.
 The lifecycle hooks are:
 - `UserPromptSubmit`: applies `busy` with event `user-prompt-submit`.
 - `Stop`: touches `$TURNEND` and applies `idle` with event `stop`.

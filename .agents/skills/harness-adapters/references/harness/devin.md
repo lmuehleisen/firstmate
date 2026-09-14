@@ -11,7 +11,7 @@ Verified for crewmate and scout work only, never a secondmate or primary.
 | Binary | `devin` resolved from `PATH` (e.g. `/opt/homebrew/bin/devin`, installed via Homebrew cask `devin-cli`). A single arm64 Mach-O binary. Refused at spawn when missing. |
 | Launch | Positional prompt `-- "<prompt>"` starts the interactive session. `--print` / `-p` is headless and never used for a worker. |
 | Directory grants | None needed; Devin CLI operates in the working directory. `--respect-workspace-trust false` bypasses the workspace trust prompt. |
-| Approvals | Reviewed mode via `--permission-mode smart` for `auto` and `--permission-mode normal` for `manual`. Unconditional bypass (`dangerous`) is never emitted. Mutating git commands are pre-allowed in `.devin/config.local.json`. |
+| Approvals | Reviewed mode via `--permission-mode smart` for `auto` and `--permission-mode normal` for `manual`. Unconditional bypass (`dangerous`) is never emitted. The captain-approved non-destructive command set is pre-allowed in `.devin/config.local.json` (see Approvals and permissions). |
 | Busy state | `devin-hook`: `UserPromptSubmit` opens a turn (busy); `Stop` and `SessionEnd` close it (idle). `SessionStart` is omitted to avoid false busy on resume. Double-Escape interruption leaves the record busy. |
 | Rendered tail | Delivery guard only via `(esc (twice\|again) to interrupt)`. Not a worker-state source. |
 | Turn end | Native `Stop` hook in `$WT/.devin/config.local.json` touches `$TURNEND`. |
@@ -24,7 +24,7 @@ Verified for crewmate and scout work only, never a secondmate or primary.
 | Composer | Structured composer between a top mode rule (`──── (smart mode on) ─`), prompt row with `❭` (U+276D), and a solid bottom `─` rule, followed by a model and context footer (`Context: ... tokens`). Idle placeholder is `Ask Devin to build features, fix bugs, or work on your code`; busy placeholder is `Guide Devin while it works`. |
 | Skill | Skills discovered in `.devin/skills/` and `.claude/skills/`. |
 | Config | User config at `~/.config/devin/config.json`. Project local override at `.devin/config.local.json`. Passing `--config <path>` replaces the user config, while `.devin/config.local.json` merges with project and user settings. |
-| Attribution | Defaults to `true` in Devin CLI, emitting `Generated with [Devin]` and `Co-Authored-By: Devin`. Firstmate pins `"attribution": false` in `.devin/config.local.json`. |
+| Attribution | Defaults to `true` in Devin CLI, emitting `Generated with [Devin]` and `Co-Authored-By: Devin`. Firstmate pins `"attribution": false` in `.devin/config.local.json` and installs the same policy as the always-on rule `.devin/rules/firstmate-attribution.md`, because the vendor documents `attribution` as user-scope only. |
 
 ## Approvals and permissions
 
@@ -33,7 +33,7 @@ Devin CLI provides multiple permission modes: `normal` (alias `auto`), `accept-e
 
 | Setting | Devin launch | Effect |
 |---|---|---|
-| `auto` (or absent) | `--permission-mode smart` | Smart mode auto-approves workspace file edits and shell appends outside the workspace. Prompts on in-repo test scripts, mutating git commands (`git commit`, `git push`), and commands outside smart model confidence. |
+| `auto` (or absent) | `--permission-mode smart` | Smart mode auto-approves workspace file edits and shell appends outside the workspace. Prompts on commands outside smart model confidence and outside the pre-allowed set. |
 | `manual` | `--permission-mode normal` | Prompts for all writes and shell commands. |
 | anything else | refused | The launch stops; there is no fallback onto bypass. |
 
@@ -43,6 +43,12 @@ In smart mode, prompts for non-git commands present an 8-option menu:
 `1 Yes (Approve once)`, `2 Yes, allow <command>`, `3 Yes, always allow ... in wt`, `4 Yes, always allow ... in all projects`, `5 Yes, switch to bypass mode`, `6 Edit command`, `7 Describe change to command`, `8 No`.
 The worker may block on approvals for in-repo scripts; Firstmate delegates prompts or answers option 1 or 2, and must never choose options 3, 4, or 5 on the captain's behalf.
 Under captain decision D1, Firstmate pre-allows `Exec(git commit)` and `Exec(git push)` in `.devin/config.local.json` so unattended worker ship turns do not park on git mutations.
+The captain's 2026-09-14 extension of D1 widens `permissions.allow` to the rest of the routine command surface: `Exec(git checkout)`, `Exec(git remote)`, `Exec(git fetch)`, `Exec(git status)`, `Exec(git log)`, `Exec(git diff)`, `Exec(ls)`, `Exec(gh pr create)`, `Exec(gh pr view)`, `Exec(gh pr list)`, `Exec(gh pr checks)`, and the firstmate repo scripts `bin/fm-lint.sh`, `bin/fm-test-run.sh`, `bin/fm-install-shellcheck.sh`, `bin/fm-install-actionlint.sh` (each in its `bin/x`, `./bin/x`, and `bash bin/x` spellings).
+`permissions.deny` holds `Exec(git push --force)`, `Exec(git push --force-with-lease)`, `Exec(git push --force-if-includes)`, and `Exec(git push -f)`, which override the allowed `Exec(git push)` prefix for those first-position spellings.
+
+`Exec(...)` rules match each command segment by whitespace-token prefix: a segment must equal the rule text or begin with the rule text followed by a space, a compound command (`&&`, `;`, pipes) is split so each segment is judged on its own, and `*` is literal rather than a glob.
+Two consequences follow: force flags in later argument positions (`git push origin --force`) and combined short flags (`git push -fv`) evade the deny list, and `bash tests/<name>.test.sh` cannot be pattern-allowed because the token after `tests` varies; the covered test path is `bin/fm-test-run.sh tests/<name>.test.sh`.
+Not pre-allowed by design: `rm`, anything under `gh repo`, and any unconditional bypass.
 
 ## Workspace trust
 
@@ -59,10 +65,10 @@ Devin CLI reads configuration and hooks from three layers:
 
 Under captain decision D2, Firstmate writes its per-task configuration and lifecycle hooks to `$WT/.devin/config.local.json`.
 Writing to `.devin/config.local.json` avoids overwriting a project's committed `.devin/hooks.v1.json` and avoids using `--config`, which would override and drop the captain's user config.
-`bin/fm-spawn.sh` refuses to launch if `.devin/config.local.json` already exists or is tracked by git.
-The file is added to `.git/info/exclude` so git status remains clean, and it is removed during teardown.
-The configuration sets `"attribution": false` to prevent automated agent co-author trailers on commits and pull requests.
-It pre-allows `Exec(git commit)` and `Exec(git push)` in `"permissions": {"allow": [...]}`.
+`bin/fm-spawn.sh` refuses to launch if `.devin/config.local.json` or `.devin/rules/firstmate-attribution.md` already exists or is tracked by git.
+Both files are added to `.git/info/exclude` so git status remains clean, and they are removed during teardown.
+The configuration pins `"attribution": false`; because the vendor documents that key as user-scope only, Firstmate also installs `.devin/rules/firstmate-attribution.md`, an always-on rule instructing the worker never to add `Generated with Devin`, `Co-Authored-By: Devin`, or other tool attribution to commit messages or pull request bodies.
+The allowed and denied `Exec(...)` sets are owned by Approvals and permissions above.
 The installed hooks in `$WT/.devin/config.local.json` cover:
 - `UserPromptSubmit`: fires when a user submits a prompt, applying `busy` with event `user-prompt-submit`.
 - `Stop`: fires when the turn ends, touching `$TURNEND` and applying `idle` with event `stop`.

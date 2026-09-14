@@ -3642,22 +3642,37 @@ EOF
         # Devin CLI reads .devin/config.local.json in the worktree root, which
         # merges with project and user settings without clobbering tracked hooks
         # or replacing ~/.config/devin/config.json (captain decision D2).
-        # Decision D1 pre-allows git commit and git push in permissions.allow.
-        # Attribution is pinned false to prevent Co-Authored-By trailers.
-        if [ -e "$WT/.devin/config.local.json" ] || [ -L "$WT/.devin/config.local.json" ] || git -C "$WT" ls-files --error-unmatch .devin/config.local.json >/dev/null 2>&1; then
-          echo "error: cannot spawn devin worker: $WT/.devin/config.local.json already exists or is tracked" >&2
-          exit 1
-        fi
-        mkdir -p "$WT/.devin"
+        # permissions.allow carries the captain-approved non-destructive Exec
+        # set (decision D1, extended 2026-09-14) and permissions.deny pins the
+        # git push force spellings back out of the allowed Exec(git push)
+        # prefix; the harness-adapters devin reference owns the list and the
+        # Exec matching limits. "attribution": false is documented user-scope
+        # only, so the same no-attribution policy is also installed as the
+        # always-on rule .devin/rules/firstmate-attribution.md.
+        for managed in .devin/config.local.json .devin/rules/firstmate-attribution.md; do
+          if [ -e "$WT/$managed" ] || [ -L "$WT/$managed" ] || git -C "$WT" ls-files --error-unmatch "$managed" >/dev/null 2>&1; then
+            echo "error: cannot spawn devin worker: $WT/$managed already exists or is tracked" >&2
+            exit 1
+          fi
+        done
+        mkdir -p "$WT/.devin/rules"
         busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
         busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source devin-hook"
         d_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit >/dev/null 2>&1 || true")
         d_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true")
         d_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true")
         cat > "$WT/.devin/config.local.json" <<EOF
-{"permissions":{"allow":["Exec(git commit)","Exec(git push)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"}]}]}}
+{"permissions":{"allow":["Exec(git commit)","Exec(git push)","Exec(git checkout)","Exec(git remote)","Exec(git fetch)","Exec(git status)","Exec(git log)","Exec(git diff)","Exec(ls)","Exec(gh pr create)","Exec(gh pr view)","Exec(gh pr list)","Exec(gh pr checks)","Exec(bin/fm-lint.sh)","Exec(./bin/fm-lint.sh)","Exec(bash bin/fm-lint.sh)","Exec(bin/fm-test-run.sh)","Exec(./bin/fm-test-run.sh)","Exec(bash bin/fm-test-run.sh)","Exec(bin/fm-install-shellcheck.sh)","Exec(./bin/fm-install-shellcheck.sh)","Exec(bash bin/fm-install-shellcheck.sh)","Exec(bin/fm-install-actionlint.sh)","Exec(./bin/fm-install-actionlint.sh)","Exec(bash bin/fm-install-actionlint.sh)"],"deny":["Exec(git push --force)","Exec(git push --force-with-lease)","Exec(git push --force-if-includes)","Exec(git push -f)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"}]}]}}
+EOF
+        cat > "$WT/.devin/rules/firstmate-attribution.md" <<'EOF'
+---
+description: Firstmate worker attribution policy
+trigger: always_on
+---
+Never add "Generated with Devin", "Co-Authored-By: Devin", or any other tool attribution line or trailer to commit messages or pull request bodies.
 EOF
         exclude_path '.devin/config.local.json'
+        exclude_path '.devin/rules/firstmate-attribution.md'
       fi
       ;;
     opencode*)
