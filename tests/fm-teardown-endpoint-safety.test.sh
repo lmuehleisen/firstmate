@@ -563,6 +563,119 @@ test_sole_slot_record_still_tears_down() {
   pass "fm-teardown: a task that solely holds its slot still returns it"
 }
 
+lease_case_slot() {  # <case> <lease-holder>
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"%s"}]}\n' \
+    "$1/pool/1/project" "$2" > "$1/pool/treehouse-state.json"
+}
+
+test_slot_leased_to_another_holder_refuses_even_forced() {
+  local dir id=lease-task out
+  dir=$(make_case lease-other-holder)
+  mark_case_as_treehouse_pool "$dir"
+  lease_case_slot "$dir" "$dir/home:someone-else"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "slot leased to another holder"
+  out=$(cat "$dir/stderr")
+  assert_contains "$out" "leased to $dir/home:someone-else" "refusal did not name the lease holder"
+  assert_contains "$out" "not even with --force" "refusal did not state the force boundary"
+
+  dir=$(make_case lease-other-home)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/other-home"
+  lease_case_slot "$dir" "$dir/other-home:$id"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "same task id leased by another home"
+
+  dir=$(make_case lease-no-holder)
+  mark_case_as_treehouse_pool "$dir"
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true}]}\n' \
+    "$dir/pool/1/project" > "$dir/pool/treehouse-state.json"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "leased slot with no recorded holder"
+  pass "fm-teardown: a slot Treehouse leases to any other holder is never killed, reset, or returned, even forced"
+}
+
+test_unreadable_lease_record_refuses() {
+  local dir id=lease-task
+  dir=$(make_case lease-malformed)
+  mark_case_as_treehouse_pool "$dir"
+  printf '{"worktrees":[' > "$dir/pool/treehouse-state.json"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "malformed lease record"
+  assert_contains "$(cat "$dir/stderr")" "cannot read Treehouse's lease record" "malformed record refusal omitted its cause"
+
+  dir=$(make_case lease-no-entry)
+  mark_case_as_treehouse_pool "$dir"
+  printf '{"worktrees":[{"name":"2","path":"%s"}]}\n' "$dir/pool/2/project" \
+    > "$dir/pool/treehouse-state.json"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "lease record without the slot"
+  pass "fm-teardown: a lease record that cannot answer for the slot refuses before any mutation"
+}
+
+test_slot_leased_to_this_task_returns_through_a_home_alias() {
+  local dir id=lease-task
+  dir=$(make_case lease-mine)
+  mark_case_as_treehouse_pool "$dir"
+  ln -s home "$dir/home-alias"
+  # Spawn records the holder with the home spelling it was given; a resolved
+  # spelling of the same home is still this task's own lease.
+  lease_case_slot "$dir" "$dir/home-alias:$id"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown refused a slot leased to this task: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "own-lease teardown left the task record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "own-lease teardown did not return its slot: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: a slot leased to this task under any spelling of its home is returned"
+}
+
+test_forced_secondmate_teardown_refuses_child_slot_leased_elsewhere() {
+  local dir subhome childproj childwt rc
+  dir=$(make_case lease-child-other)
+  subhome="$dir/subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$dir/pool/1/alpha"
+  mkdir -p "$subhome/state" "$dir/pool/1"
+  fm_git_worktree "$childproj" "$childwt" lease-child
+  : > "$childwt/sentinel"
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"%s"}]}\n' \
+    "$childwt" "$subhome:another-child" > "$dir/pool/treehouse-state.json"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$dir/home/state/domain.meta" \
+    "window=firstmate:fm-domain" "endpoint_task_id=domain" "worktree=$subhome" \
+    "project=$subhome" "harness=echo" "kind=secondmate" "home=$subhome" "projects=alpha"
+  printf '%s\n' "- domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$subhome/state/child.meta" \
+    "window=firstmate:fm-child" "endpoint_task_id=child" "worktree=$childwt" \
+    "project=$childproj" "harness=echo" "kind=ship" "mode=direct-PR"
+  set +e
+  run_case "$dir" domain > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown returned a child slot leased to another task"
+  assert_present "$childwt/sentinel" "forced secondmate teardown reset a child slot leased elsewhere"
+  assert_present "$subhome/state/child.meta" "forced secondmate teardown removed the child record"
+  assert_present "$dir/home/state/domain.meta" "forced secondmate teardown removed the secondmate record"
+  ! grep -Eq 'treehouse <return>|kill-window' "$dir/runtime.log" \
+    || fail "forced secondmate teardown reached destructive cleanup: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$subhome:another-child" "child refusal did not name the holder"
+  pass "fm-teardown: forced secondmate teardown refuses before touching a child slot leased to another holder"
+}
+
 make_stale_claim_case() {  # <name> <old-landed> <current-landed>
   local dir old=claim-old new=claim-current id
   dir=$(make_case "$1")
@@ -1025,6 +1138,10 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
+test_slot_leased_to_another_holder_refuses_even_forced
+test_unreadable_lease_record_refuses
+test_slot_leased_to_this_task_returns_through_a_home_alias
+test_forced_secondmate_teardown_refuses_child_slot_leased_elsewhere
 test_stopped_landed_stale_claim_retires_without_touching_the_slot
 test_stale_claim_never_borrows_another_claimants_landed_head
 test_stale_claim_refuses_live_dirty_and_forced_recovery
