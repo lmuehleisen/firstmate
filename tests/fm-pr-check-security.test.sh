@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Security and regression tests for canonical PR parsing, static merge polls,
 # private atomic artifacts, authenticated custom checks, and teardown cleanup.
+# Metadata identity stays bound to the single pr=<url> even when later writers
+# such as fm-captain-hold.sh complete and fm-control.sh relaunch append keys
+# after that line; a genuinely altered or unbound poll is still refused.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -194,8 +197,8 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
-# Extra "field=value" arguments are written before pr=, because
-# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
+# Extra "field=value" arguments are written before pr=, leaving pr= last the
+# way bin/fm-pr-check.sh arms a record.
 write_poll_meta() {
   local state=$1 id=$2 url=$3
   shift 3
@@ -1282,6 +1285,192 @@ SH
   done
 
   pass "teardown removes safe poll artifacts and refuses directory-shaped check files without traversal"
+}
+
+# Arm a GitHub poll the way fm-pr-check.sh does, leaving pr= and pr_head= last.
+arm_github_poll() {  # <case-dir> <id> <url>
+  local dir=$1 id=$2 url=$3
+  write_task_meta "$dir" "$id"
+  FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" "$id" "$url" >/dev/null 2>/dev/null \
+    || fail "could not arm the merge poll for $id"
+  fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
+    || fail "the armed merge poll for $id was not initially valid"
+}
+
+# fm-captain-hold.sh complete appends decisions_reviewed= and decision_keys=
+# onto the origin metadata. A complete that runs after arming used to land
+# them after pr= and disarm the poll. Drive the real writer.
+test_fm_captain_hold_complete_does_not_disarm_an_armed_poll() {
+  local dir state
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the origin attestation is inert"
+    return 0
+  }
+  dir=$(make_case hold-complete-after-pr)
+  state="$dir/home/state"
+  arm_github_poll "$dir" task-a https://github.com/o/r/pull/10
+  cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
+  cat > "$dir/home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  (cd "$dir/home" && tasks-axi add task-a "poll identity fixture" --kind ship --start >/dev/null) \
+    || fail "could not file the origin for fm-captain-hold.sh complete"
+  PATH="$dir/fakebin:$(dirname "$(command -v tasks-axi)"):$PATH" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete task-a --none >/dev/null \
+    || fail "fm-captain-hold.sh complete --none failed after the poll was armed"
+  assert_grep "decisions_reviewed=1" "$state/task-a.meta" \
+    "fm-captain-hold.sh complete did not attest on the origin"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "fm-captain-hold.sh complete after pr= disarmed the armed poll"
+  pass "fm-captain-hold.sh complete after pr= leaves the armed poll bound"
+}
+
+# fm-control.sh relaunch / fm-spawn.sh --relaunch preserve unowned keys such as
+# pr= and pr_head=, then write control_relaunch_tx= last. That published shape
+# used to fail the post-pr= whitelist and disarm the poll.
+test_fm_control_relaunch_does_not_disarm_an_armed_poll() {
+  local dir state
+  dir=$(make_case control-relaunch-after-pr)
+  state="$dir/home/state"
+  arm_github_poll "$dir" task-a https://github.com/o/r/pull/10
+  printf 'control_relaunch_tx=%s\n' '12345.20260907T000000Z.1' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "fm-control.sh relaunch control_relaunch_tx= after pr= disarmed the armed poll"
+  pass "fm-control.sh relaunch after pr= leaves the armed poll bound"
+}
+
+# The parse still refuses a binding whose pr= no longer matches the sidecar,
+# a second pr= line, garbage after pr=, a malformed key after pr=, and an
+# invalid pr_head= after pr=.
+test_armed_poll_still_refuses_a_tampered_binding() {
+  local dir state before
+  dir=$(make_case tampered-pr-identity)
+  state="$dir/home/state"
+  arm_github_poll "$dir" task-a https://github.com/o/r/pull/10
+  before=$(cat "$state/task-a.meta")
+
+  awk -F= '
+    $1 == "pr" { print "pr=https://github.com/o/r/pull/99"; next }
+    { print }
+  ' "$state/task-a.meta" > "$state/task-a.meta.swapped"
+  mv "$state/task-a.meta.swapped" "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a swapped pr= URL remained bound to the original sidecar"
+
+  printf '%s\n' "$before" > "$state/task-a.meta"
+  printf 'pr=https://github.com/o/r/pull/99\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a second pr= line remained an authenticated binding"
+
+  printf '%s\n' "$before" > "$state/task-a.meta"
+  printf '# not-a-key\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a non-key line after pr= remained an authenticated binding"
+
+  printf '%s\n' "$before" > "$state/task-a.meta"
+  printf 'not a key=1\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a malformed key after pr= remained an authenticated binding"
+
+  printf '%s\n' "$before" > "$state/task-a.meta"
+  printf 'pr_head=not-a-sha\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an invalid pr_head= after pr= remained an authenticated binding"
+
+  pass "a genuinely altered or unbound poll is still refused"
+}
+
+# Rewrite the device half of the identity lines <lines...> of <file> in place,
+# keeping its inode, mode, and every inode half, the way macOS APFS renumbers
+# st_dev across a reboot while the recorded registration keeps the old value.
+renumber_recorded_device() {  # <file> <line>...
+  local file=$1 tmp
+  shift
+  tmp="$file.renumber"
+  awk -v lines=" $* " '
+    index(lines, " " NR " ") && $0 ~ /^[0-9]+:[0-9]+$/ {
+      split($0, part, ":")
+      printf "%d:%s\n", part[1] + 7, part[2]
+      next
+    }
+    { print }
+  ' "$file" > "$tmp" || fail "could not renumber recorded devices in $file"
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
+test_device_renumbering_keeps_the_poll_bound() {
+  local dir state reg before after live
+  dir=$(make_case device-renumbered)
+  state="$dir/home/state"
+  arm_github_poll "$dir" task-a https://github.com/o/r/pull/10
+  reg="$state/task-a.pr-poll-registration"
+  before=$(sed -n '10,11p' "$reg")
+  renumber_recorded_device "$reg" 10 11
+  after=$(sed -n '10,11p' "$reg")
+  [ "$after" != "$before" ] || fail "the device renumbering fixture changed nothing"
+  [ "${after##*:}" = "${before##*:}" ] || fail "the device renumbering fixture changed an inode"
+  live=$(fm_pr_file_identity "$state/task-a.check.sh")
+  [ "$(sed -n '11p' "$reg")" != "$live" ] || fail "the recorded check identity still equals the live one"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a device id renumbered after reboot disarmed a poll whose inodes and bytes match"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "the watcher snapshot refused a poll after device renumbering"
+
+  "$REAL_CP" "$state/task-a.check.sh" "$state/task-a.check.sh.new"
+  chmod 0600 "$state/task-a.check.sh.new"
+  "$REAL_MV" -f "$state/task-a.check.sh.new" "$state/task-a.check.sh"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a replaced check file with a new inode stayed bound after device renumbering"
+
+  dir=$(make_case device-renumbered-receipt)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/4
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/4
+  renumber_recorded_device "$state/task-a.pr-poll-registration" 10 11
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" || fail "could not snapshot the renumbered receipt fixture"
+  fm_pr_poll_retirement_publish "$state" task-a "$POLL" merged \
+    || fail "could not publish a receipt for the renumbered fixture"
+  renumber_recorded_device "$state/task-a.pr-poll-retirement" 13
+  fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" \
+    || fail "a device id renumbered after reboot stranded a pending retirement"
+  assert_poll_absent "$state" task-a
+  pass "a reboot that renumbers the state device keeps polls and receipts bound by inode"
+}
+
+test_watcher_names_a_mismatched_poll_plainly() {
+  local dir state rc
+  dir=$(make_case watcher-mismatch-label)
+  state="$dir/home/state"
+  arm_github_poll "$dir" task-a https://github.com/o/r/pull/10
+  printf 'pr=https://github.com/o/r/pull/99\n' >> "$state/task-a.meta"
+  printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
+  chmod 0700 "$state/custom.check.sh"
+  : > "$dir/gh.log"
+  set +e
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher failed on a mismatched poll: $(cat "$dir/watch.err")"
+  assert_grep "check: PR merge polls skipped, their files no longer match their registration (re-arm with bin/fm-pr-check.sh <id> <url>): $state/task-a.check.sh; check: rejected unauthenticated state checks: $state/custom.check.sh" \
+    "$dir/watch.out" "watcher did not name the mismatched poll and the untrusted check separately"
+  assert_grep "$(printf '\tcheck\tpr-poll-registration-mismatch\t')" "$state/.wake-queue" \
+    "mismatched poll wake was not queued under its own key"
+  assert_grep "$(printf '\tcheck\tunauthenticated-state-checks\tcheck: rejected unauthenticated state checks: %s' "$state/custom.check.sh")" \
+    "$state/.wake-queue" "untrusted custom check wake lost its own row"
+  assert_no_grep "unauthenticated state checks: $state/task-a.check.sh" "$dir/watch.out" \
+    "a mismatched PR poll was still called unauthenticated"
+  assert_no_grep "pr view" "$dir/gh.log" "a mismatched poll ran gh"
+  pass "watcher names a mismatched PR poll as a registration mismatch, apart from untrusted checks"
 }
 
 # The GitLab watch must follow a merge request exactly as the GitHub watch
@@ -2437,3 +2626,8 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_fm_captain_hold_complete_does_not_disarm_an_armed_poll
+test_fm_control_relaunch_does_not_disarm_an_armed_poll
+test_armed_poll_still_refuses_a_tampered_binding
+test_device_renumbering_keeps_the_poll_bound
+test_watcher_names_a_mismatched_poll_plainly

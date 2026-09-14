@@ -93,8 +93,15 @@
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
 #   check: rejected unauthenticated state checks: <paths>
-#                          unsafe state checks were refused without execution
-#   check: rejected unauthenticated PR poll retirement receipts: <paths>
+#                          custom state checks with no valid trust binding were
+#                          refused without execution
+#   check: PR merge polls skipped, their files no longer match their registration (re-arm with bin/fm-pr-check.sh <id> <url>): <paths>
+#                          a task with PR poll artifacts failed validation (task
+#                          record, sidecar, registration, or poll script bytes),
+#                          so the poll was skipped without execution; no
+#                          credential was involved. Joined with `; ` to the
+#                          rejected-checks wake when both surface in one cycle
+#   check: PR poll retirement receipts kept, they no longer match their poll files: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
@@ -1891,7 +1898,7 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
 if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
-  reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
+  reason="check: PR poll retirement receipts kept, they no longer match their poll files:$FM_PR_POLL_RETIREMENT_REJECTED"
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
   wake "$reason"
@@ -2003,6 +2010,7 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
+    mismatched_polls=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -2041,7 +2049,11 @@ while :; do
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup
-          rejected_checks="$rejected_checks $c"
+          if [ -e "$STATE/$id.pr-poll-registration" ] || [ -e "$STATE/$id.pr-poll" ]; then
+            mismatched_polls="$mismatched_polls $c"
+          else
+            rejected_checks="$rejected_checks $c"
+          fi
           continue
         fi
       fi
@@ -2084,9 +2096,21 @@ while :; do
       fi
       pr_poll_control_release || exit 1
     done
+    # A PR poll that fails validation is a stale or altered registration, never
+    # a credential problem, so it gets its own plain wake apart from untrusted
+    # custom checks.
+    reason=
+    if [ -n "$mismatched_polls" ]; then
+      mismatch_reason="check: PR merge polls skipped, their files no longer match their registration (re-arm with bin/fm-pr-check.sh <id> <url>):$mismatched_polls"
+      fm_wake_append check pr-poll-registration-mismatch "$mismatch_reason" || exit 1
+      reason=$mismatch_reason
+    fi
     if [ -n "$rejected_checks" ]; then
-      reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      rejected_reason="check: rejected unauthenticated state checks:$rejected_checks"
+      fm_wake_append check unauthenticated-state-checks "$rejected_reason" || exit 1
+      reason="${reason:+$reason; }$rejected_reason"
+    fi
+    if [ -n "$reason" ]; then
       touch "$STATE/.last-check"
       wake "$reason"
     fi
