@@ -1495,10 +1495,10 @@ launch_template() {
       ;;
   esac
   local template
-  template=$(launch_command_template "$harness" "$kind" "$permission_flags") || return 1
+  template=$(launch_command_template "$harness" "$kind" "${permission_flags:-}") || return 1
   # Claude's flag and grants ride __CLAUDEPERMFLAG__ ahead of --settings, so no
   # variadic --add-dir can swallow the positional brief.
-  printf '%s' "${template//__CLAUDEPERMFLAG__ /$permission_flags __PERMISSIONDIRS__}"
+  printf '%s' "${template//__CLAUDEPERMFLAG__ /${permission_flags:-} __PERMISSIONDIRS__}"
 }
 
 launch_command_template() {  # <harness> <kind> <permission-flags>
