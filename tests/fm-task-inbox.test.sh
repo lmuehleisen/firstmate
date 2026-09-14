@@ -26,6 +26,11 @@
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
+#   7. Stranded doorbells, against a stateful bordered composer that swallows
+#      Enter while settling: a ring whose Enter is swallowed reports it, the
+#      next attempt submits it with Enter alone (no retyped copy) without
+#      spending ladder budget, and a pending composer holding anything but
+#      exactly that stranded doorbell is still never submitted.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -80,6 +85,23 @@ case "${1:-}" in
         mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
       fi
     fi
+    # The stateful composer: typed text lands in the buffer; Enter submits it
+    # unless the swallow count says the harness is still settling.
+    if [ -n "${FM_FAKE_COMPOSER:-}" ]; then
+      c=$FM_FAKE_COMPOSER
+      if [ "$literal" = 1 ]; then
+        printf '%s' "${1:-}" >> "$c/buffer"
+      elif [ "${1:-}" = Enter ]; then
+        swallow=$(cat "$c/swallow" 2>/dev/null || printf 0)
+        if [ "${swallow:-0}" -gt 0 ]; then
+          printf '%s\n' "$((swallow - 1))" > "$c/swallow"
+          printf 'SWALLOWED-ENTER\n' >> "$c/submit.log"
+        elif [ -s "$c/buffer" ]; then
+          printf 'SUBMITTED %s\n' "$(cat "$c/buffer")" >> "$c/submit.log"
+          : > "$c/buffer"
+        fi
+      fi
+    fi
     exit 0 ;;
   display-message)
     for a in "$@"; do
@@ -91,7 +113,30 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
+    if [ -n "${FM_FAKE_COMPOSER:-}" ] && [ "${FM_FAKE_COMPOSER_SHAPE:-}" = wordwrap ]; then
+      # Codex's shape: a bare prompt row whose buffer word-wraps, dropping the
+      # space at each break and indenting continuation rows, above a footer.
+      printf 'previous transcript line\n'
+      prefix='› '
+      fold -s -w 56 "$FM_FAKE_COMPOSER/buffer" 2>/dev/null | sed 's/ *$//' | while IFS= read -r row || [ -n "$row" ]; do
+        printf '%s%s\n' "$prefix" "$row"
+        prefix='  '
+      done
+      [ -s "$FM_FAKE_COMPOSER/buffer" ] || printf '›\n'
+      printf '\n  model default · ~/project\n'
+    elif [ -n "${FM_FAKE_COMPOSER:-}" ]; then
+      # A bordered composer wrapping its ASCII buffer at 60 cells; the cursor
+      # row the stub reports (1) is its first content row.
+      rest=$(cat "$FM_FAKE_COMPOSER/buffer" 2>/dev/null) width=60
+      rule=$(printf '%*s' "$((width + 2))" '' | sed 's/ /─/g')
+      printf '╭%s╮\n' "$rule"
+      while :; do
+        printf '│ %-*s │\n' "$width" "${rest:0:$width}"
+        rest=${rest:$width}
+        [ -n "$rest" ] || break
+      done
+      printf '╰%s╯\n' "$rule"
+    elif [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
       cat "$FM_FAKE_TMUX_CAPTURE"
     else
       printf '╭────╮\n│    │\n╰────╯\n'
@@ -479,6 +524,94 @@ test_ring_ladder_policy() {
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
 }
 
+# The stateful composer fixture (FM_FAKE_COMPOSER in the fake tmux): <dir>/buffer
+# is the typed text, <dir>/swallow how many Enters to swallow, and
+# <dir>/submit.log every SUBMITTED or SWALLOWED-ENTER event. The rendered shape
+# is a bordered box, or Codex's word-wrapped bare prompt when
+# FM_FAKE_COMPOSER_SHAPE=wordwrap.
+make_composer() {  # <dir> <buffer-text> <swallow-count>
+  mkdir -p "$1"
+  printf '%s' "$2" > "$1/buffer"
+  printf '%s\n' "$3" > "$1/swallow"
+  : > "$1/submit.log"
+}
+
+# Shape box-c is the bordered box read under LC_ALL=C, as the watcher runs in
+# daemon and SSH environments, where bash offsets count bytes, not characters.
+composer_ring() {  # <case-dir> <state> <record> [shape] -> ring result code
+  local dir=$1 state=$2 rec=$3 shape=${4:-} locale=${LC_ALL:-} rc=0
+  case "$shape" in box-c) shape=box; locale=C ;; esac
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$dir/send.log" FM_KEY_LOG="$dir/key.log" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_COMPOSER_SHAPE="$shape" \
+    LC_ALL="$locale" inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  printf '%s' "$rc"
+}
+
+# The report's reproduction (data/fm-post-reboot-supervision-r2, question 3):
+# the harness accepts typing but swallows every Enter the first ring sends.
+# That ring must say so, and the next ring must submit the doorbell already in
+# the composer with Enter alone rather than protecting it as foreign text.
+test_ring_submits_stranded_doorbell_with_enter_alone() {
+  local shape dir state rec doorbell rc
+  for shape in box box-c wordwrap; do
+  dir="$TMP_ROOT/ring-stranded-$shape"; state="$dir/state"; mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  : > "$dir/send.log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  make_composer "$dir/composer" "" 99
+  rc=$(composer_ring "$dir" "$state" "$rec" "$shape")
+  [ "$rc" = 4 ] || fail "$shape: a ring whose Enter was swallowed should report the stranded doorbell (4), got $rc"
+  [ "$(cat "$dir/composer/buffer")" = "$doorbell" ] || fail "the stranded doorbell should sit in the composer exactly once"
+  [ -e "$state/t1.inbox/.stranded" ] || fail "a stranded ring must be remembered for the next attempt"
+  ! grep -q '^SUBMITTED' "$dir/composer/submit.log" || fail "nothing should have been submitted yet"
+
+  printf '0\n' > "$dir/composer/swallow"
+  rc=$(composer_ring "$dir" "$state" "$rec" "$shape")
+  [ "$rc" = 5 ] || fail "$shape: the next ring should submit the stranded doorbell with Enter alone (5), got $rc"
+  [ "$(grep -c '^SUBMITTED' "$dir/composer/submit.log")" = 1 ] \
+    || fail "expected exactly one submission:"$'\n'"$(cat "$dir/composer/submit.log")"
+  grep -qxF "SUBMITTED $doorbell" "$dir/composer/submit.log" \
+    || fail "the submission should be exactly the doorbell:"$'\n'"$(cat "$dir/composer/submit.log")"
+  [ "$(grep -cF 'Firstmate instruction waiting' "$dir/send.log")" = 1 ] \
+    || fail "the retry must not retype the doorbell:"$'\n'"$(cat "$dir/send.log")"
+  [ ! -e "$state/t1.inbox/.stranded" ] || fail "a proven-empty composer should clear the stranded memory"
+  [ -f "$rec" ] || fail "the durable record stays until the worker acknowledges it"
+  done
+  pass "inbox: a stranded doorbell (bordered, bordered under LC_ALL=C, or word-wrapped composer) is reported, then submitted by the next ring with Enter alone"
+}
+
+test_ring_protects_foreign_pending_text() {
+  local shape dir state rec doorbell rc draft
+  for shape in box wordwrap; do
+  dir="$TMP_ROOT/ring-foreign-pending-$shape"; state="$dir/state"; mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  # Even with the stranded memory present, text that is not exactly the doorbell
+  # is someone's draft: no key, nothing typed, the buffer untouched.
+  : > "$state/t1.inbox/.stranded"
+  for draft in "rm -rf the production database" "$doorbell finish the release notes" \
+    "${doorbell/numeric/numerlc}" "${doorbell%.}"; do
+    : > "$dir/send.log"
+    make_composer "$dir/composer" "$draft" 0
+    rc=$(composer_ring "$dir" "$state" "$rec" "$shape")
+    [ "$rc" = 1 ] || fail "$shape: foreign pending text should defer the ring (1), got $rc for: $draft"
+    [ "$(cat "$dir/composer/buffer")" = "$draft" ] || fail "foreign pending text must stay untouched: $draft"
+    [ ! -s "$dir/composer/submit.log" ] || fail "foreign pending text was submitted: $draft"
+    [ ! -s "$dir/send.log" ] || fail "foreign pending text was typed over: $draft"
+  done
+  # The exact doorbell without the stranded memory was not left there by a
+  # ring of this inbox, so it is protected too.
+  rm -f "$state/t1.inbox/.stranded"
+  make_composer "$dir/composer" "$doorbell" 0
+  rc=$(composer_ring "$dir" "$state" "$rec" "$shape")
+  [ "$rc" = 1 ] || fail "$shape: an unremembered doorbell should defer the ring (1), got $rc"
+  [ ! -s "$dir/composer/submit.log" ] || fail "$shape: an unremembered doorbell must not be submitted"
+  done
+  pass "inbox: pending text that is not this inbox's remembered stranded doorbell is never submitted"
+}
+
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
@@ -692,10 +825,68 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   pass "watcher: dead-pane recovery overrides stale busy state"
 }
 
+test_watcher_submits_stranded_doorbell_without_spending_budget() {
+  local dir state out pid rec doorbell i=0 ladder
+  dir=$(setup_watch_case watch-stranded)
+  state="$dir/state"; out="$dir/watch.out"; : > "$dir/send.log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  # The steer's own ring strands the doorbell (every submit Enter swallowed).
+  make_composer "$dir/composer" "" 3
+  [ "$(composer_ring "$dir" "$state" "$rec")" = 4 ] || fail "setup: the first ring should strand the doorbell"
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$dir/send.log" FM_FAKE_COMPOSER="$dir/composer" \
+    FM_TASK_INBOX_GRACE_SECS=5 FM_TASK_INBOX_RING_MAX=1
+  pid=$!
+  # The ladder is written after the ring's post-Enter composer check returns.
+  while [ "$i" -lt 100 ]; do
+    [ -s "$state/t1.inbox/.ring-state" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ladder=$(cat "$state/t1.inbox/.ring-state" 2>/dev/null || true)
+  kill -0 "$pid" 2>/dev/null \
+    || fail "submitting a stranded doorbell must not wake firstmate:"$'\n'"$(cat "$out")"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  grep -qxF "SUBMITTED $doorbell" "$dir/composer/submit.log" \
+    || fail "the watcher never submitted the stranded doorbell:"$'\n'"$(cat "$dir/composer/submit.log")"
+  [ "$(grep -cF 'Firstmate instruction waiting' "$dir/send.log")" = 1 ] \
+    || fail "the watcher must press Enter alone, not retype:"$'\n'"$(cat "$dir/send.log")"
+  [ "$(printf '%s' "$ladder" | cut -f1-2)" = "001.msg"$'\t'"0" ] \
+    || fail "the Enter-only submit should keep the spacing without spending an attempt, ladder: $ladder"
+  [ ! -s "$state/.wake-queue" ] || fail "a delivered stranded doorbell queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: a stranded doorbell is submitted by the next attempt with Enter alone, spending no budget"
+}
+
+test_watcher_still_protects_foreign_pending_text() {
+  local dir state out pid rec
+  dir=$(setup_watch_case watch-foreign-pending)
+  state="$dir/state"; out="$dir/watch.out"; : > "$dir/send.log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  make_composer "$dir/composer" "a draft the captain is still typing" 0
+  : > "$state/t1.inbox/.stranded"
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$dir/send.log" FM_FAKE_COMPOSER="$dir/composer" FM_TASK_INBOX_RING_MAX=2
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "protected skips should still spend budget and escalate"; }
+  [ "$(cat "$dir/composer/buffer")" = "a draft the captain is still typing" ] || fail "the draft was modified"
+  [ ! -s "$dir/composer/submit.log" ] || fail "the draft was submitted:"$'\n'"$(cat "$dir/composer/submit.log")"
+  [ ! -s "$dir/send.log" ] || fail "a doorbell was typed over the draft:"$'\n'"$(cat "$dir/send.log")"
+  grep -qF 'after 2 doorbell delivery attempts' "$state/.wake-queue" \
+    || fail "the protected record should escalate after its budget:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  pass "watcher: a foreign pending draft is never submitted and still escalates after its budget"
+}
+
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_submits_stranded_doorbell_with_enter_alone
+test_ring_protects_foreign_pending_text
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
@@ -712,3 +903,5 @@ test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
+test_watcher_submits_stranded_doorbell_without_spending_budget
+test_watcher_still_protects_foreign_pending_text

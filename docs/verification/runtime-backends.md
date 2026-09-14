@@ -501,6 +501,21 @@ The composer-classification record below observes the same gate from the other s
 
 ## Composer classification matrix
 
+The retained 2026-09-10 command below re-read two already-prepared panes through the Herdr lab helper and classified their visible surfaces without launching or closing panes.
+The PTY-relay and pane-preparation commands were not captured, so this record does not independently reproduce the OSC 10/11 animation setup or bind those panes to the reported Codex model and version:
+
+```sh
+FM_COMPOSER_CODEX_LIVE=1 FM_COMPOSER_CODEX_LAB_SESSION="$HERDR_LAB_SESSION" FM_COMPOSER_CODEX_LAB_IDLE="$IDLE_PANE" FM_COMPOSER_CODEX_LAB_TYPED="$HIGH_PANE" HERDR_LAB_HELPER="$HERDR_LAB_HELPER" bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+```text
+ok - codex-cli 0.154.0: real Codex IDLE composer classifies empty
+ok - codex-cli 0.154.0: real Codex TYPED composer classifies pending
+```
+
+The portable capture regression is `tests/fm-composer-ghost.test.sh`; removing the classifier change fails with `Codex idle: expected empty, got pending`.
+This refresh covers Codex animation only; the historical multi-harness matrix below retains its original version bounds.
+
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
 The live half of that guarantee was verified on 2026-08-10 from an already-trusted checkout at the branch's final validated head, against every installed harness then covered by the empty-composer matrix on tmux 3.6a, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
 An earlier untrusted-worktree run left Claude, Grok, and Muse unverified because the guard treats first-launch trust dialogs as an unreadable-composer state and never confirms them; this trusted-checkout rerun supersedes those missing results.
@@ -558,6 +573,25 @@ All six installed harnesses honored the doorbell contract with real model turns:
 Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard, whose refresh for grok 1.0.5 is still owed), which is why the ring's advisory pre-check skips only on an exact proven `pending` verdict - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
+
+### Stranded-doorbell recovery
+
+The same guard also types a doorbell with no Enter, records the stranded memory, and requires one ordinary re-ring to submit it with Enter alone.
+Verified on 2026-09-13, tmux 3.7c, macOS 25.6.0, private socket:
+
+```sh
+FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=codex bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+```text
+ok - codex (codex-cli 0.154.0): the doorbell reached a real worker, which acted and acked with the mv
+ok - codex (codex-cli 0.154.0): a stranded doorbell was submitted by one re-ring (result 5), and the worker acted and acked
+```
+
+Codex 0.154.0 and Claude Code 2.1.270 both word-wrap a long composer line, dropping the space at each break and indenting continuation rows by two cells, which is why the identity check forgives whitespace only at row boundaries.
+On both, a composer holding the exact doorbell matched, and appending text or deleting one character did not.
+Claude Code 2.1.270 could not run inside this guard on the verification machine: its `--dangerously-skip-permissions` launch stops at a bypass-permissions acceptance dialog that the guard never confirms, so both Claude checks failed as unready.
+Claude was instead checked by hand without that flag: the same typed doorbell plus stranded memory made `fm_task_inbox_ring` return 5, and the worker acknowledged the record 14 seconds later.
 
 ## agy (Antigravity CLI)
 
