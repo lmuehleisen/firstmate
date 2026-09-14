@@ -18,6 +18,18 @@ codex --approve-for-me --add-dir /tmp --add-dir /private/tmp --help
 codex --sandbox workspace-write --ask-for-approval on-request -c approvals_reviewer=user --add-dir /tmp --help
 ```
 
+The Claude launch carries its flag and both grants through the `__CLAUDEPERMFLAG__` seam, ahead of `--settings`, with no `--` before the positional brief.
+On 2026-09-14, Claude Code 2.1.270 parsed that order in one short print-mode turn, listing both variadic grants and still receiving the positional prompt:
+
+```sh
+claude -p --permission-mode auto --add-dir "$STATE" --add-dir "$BRIEF_DIR" \
+  --settings '{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}' \
+  --model haiku --effort low \
+  "Without using any tools, list every additional working directory path from your environment context, one per line, then a final line PROMPT_RECEIVED."
+```
+
+The output was the resolved `$STATE` path, the resolved `$BRIEF_DIR` path, and `PROMPT_RECEIVED`.
+
 `tests/fm-spawn-dispatch-profile.test.sh` exercises generated worker commands, default and explicit harness selection, auto/manual modes, reporting-directory grants, and rejection of invalid permission settings through the real spawn entry point with isolated Git worktrees and fake endpoints.
 `tests/fm-secondmate-harness.test.sh` and `tests/fm-backend-orca.test.sh` cover the other affected launch shapes.
 These are argument and routing checks, not evidence of account eligibility, classifier decisions, hook delivery, or end-to-end supervised operation in Auto mode.
