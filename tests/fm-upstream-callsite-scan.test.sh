@@ -45,6 +45,7 @@ pr_for_task() {
 }
 helper_kept() { :; }
 SH
+  # shellcheck disable=SC2016  # literal fixture source, expanded by nothing
   printf '%s\n' 'task_show "$id"' > "$repo/bin/upstream-caller.sh"
   commit_all "$repo" upstream
   git -C "$repo" checkout -q -b fork base
@@ -64,6 +65,7 @@ test_fork_caller_of_redefined_helper_is_reported() {
   status=$?
   expect_code 1 "$status" "a fork caller of a redefined helper must fail the scan: $out"
   assert_contains "$out" 'REDEFINED: task_show' 'the rewritten definition was not listed'
+  # shellcheck disable=SC2016  # the reported fixture line, verbatim
   assert_contains "$out" 'CALLSITE: task_show bin/fork-caller.sh: show=$(task_show "$id") || exit 1' \
     'the fork-only caller was not reported with its path and line'
   assert_contains "$out" 'SUMMARY: 1 redefined helper(s), 1 fork-only call site(s)' 'wrong summary'
