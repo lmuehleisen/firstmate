@@ -445,6 +445,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/upstream-integration.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },
