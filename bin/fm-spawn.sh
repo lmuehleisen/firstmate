@@ -316,7 +316,10 @@
 # An agy ship or scout spawn reports success only once the worker hook's
 # PreInvocation record replaces the fm-spawn seed (FM_AGY_READY_POLLS polls,
 # default 120, every FM_AGY_POLL_INTERVAL seconds, default 0.5); otherwise it
-# appends failed:, closes the endpoint, retires a fresh spawn's hooks, and exits 1.
+# closes the endpoint, appends failed:, retires a fresh spawn's hooks, and exits
+# 1. When closure cannot be confirmed (the backend still finds the target), the
+# task record, busy generation, and hooks are kept for teardown instead, and
+# the failure says the worker may still be running.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -3303,13 +3306,41 @@ agy_wait_for_started() {
   return 1
 }
 
+# Close the launched agy endpoint and prove it is gone. A kill command's own
+# status is not proof (tmux's adapter reports success either way), so closure
+# counts only once the backend no longer finds the target.
+agy_endpoint_close_confirmed() {
+  local tab_id= i=0 max=${FM_AGY_CLOSE_POLLS:-10} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_kill orca "$T" 2>/dev/null || return 1
+  else
+    fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || return 1
+  fi
+  while [ "$i" -lt "$max" ]; do
+    fm_backend_target_exists "$BACKEND" "$T" "$W" || return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
 agy_spawn_fail() {  # <detail>
-  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
-  # A relaunch's abort trap retires its replacement wiring; a fresh spawn's
-  # rollback removes only the record and generation, so retire its hooks here.
-  [ "$RELAUNCH" -eq 1 ] || "$FM_ROOT/bin/fm-agy-hook.sh" retire-worker "$STATE_REAL" "$ID" || true
+  if agy_endpoint_close_confirmed; then
+    printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+    echo "error: $1; closed window $T" >&2
+    # A relaunch's abort trap retires its replacement wiring; a fresh spawn's
+    # rollback removes only the record and generation, so retire its hooks here.
+    [ "$RELAUNCH" -eq 1 ] || "$FM_ROOT/bin/fm-agy-hook.sh" retire-worker "$STATE_REAL" "$ID" || true
+    return 0
+  fi
+  # The agy process may still be running. Keep the task record, busy
+  # generation, and hooks so teardown and supervision still own it: skip the
+  # fresh-spawn rollback the EXIT trap would otherwise run.
+  SPAWN_FRESH_COMMIT_PENDING=0
+  printf 'failed: %s; its endpoint %s could not be confirmed closed, so the task record was kept\n' "$1" "$T" >> "$STATE/$ID.status"
+  echo "error: $1, and closing endpoint $T could not be confirmed; the agy worker may still be running." >&2
+  echo "error: task record $STATE/$ID.meta, its busy generation, and its hooks were kept; close the endpoint, then run bin/fm-teardown.sh $ID." >&2
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then

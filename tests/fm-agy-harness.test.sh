@@ -147,11 +147,16 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    # A killed window stops resolving, which is how spawn confirms closure.
+    [ ! -e "$FM_FAKE_LAUNCH_LOG.closed" ] || exit 1
+    printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window) exit 0 ;;
   kill-window)
     printf 'kill-window %s\n' "$*" >> "$FM_FAKE_LAUNCH_LOG.kills"
+    # FM_FAKE_KILL_FAILS models a kill that leaves the window running.
+    [ "${FM_FAKE_KILL_FAILS:-0}" = 1 ] || : > "$FM_FAKE_LAUNCH_LOG.closed"
     exit 0
     ;;
   send-keys)
@@ -557,6 +562,36 @@ EOF
   pass "fm-spawn.sh: agy spawn fails, records it, and closes the endpoint when the brief never starts"
 }
 
+test_agy_spawn_keeps_its_record_when_the_endpoint_will_not_close() {
+  local fields case_dir home proj wt fakebin id out status record
+  fields=$(make_spawn_case close-unconfirmed)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  # The brief never starts and the kill leaves the window in place, so the agy
+  # process may still be running: its record, generation, and hooks must stay
+  # for teardown rather than being rolled back underneath a live worker.
+  out=$(FM_FAKE_AGY_START=0 FM_FAKE_KILL_FAILS=1 FM_AGY_READY_POLLS=4 \
+    FM_AGY_CLOSE_POLLS=3 FM_AGY_POLL_INTERVAL=0.1 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "agy spawn reported success though its brief never started: $out"
+  grep -Fq "fm-$id" "$home/launch.log.kills" 2>/dev/null \
+    || fail "the case never attempted to close the endpoint: $out"
+  case "$out" in
+    *'could not be confirmed; the agy worker may still be running'*) ;;
+    *) fail "an unconfirmed close must be reported, got: $out" ;;
+  esac
+  grep -q '^failed: agy did not report starting its brief.*could not be confirmed closed' "$home/state/$id.status" \
+    || fail "the failure record did not say the endpoint may still run: $(cat "$home/state/$id.status" 2>/dev/null)"
+  [ -f "$home/state/$id.meta" ] || fail "an unconfirmed close rolled back the task record"
+  record=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"' _ "$ROOT" "$home/state" "$id") \
+    || fail "an unconfirmed close retired the busy generation: $record"
+  [ -f "$home/state/$id.agy-hooks/.agents/hooks.json" ] || fail "an unconfirmed close retired the worker hooks"
+  pass "fm-spawn.sh: an agy spawn whose endpoint cannot be confirmed closed keeps its record for teardown"
+}
+
 # --- control mechanics ------------------------------------------------------
 
 test_agy_control_mechanics_are_the_verified_ones() {
@@ -736,6 +771,7 @@ test_agy_suffixed_model_id_suppresses_the_effort_flag
 test_agy_secondmate_launch_is_supported
 test_agy_spawn_confirms_the_brief_started
 test_agy_spawn_fails_and_closes_when_the_brief_never_starts
+test_agy_spawn_keeps_its_record_when_the_endpoint_will_not_close
 test_agy_control_mechanics_are_the_verified_ones
 test_agy_supports_all_task_kinds
 test_agy_wiring_has_a_cleanup_owner
