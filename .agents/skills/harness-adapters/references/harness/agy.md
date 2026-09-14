@@ -14,6 +14,7 @@ agy self-updates aggressively and without asking - it moved 1.1.25 -> 1.1.28 -> 
 | Directory grants | `--add-dir`, repeatable, and MANDATORY - see "The worktree grant" below. |
 | Approvals | No reviewed-auto mode. `--mode accept-edits` covers file edits only; shell commands always prompt. See "Approvals" below. |
 | Busy state | `agy-hook`: PreInvocation opens; fullyIdle Stop closes. The worker binds its generation and main conversation; interruption emits no Stop and conservatively leaves busy. |
+| Spawn start | A ship or scout spawn reports success only after the worker hook's PreInvocation record replaces spawn's seed; otherwise it records a failure and closes the endpoint, so an agy launch parked before its first model call never looks dispatched. `../../../../../bin/fm-spawn.sh` owns the bound. |
 | Rendered tail | Not a state source, but the running turn's footer is the one ASCII busy token: `esc to cancel` while a turn runs, `? for shortcuts` when idle. The right of the footer names the active mode and model, e.g. `accept-edits · Gemini 3.8 Flash · medium`. |
 | Turn end | Native Stop; see "Native hooks and primary integration" below. |
 | Exit | `/exit` (alias `quit`), one Enter; prints `Resume with -c (or command below): agy --conversation=<uuid>`. |

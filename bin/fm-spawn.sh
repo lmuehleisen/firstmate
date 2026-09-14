@@ -313,6 +313,10 @@
 # Every agy launch grants physically resolved worktree and hook paths: without
 # the worktree grant agy writes into its own scratch, and an unresolved path
 # parks on a non-workspace approval prompt.
+# An agy ship or scout spawn reports success only once the worker hook's
+# PreInvocation record replaces the fm-spawn seed (FM_AGY_READY_POLLS polls,
+# default 120, every FM_AGY_POLL_INTERVAL seconds, default 0.5); otherwise it
+# appends failed:, closes the endpoint, retires a fresh spawn's hooks, and exits 1.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
