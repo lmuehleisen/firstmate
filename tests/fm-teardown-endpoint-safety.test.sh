@@ -642,6 +642,28 @@ test_slot_leased_to_this_task_returns_through_a_home_alias() {
   pass "fm-teardown: a slot leased to this task under any spelling of its home is returned"
 }
 
+test_slot_leased_to_the_state_owning_home_returns_without_fm_home() {
+  local dir id=lease-task
+  dir=$(make_case lease-state-home)
+  mark_case_as_treehouse_pool "$dir"
+  # Spawn leased under FM_HOME=home; teardown runs with only the state, data,
+  # and config overrides, so its FM_HOME is the code root. The home owning the
+  # task's state directory is still this task's own home.
+  lease_case_slot "$dir" "$dir/home:$id"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  env -u FM_HOME FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_DATA_OVERRIDE="$dir/home/data" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --force > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown refused a slot leased to the home owning its state: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "state-home lease teardown left the task record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "state-home lease teardown did not return its slot: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: a slot leased to the home owning the task's state is returned even when FM_HOME differs"
+}
+
 test_forced_secondmate_teardown_refuses_child_slot_leased_elsewhere() {
   local dir subhome childproj childwt rc
   dir=$(make_case lease-child-other)
@@ -1141,6 +1163,7 @@ test_sole_slot_record_still_tears_down
 test_slot_leased_to_another_holder_refuses_even_forced
 test_unreadable_lease_record_refuses
 test_slot_leased_to_this_task_returns_through_a_home_alias
+test_slot_leased_to_the_state_owning_home_returns_without_fm_home
 test_forced_secondmate_teardown_refuses_child_slot_leased_elsewhere
 test_stopped_landed_stale_claim_retires_without_touching_the_slot
 test_stale_claim_never_borrows_another_claimants_landed_head

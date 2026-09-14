@@ -33,17 +33,20 @@ JS
 
 # Positive owner proof before a slot is returned, read from the same record.
 # Spawn leases with holder "<FM_HOME>:<task-id>"; the home half compares by
-# resolved path so a symlinked spelling of the same home still matches.
+# resolved path against each spelling the caller names for the task's own home
+# (its configured home and the home owning its state directory), so a symlinked
+# or overridden spelling of that same home still matches.
 # Prints "mine", "unleased" (no durable holder: a pre-lease claim), or
 # "other <holder>"; returns 1 when the record cannot answer (missing,
 # unsafe, malformed, or no single entry for the slot).
-fm_worktree_lease_owner() {  # <canonical-slot> <home> <task-id>
-  local slot=$1 home=$2 id=$3 pool
+fm_worktree_lease_owner() {  # <canonical-slot> <task-id> <home>...
+  local slot=$1 id=$2 pool
+  shift 2
   pool=$(dirname "$(dirname "$slot")")
   [ -f "$pool/treehouse-state.json" ] && [ ! -L "$pool/treehouse-state.json" ] || return 1
-  node - "$pool/treehouse-state.json" "$slot" "$home" "$id" <<'JS'
+  node - "$pool/treehouse-state.json" "$slot" "$id" "$@" <<'JS'
 const fs = require('fs');
-const [file, slot, home, id] = process.argv.slice(2);
+const [file, slot, id, ...homes] = process.argv.slice(2);
 const real = p => { try { return fs.realpathSync(p); } catch { return p; } };
 try {
   const state = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -58,7 +61,7 @@ try {
   const holder = typeof entry.lease_holder === 'string' ? entry.lease_holder : '';
   const split = holder.lastIndexOf(':');
   const mine = split > 0 && holder.slice(split + 1) === id
-    && real(holder.slice(0, split)) === real(home);
+    && homes.some(home => real(holder.slice(0, split)) === real(home));
   console.log(mine ? 'mine' : `other ${holder || '<no holder>'}`);
 } catch { process.exit(1); }
 JS

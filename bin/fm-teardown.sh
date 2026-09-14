@@ -82,7 +82,8 @@
 # collision itself, whichever record is stale.
 # It then proves the allocator still agrees: Treehouse's own treehouse-state.json
 # entry for the slot must be leased to this task's "<home>:<task-id>" holder
-# (spawn's --lease-holder, home compared by resolved path). A slot leased to any
+# (spawn's --lease-holder; the home is compared by resolved path with FM_HOME
+# and with the home owning the task's state directory). A slot leased to any
 # other holder, or leased with none, refuses; a missing, malformed, or ambiguous
 # entry refuses. An unleased entry is a pre-lease legacy claim and proceeds
 # on record exclusivity alone, since spawn already refuses to allocate in a
@@ -2135,17 +2136,18 @@ require_exclusive_worktree_slot_record() {
   done
 }
 
-require_slot_lease_holder() {  # <id> <home> <worktree>
-  local id=$1 home=$2 slot owner
-  slot=$(canonical_existing_dir "$3") || return 0
-  owner=$(fm_worktree_lease_owner "$slot" "$home" "$id") || {
+require_slot_lease_holder() {  # <id> <worktree> <home>...
+  local id=$1 slot owner
+  slot=$(canonical_existing_dir "$2") || return 0
+  shift 2
+  owner=$(fm_worktree_lease_owner "$slot" "$id" "$@") || {
     echo "REFUSED: cannot read Treehouse's lease record for task $id's slot $slot; nothing was changed - not even with --force." >&2
     return 1
   }
   case "$owner" in
     mine|unleased) return 0 ;;
   esac
-  echo "REFUSED: task $id's recorded slot $slot is leased to ${owner#other }, not $home:$id." >&2
+  echo "REFUSED: task $id's recorded slot $slot is leased to ${owner#other }, not to task $id of home $1." >&2
   echo "Returning it would kill that holder's processes and reset its copy, so nothing was changed - not even with --force." >&2
   return 1
 }
@@ -2154,7 +2156,7 @@ require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
   require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot" || return 1
-  require_slot_lease_holder "$ID" "$FM_HOME" "$slot"
+  require_slot_lease_holder "$ID" "$slot" "$FM_HOME" "${STATE%/state}"
 }
 
 stale_claim_endpoint_stopped() {  # <meta> <id>
@@ -2782,7 +2784,7 @@ preflight_descendant_treehouse_slots() {
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
     require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
-    require_slot_lease_holder "$task_id" "${state%/state}" "$worktree" || return 1
+    require_slot_lease_holder "$task_id" "$worktree" "${state%/state}" || return 1
   done
 }
 
