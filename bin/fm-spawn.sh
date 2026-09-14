@@ -3278,6 +3278,36 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
 }
 
+# agy starts its brief itself (-i), so there is no pointer to deliver; what
+# spawn must prove is that the brief actually began running. The worker hook's
+# PreInvocation is agy's own report of that: it replaces the fm-spawn seed with
+# an agy-hook record under this incarnation's gen. Only that source counts - the
+# seed is busy from the start, and a rendered footer is not consulted. A launch
+# parked on an authentication prompt, a trust dialog, a feedback survey, or a
+# refused model id never invokes the model and so never publishes it.
+agy_wait_for_started() {
+  local record source i=0 max=${FM_AGY_READY_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    # A valid record reads "<state> <source> <event> <seq>".
+    if record=$(fm_busy_record_read "$STATE_REAL" "$ID"); then
+      source=${record#* }
+      [ "${source%% *}" != agy-hook ] || return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+agy_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+  # A relaunch's abort trap retires its replacement wiring; a fresh spawn's
+  # rollback removes only the record and generation, so retire its hooks here.
+  [ "$RELAUNCH" -eq 1 ] || "$FM_ROOT/bin/fm-agy-hook.sh" retire-worker "$STATE_REAL" "$ID" || true
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -4279,6 +4309,12 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = agy ] && [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! agy_wait_for_started; then
+    agy_spawn_fail "agy did not report starting its brief through its worker hook in window $T"
     exit 1
   fi
 fi

@@ -149,16 +149,37 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session|new-window) exit 0 ;;
+  kill-window)
+    printf 'kill-window %s\n' "$*" >> "$FM_FAKE_LAUNCH_LOG.kills"
+    exit 0
+    ;;
   send-keys)
     prev=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
-        break
+        case "$arg" in
+          *.agy-hooks*)
+            printf '%s\n' "$arg" | grep -o "[^' ]*\.agy-hooks" | head -n 1 \
+              > "$FM_FAKE_LAUNCH_LOG.agy-hooks"
+            ;;
+        esac
+        exit 0
       fi
       prev=$arg
     done
+    # Stand-in for agy starting its brief: the Enter that submits the launch
+    # line runs the installed worker PreInvocation hook with the payload agy
+    # sends, unless the case models a launch that never reaches the model.
+    if [ "${*: -1}" = Enter ] && [ "${FM_FAKE_AGY_START:-1}" = 1 ] \
+       && [ -s "$FM_FAKE_LAUNCH_LOG.agy-hooks" ]; then
+      hooks="$(cat "$FM_FAKE_LAUNCH_LOG.agy-hooks")/.agents/hooks.json"
+      cmd=$(jq -r '."firstmate-worker".PreInvocation[0].command' "$hooks" 2>/dev/null) || exit 0
+      wt=$(cd "$FM_FAKE_PANE_PATH" 2>/dev/null && pwd -P) || exit 0
+      jq -n --arg wt "$wt" '{conversationId:"fake-conversation",workspacePaths:[$wt]}' \
+        | bash -c "$cmd"
+    fi
     exit 0
     ;;
 esac
@@ -479,6 +500,63 @@ EOF
   pass "fm-spawn.sh: agy secondmate launches without worker wiring"
 }
 
+# --- start confirmation -----------------------------------------------------
+
+test_agy_spawn_confirms_the_brief_started() {
+  local fields case_dir home proj wt fakebin id out record
+  fields=$(make_spawn_case started)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) \
+    || fail "agy spawn whose worker hook reported the brief failed: $out"
+  case "$out" in
+    *"spawned $id harness=agy kind=scout"*) ;;
+    *) fail "a confirmed agy start did not report success: $out" ;;
+  esac
+  record=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"' _ "$ROOT" "$home/state" "$id") \
+    || fail "confirmed agy start left no valid busy record: $record"
+  case "$record" in
+    'busy agy-hook pre-invocation '*) ;;
+    *) fail "spawn reported success without the worker hook's own record, got: $record" ;;
+  esac
+  [ -f "$home/state/$id.meta" ] || fail "a confirmed agy start did not keep its task record"
+  [ ! -e "$home/launch.log.kills" ] || fail "a confirmed agy start closed its endpoint: $(cat "$home/launch.log.kills")"
+  pass "fm-spawn.sh: agy spawn succeeds only after the worker hook reports the brief started"
+}
+
+test_agy_spawn_fails_and_closes_when_the_brief_never_starts() {
+  local fields case_dir home proj wt fakebin id out status record
+  fields=$(make_spawn_case never-started)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  # The launch is typed and submitted, and spawn's own seed record is busy the
+  # whole time, but agy never invokes the model (an auth prompt, a trust dialog,
+  # a refused model id). The seed must not pass for a started brief.
+  out=$(FM_FAKE_AGY_START=0 FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0.1 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "agy spawn reported success though its brief never started: $out"
+  grep -Fq '.agy-hooks' "$home/launch.log" || fail "the case never delivered the agy launch: $out"
+  case "$out" in
+    *'agy did not report starting its brief'*) ;;
+    *) fail "the refusal must say the brief never started, got: $out" ;;
+  esac
+  grep -q '^failed: agy did not report starting its brief' "$home/state/$id.status" \
+    || fail "a never-started agy spawn did not record a failure: $(cat "$home/state/$id.status" 2>/dev/null)"
+  grep -Fq "fm-$id" "$home/launch.log.kills" 2>/dev/null \
+    || fail "a never-started agy spawn left its endpoint running: $(cat "$home/launch.log.kills" 2>/dev/null)"
+  [ ! -e "$home/state/$id.meta" ] || fail "a never-started agy spawn kept its task record"
+  [ ! -e "$home/state/$id.agy-hooks" ] || fail "a never-started agy spawn left its worker hooks installed"
+  if record=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"' _ "$ROOT" "$home/state" "$id"); then
+    fail "a never-started agy spawn left a live busy record: $record"
+  fi
+  pass "fm-spawn.sh: agy spawn fails, records it, and closes the endpoint when the brief never starts"
+}
+
 # --- control mechanics ------------------------------------------------------
 
 test_agy_control_mechanics_are_the_verified_ones() {
@@ -656,6 +734,8 @@ test_agy_effort_caps_at_high
 test_agy_effort_passes_supported_levels_through
 test_agy_suffixed_model_id_suppresses_the_effort_flag
 test_agy_secondmate_launch_is_supported
+test_agy_spawn_confirms_the_brief_started
+test_agy_spawn_fails_and_closes_when_the_brief_never_starts
 test_agy_control_mechanics_are_the_verified_ones
 test_agy_supports_all_task_kinds
 test_agy_wiring_has_a_cleanup_owner
