@@ -36,6 +36,8 @@ JS
 # resolved path against each spelling the caller names for the task's own home
 # (its configured home and the home owning its state directory), so a symlinked
 # or overridden spelling of that same home still matches.
+# A home argument of "-" also accepts the bare "<task-id>" holder that
+# bin/fm-home-seed.sh records when it leases a secondmate home.
 # Prints "mine", "unleased" (no durable holder: a pre-lease claim), or
 # "other <holder>"; returns 1 when the record cannot answer (missing,
 # unsafe, malformed, or no single entry for the slot).
@@ -60,8 +62,9 @@ try {
   if (entry.leased !== true) { console.log('unleased'); process.exit(0); }
   const holder = typeof entry.lease_holder === 'string' ? entry.lease_holder : '';
   const split = holder.lastIndexOf(':');
-  const mine = split > 0 && holder.slice(split + 1) === id
-    && homes.some(home => real(holder.slice(0, split)) === real(home));
+  const bare = homes.includes('-') && holder === id;
+  const mine = bare || (split > 0 && holder.slice(split + 1) === id
+    && homes.some(home => home !== '-' && real(holder.slice(0, split)) === real(home)));
   console.log(mine ? 'mine' : `other ${holder || '<no holder>'}`);
 } catch { process.exit(1); }
 JS

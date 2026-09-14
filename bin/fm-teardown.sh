@@ -88,6 +88,10 @@
 # entry refuses. An unleased entry is a pre-lease legacy claim and proceeds
 # on record exclusivity alone, since spawn already refuses to allocate in a
 # project while any such claim remains (bin/fm-worktree-claims-lib.sh).
+# The same proof covers a secondmate home and every descendant home or slot,
+# where bin/fm-home-seed.sh's bare "<task-id>" holder also counts as the home's
+# own. Any recorded path inside a Treehouse pool whose project record does not
+# identify that pool refuses outright rather than skipping the proof.
 # The recorded endpoint's exact task identity and the record's spawn incarnation
 # are validated separately before cleanup. Its current working directory is only
 # incidental process state: the same worker remains the owner after changing directory, so cwd can
@@ -2152,9 +2156,35 @@ require_slot_lease_holder() {  # <id> <worktree> <home>...
   return 1
 }
 
+# Any recorded path that sits in a Treehouse pool (its grandparent holds
+# treehouse-state.json) is one cleanup may return with --force, whether or not
+# the record's project= still identifies that pool. A failed correlation refuses
+# instead of skipping the proof; a correlated slot must pass the holder proof.
+require_pool_path_owner() {  # <id> <path> <project> <label> <home>...
+  local id=$1 path=$2 project=$3 label=$4 slot pool
+  slot=$(canonical_existing_dir "$path") || return 0
+  pool=$(dirname "$(dirname "$slot")")
+  [ -e "$pool/treehouse-state.json" ] || [ -L "$pool/treehouse-state.json" ] || return 0
+  if ! fm_treehouse_pool_slot "$project" "$slot"; then
+    echo "REFUSED: task $id's recorded $label $slot is in a Treehouse pool that its project record (${project:-none}) does not identify." >&2
+    echo "Cleanup cannot prove the slot is still this task's before returning it, so nothing was changed - not even with --force." >&2
+    return 1
+  fi
+  shift 4
+  require_slot_lease_holder "$id" "$slot" "$@"
+}
+
 require_exclusive_task_worktree_slot() {
-  local slot
-  slot=$(teardown_live_slot_path) || return 0
+  local slot home
+  if [ "$KIND" = secondmate ]; then
+    home=${HOME_PATH:-$WT}
+    require_pool_path_owner "$ID" "$home" "$FM_ROOT" "secondmate home" - "$FM_HOME" "${STATE%/state}"
+    return
+  fi
+  if ! slot=$(teardown_live_slot_path); then
+    require_pool_path_owner "$ID" "$WT" "$PROJ" worktree "$FM_HOME" "${STATE%/state}"
+    return
+  fi
   require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot" || return 1
   require_slot_lease_holder "$ID" "$slot" "$FM_HOME" "${STATE%/state}"
 }
@@ -2776,10 +2806,15 @@ preflight_descendant_treehouse_slots() {
     backend=$(fm_backend_of_meta "$meta")
     worktree=$(meta_value "$meta" worktree)
     project=$(meta_value "$meta" project)
-    if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
+    if [ "$kind" = secondmate ]; then
+      worktree=$(meta_value "$meta" home)
+      [ -n "$worktree" ] || worktree=$(meta_value "$meta" worktree)
+      require_pool_path_owner "$task_id" "$worktree" "$FM_ROOT" "child firstmate home" - "${state%/state}" || return 1
       continue
     fi
+    [ "$backend" != orca ] || continue
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
+      require_pool_path_owner "$task_id" "$worktree" "$project" "child worktree" "${state%/state}" || return 1
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1

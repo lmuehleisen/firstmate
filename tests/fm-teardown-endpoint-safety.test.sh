@@ -664,6 +664,124 @@ test_slot_leased_to_the_state_owning_home_returns_without_fm_home() {
   pass "fm-teardown: a slot leased to the home owning the task's state is returned even when FM_HOME differs"
 }
 
+test_forced_secondmate_teardown_refuses_uncorrelated_child_pool_slot() {
+  local dir subhome childproj childwt rc
+  dir=$(make_case child-uncorrelated)
+  subhome="$dir/subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$dir/pool/1/alpha"
+  mkdir -p "$subhome/state" "$dir/pool/1"
+  fm_git_worktree "$childproj" "$childwt" child-uncorrelated
+  fm_git_init_commit "$subhome/projects/beta"
+  : > "$childwt/sentinel"
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"%s"}]}\n' \
+    "$childwt" "$subhome:another-child" > "$dir/pool/treehouse-state.json"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$dir/home/state/domain.meta" \
+    "window=firstmate:fm-domain" "endpoint_task_id=domain" "worktree=$subhome" \
+    "project=$subhome" "harness=echo" "kind=secondmate" "home=$subhome" "projects=alpha"
+  printf '%s\n' "- domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$subhome/state/child.meta" \
+    "window=firstmate:fm-child" "endpoint_task_id=child" "worktree=$childwt" \
+    "project=$subhome/projects/beta" "harness=echo" "kind=ship" "mode=direct-PR"
+  set +e
+  run_case "$dir" domain > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown returned an uncorrelated child pool slot"
+  assert_present "$childwt/sentinel" "forced secondmate teardown reset an uncorrelated child slot"
+  assert_present "$subhome/state/child.meta" "forced secondmate teardown removed the child record"
+  ! grep -Eq 'treehouse <return>|kill-window' "$dir/runtime.log" \
+    || fail "forced secondmate teardown reached destructive cleanup: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$childwt" "child refusal did not name the uncorrelated slot"
+  pass "fm-teardown: forced secondmate teardown refuses a child pool slot its project record does not identify"
+}
+
+test_pool_worktree_with_uncorrelated_project_refuses_even_forced() {
+  local dir id=lease-task holder
+  # The record's project= names a different repository than the pool the
+  # worktree sits in, so the slot cannot be correlated to this task. That must
+  # refuse rather than skip the proof and fall through to a forced return,
+  # whoever holds the lease.
+  for holder in someone-else mine; do
+    dir=$(make_case "lease-uncorrelated-$holder")
+    mark_case_as_treehouse_pool "$dir"
+    fm_git_init_commit "$dir/other-project"
+    if [ "$holder" = mine ]; then
+      lease_case_slot "$dir" "$dir/home:$id"
+    else
+      lease_case_slot "$dir" "$dir/home:someone-else"
+    fi
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$dir/worktree" "project=$dir/other-project" "kind=scout"
+    assert_refused_without_mutation "$dir" "$id" "uncorrelated pool worktree leased to $holder"
+    assert_contains "$(cat "$dir/stderr")" "project record ($dir/other-project) does not identify" \
+      "uncorrelated refusal did not name the project record"
+  done
+  pass "fm-teardown: a pool worktree whose project record does not identify its pool is never returned, even forced"
+}
+
+make_pooled_secondmate_case() {  # <name> <lease-holder>
+  local dir root
+  dir=$(make_case "$1")
+  root="$dir/root"
+  mkdir -p "$dir/pool/1"
+  fm_git_worktree "$root" "$dir/pool/1/root" "home-$1"
+  # Teardown runs its helpers from FM_ROOT; the fixture root only needs to own
+  # the pool's Git identity.
+  ln -s "$ROOT/bin" "$root/bin"
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"%s"}]}\n' \
+    "$dir/pool/1/root" "$2" > "$dir/pool/treehouse-state.json"
+  mkdir -p "$dir/pool/1/root/state" "$dir/pool/1/root/data"
+  printf 'domain\n' > "$dir/pool/1/root/.fm-secondmate-home"
+  : > "$dir/pool/1/root/sentinel"
+  fm_write_meta "$dir/home/state/domain.meta" \
+    "window=firstmate:fm-domain" "endpoint_task_id=domain" "worktree=$dir/pool/1/root" \
+    "project=$dir/pool/1/root" "harness=echo" "kind=secondmate" "home=$dir/pool/1/root" "projects=alpha"
+  printf '%s\n' "- domain - design domain (home: $dir/pool/1/root; scope: design domain; projects: alpha; added 2026-06-22)" \
+    > "$dir/home/data/secondmates.md"
+  printf '%s\n' "$dir"
+}
+
+run_secondmate_case() {  # <case> [--force]
+  local dir=$1
+  shift
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" domain "$@"
+}
+
+test_secondmate_home_leased_to_another_holder_refuses() {
+  local dir rc force
+  for force in '' --force; do
+    dir=$(make_pooled_secondmate_case "sm-home-other${force:+-forced}" other-mate)
+    set +e
+    run_secondmate_case "$dir" $force > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "secondmate teardown${force:+ (forced)} returned a home leased to another holder"
+    assert_present "$dir/pool/1/root/sentinel" "secondmate teardown changed a home leased elsewhere"
+    assert_present "$dir/home/state/domain.meta" "secondmate teardown removed its record before refusing"
+    ! grep -Eq 'treehouse <return>|kill-window' "$dir/runtime.log" \
+      || fail "secondmate teardown reached destructive cleanup: $(cat "$dir/runtime.log")"
+    assert_contains "$(cat "$dir/stderr")" "leased to other-mate" "secondmate refusal did not name the holder"
+  done
+  pass "fm-teardown: a secondmate home Treehouse leases to another holder is never returned, forced or not"
+}
+
+test_secondmate_home_leased_to_its_own_id_returns() {
+  local dir
+  dir=$(make_pooled_secondmate_case sm-home-own domain)
+  run_secondmate_case "$dir" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "secondmate teardown refused a home leased to its own id: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/domain.meta" "own-lease secondmate teardown left its record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "own-lease secondmate teardown did not return its home: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: a secondmate home leased under its own id, as seeding records it, is returned"
+}
+
 test_forced_secondmate_teardown_refuses_child_slot_leased_elsewhere() {
   local dir subhome childproj childwt rc
   dir=$(make_case lease-child-other)
@@ -1165,6 +1283,10 @@ test_unreadable_lease_record_refuses
 test_slot_leased_to_this_task_returns_through_a_home_alias
 test_slot_leased_to_the_state_owning_home_returns_without_fm_home
 test_forced_secondmate_teardown_refuses_child_slot_leased_elsewhere
+test_forced_secondmate_teardown_refuses_uncorrelated_child_pool_slot
+test_pool_worktree_with_uncorrelated_project_refuses_even_forced
+test_secondmate_home_leased_to_another_holder_refuses
+test_secondmate_home_leased_to_its_own_id_returns
 test_stopped_landed_stale_claim_retires_without_touching_the_slot
 test_stale_claim_never_borrows_another_claimants_landed_head
 test_stale_claim_refuses_live_dirty_and_forced_recovery
