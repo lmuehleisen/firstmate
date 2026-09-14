@@ -341,7 +341,7 @@ Supervise all live work under section 8.
 
 The selected delivery path owns its own rigor.
 Without `config/no-mistakes`, treat a `no-mistakes` mode token as `direct-PR` and never start a no-mistakes pipeline: the worker pushes and opens the PR with `gh`.
-With it present, only a task you explicitly resolve to `no-mistakes` runs the real pipeline, where you send the worker's `/no-mistakes` skill invocation through `fm-send` after its `done:` summary and its ready signal is `done: PR <url> checks green`, while a missing CLI refuses that spawn and registry tokens still mean `direct-PR`.
+With it present, only a task you explicitly resolve to `no-mistakes` runs the real pipeline, where you send the worker's no-mistakes skill invocation in its harness's form through `fm-send` after its `done:` summary and its ready signal is `done: PR <url> checks green`, while a missing CLI refuses that spawn and registry tokens still mean `direct-PR`.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 The path's worker, automated gates, and captain approval remain authoritative:
 

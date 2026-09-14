@@ -39,7 +39,7 @@
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  ships like direct-PR; with config/no-mistakes present (this home's
 #                opt-in, docs/configuration.md) it renders the real pipeline contract:
-#                implement -> /no-mistakes pipeline -> PR -> configured merge authority
+#                implement -> no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main

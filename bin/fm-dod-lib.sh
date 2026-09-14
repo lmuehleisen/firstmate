@@ -17,6 +17,12 @@
 # no-mistakes binary is on PATH, `unavailable` otherwise. Only the explicit
 # `pipeline` argument renders the no-mistakes pipeline contract, which also
 # carries the fixed "Delivery pipeline: no-mistakes" line bin/fm-spawn.sh reads.
+# That contract names the no-mistakes skill without a harness prefix, because a
+# brief or promotion is rendered before any harness is chosen; each harness's
+# invocation form is owned by .agents/skills/harness-adapters.
+# fm_dod_pipeline_recorded <brief> reads that line only from the brief's last
+# `# Definition of done` section, the machine-owned block this file renders, so
+# the same text inside Task prose or an example never counts.
 # This file is the one owner of the no-mistakes `--intent` contract for that
 # pipeline: only the brief's `## Captain's intent` subsection plus later captain
 # words, never `## Firstmate spec` and never the worker's own tradeoffs.
@@ -175,6 +181,15 @@ fm_no_mistakes_pipeline_state() {  # <config-dir>
   fi
 }
 
+fm_dod_pipeline_recorded() {  # <brief>
+  awk '
+    /^# Definition of done$/ { in_dod = 1; pipeline = 0; next }
+    /^# / { in_dod = 0; next }
+    in_dod && $0 == "Delivery pipeline: no-mistakes" { pipeline = 1 }
+    END { exit !pipeline }
+  ' "$1"
+}
+
 fm_brief_intent_overlay() {  # <captain-intent>
   cat <<'EOF'
 
@@ -249,10 +264,10 @@ Delivery contract: mode=no-mistakes
 Delivery pipeline: no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to invoke the no-mistakes skill, in your harness's own skill-invocation form, to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke the no-mistakes skill, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
 For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
 Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
@@ -274,7 +289,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After the no-mistakes skill reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
       ;;
     *)

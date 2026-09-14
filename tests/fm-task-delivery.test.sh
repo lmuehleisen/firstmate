@@ -509,6 +509,81 @@ EOF
   pass "fm-spawn: config/no-mistakes runs only an agreeing, installed pipeline ship and never falls back"
 }
 
+# The pipeline contract is rendered before any harness is chosen, so it must name
+# the no-mistakes skill without a harness-specific prefix: Codex rejects the
+# slash form and documents `$no-mistakes`, while Claude-style harnesses use the
+# slash form. Every verified harness's pipeline launch brief must carry that
+# neutral wording and neither prefixed form.
+test_no_mistakes_pipeline_contract_is_harness_neutral() {
+  local rec home proj fakebin fakehome harness id out brief checked=0
+  rec=$(make_home pipeline-harness)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  fakehome="$TMP_ROOT/pipeline-harness/userhome"
+  mkdir -p "$fakehome/.kimi-code" "$fakehome/xdgconfig/muse"
+  printf 'default_model = "test"\n' > "$fakehome/.kimi-code/config.toml"
+  printf '{"schema_version":1}\n' > "$fakehome/xdgconfig/muse/auth.json"
+  for harness in no-mistakes claude codex opencode pi pi-signed grok kimi cursor-agent omp agy muse gemini rovo; do
+    printf '#!/bin/sh\nexit 0\n' > "$fakebin/$harness"
+    chmod +x "$fakebin/$harness"
+  done
+  : > "$home/config/no-mistakes"
+  for harness in claude codex opencode pi pi-signed grok kimi cursor omp agy muse gemini rovo; do
+    id="pipeline-harness-$harness"
+    PATH="$fakebin:$PATH" FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
+      || fail "$harness: pipeline brief should scaffold"
+    fill_brief_subsections "$home/data/$id/brief.md" "Ship through the pipeline." "Keep it small."
+    out=$(HOME="$fakehome" XDG_CONFIG_HOME="$fakehome/xdgconfig" XDG_DATA_HOME="$fakehome/xdgdata" \
+      run_spawn "$home" "$fakebin" "$id" "$proj" "$harness" --mode no-mistakes --yolo off)
+    brief="$home/data/$id/launch-brief.md"
+    if [ "$harness" = kimi ] && [ ! -f "$brief" ] && printf '%s' "$out" | grep -q 'turn-end hook could not be installed'; then
+      echo "skip: kimi pipeline launch needs python3 with tomllib for its turn-end hook"
+      continue
+    fi
+    assert_present "$brief" "$harness: pipeline spawn did not render a launch brief ($out)"
+    grep -qx 'Delivery pipeline: no-mistakes' "$brief" || fail "$harness: launch brief lost the pipeline contract"
+    assert_grep "invoke the no-mistakes skill, in your harness's own skill-invocation form" "$brief" \
+      "$harness: launch brief did not name the no-mistakes skill neutrally"
+    assert_no_grep '/no-mistakes' "$brief" "$harness: launch brief used the slash skill form"
+    # shellcheck disable=SC2016 # The literal Codex skill form must stay unexpanded.
+    assert_no_grep '$no-mistakes' "$brief" "$harness: launch brief used the Codex skill form"
+    checked=$((checked + 1))
+  done
+  [ "$checked" -ge 12 ] || fail "only $checked harness launch briefs were checked"
+  pass "fm-spawn: every verified harness's pipeline launch names the no-mistakes skill without a harness prefix"
+}
+
+# The pipeline marker belongs to the machine-owned Definition of done block. The
+# same line inside a direct-PR brief's Captain's intent must not turn that brief
+# into a pipeline brief, while the real block still does.
+test_pipeline_marker_is_read_only_from_the_definition_of_done() {
+  local rec home proj fakebin stubbin out brief
+  rec=$(make_home pipeline-marker)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  stubbin="$TMP_ROOT/pipeline-marker/stub"
+  mkdir -p "$stubbin"
+  printf '#!/bin/sh\nexit 0\n' > "$stubbin/no-mistakes"
+  chmod +x "$stubbin/no-mistakes"
+  : > "$home/config/no-mistakes"
+  PATH="$stubbin:$PATH" FM_HOME="$home" "$BRIEF" pipeline-marker-g1 proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "direct-PR brief should scaffold"
+  fill_brief_subsections "$home/data/pipeline-marker-g1/brief.md" \
+    "Quote the contract line verbatim:
+Delivery pipeline: no-mistakes" "Keep direct-PR delivery."
+  grep -qx 'Delivery pipeline: no-mistakes' "$home/data/pipeline-marker-g1/brief.md" \
+    || fail "fixture did not plant the marker line in the captain intent"
+  out=$(run_spawn "$home" "$stubbin:$fakebin" pipeline-marker-g1 "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "delivery mismatch" "a marker line in captain intent turned a direct-PR brief into a pipeline brief"
+  brief="$home/data/pipeline-marker-g1/launch-brief.md"
+  assert_present "$brief" "direct-PR brief with a planted marker did not render a launch brief"
+  assert_no_grep "# Current no-mistakes intent contract" "$brief" "direct-PR brief launched with the pipeline overlay"
+  assert_grep "Do NOT run /no-mistakes" "$brief" "direct-PR brief lost its direct-PR definition of done"
+  pass "fm-spawn: the pipeline marker counts only inside the rendered Definition of done"
+}
+
 # Promotion to no-mistakes follows the same opt-in: without the CLI it refuses and
 # leaves the scout untouched, and with it the worker receives the same pipeline
 # Definition of done and ask-user format an ordinary pipeline brief carries.
@@ -865,5 +940,7 @@ test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 test_no_mistakes_pipeline_opt_in_spawn
 test_no_mistakes_pipeline_opt_in_promote
+test_no_mistakes_pipeline_contract_is_harness_neutral
+test_pipeline_marker_is_read_only_from_the_definition_of_done
 test_spawn_and_promote_require_filled_task_subsections
 echo "# all fm-task-delivery tests passed"

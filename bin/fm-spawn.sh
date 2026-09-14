@@ -2492,7 +2492,7 @@ if [ "$KIND" = ship ]; then
     # With config/no-mistakes set, only a brief carrying the pipeline contract
     # may launch a pipeline task, and such a brief launches nothing else.
     BRIEF_PIPELINE=0
-    grep -qx 'Delivery pipeline: no-mistakes' "$BRIEF" && BRIEF_PIPELINE=1
+    fm_dod_pipeline_recorded "$SOURCE_BRIEF" && BRIEF_PIPELINE=1
     if [ "$BRIEF_PIPELINE" -ne "$NO_MISTAKES_PIPELINE" ]; then
       if [ "$BRIEF_PIPELINE" -eq 1 ]; then
         echo "error: delivery mismatch for $ID: the brief carries the no-mistakes pipeline contract but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
