@@ -8,8 +8,9 @@
 # default-branch base, the fm/<task-id> branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
-# delivery and verification contract as a briefed one. The instructions carry `# Task` with
-# `## Captain's intent` preserved from the scout brief and promotion's ship-time
+# delivery and verification contract as a briefed one, including the no-mistakes
+# pipeline's ask-user escalation rule when config/no-mistakes opts this home in.
+# The instructions carry `# Task` with `## Captain's intent` preserved from the scout brief and promotion's ship-time
 # instructions under `## Firstmate spec`; the scout-time spec remains context but
 # is not relabeled as the ship spec. Promotion refuses leftover `{TASK}` /
 # `{FIRSTMATE_SPEC}` placeholders (bin/fm-dod-lib.sh). A pre-subsection scout
@@ -28,6 +29,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
@@ -93,6 +95,18 @@ case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
 esac
+# config/no-mistakes turns an explicit no-mistakes promotion into the real
+# pipeline contract (bin/fm-dod-lib.sh); a missing CLI refuses rather than
+# quietly delivering direct-PR instructions for a pipeline task.
+DOD_PIPELINE=
+if [ "$MODE" = no-mistakes ]; then
+  case "$(fm_no_mistakes_pipeline_state "$CONFIG")" in
+    available) DOD_PIPELINE=pipeline ;;
+    unavailable)
+      echo "error: config/no-mistakes is set but no no-mistakes binary is on PATH; install it or promote with another mode - a pipeline promotion never falls back to direct-PR" >&2
+      exit 1 ;;
+  esac
+fi
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
@@ -159,6 +173,9 @@ fi
 # the --yes ban is the delivery hole this file used to leave open.
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
 PROMOTION_ASK_USER_BLOCK=
+if [ -n "$DOD_PIPELINE" ]; then
+  PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
+fi
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
 TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
@@ -183,7 +200,7 @@ $PROMOTION_ASK_USER_BLOCK
 7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
 EOF
   printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "$DOD_PIPELINE"
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=

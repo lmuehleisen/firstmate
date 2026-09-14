@@ -17,6 +17,10 @@
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current direct-PR delivery overlay.
 #   Filled legacy Tasks need no pipeline intent extraction.
+#   With config/no-mistakes present (docs/configuration.md), a no-mistakes ship
+#   instead carries bin/fm-dod-lib.sh's --intent overlay with the extracted
+#   captain intent, refuses when no no-mistakes binary is on PATH, and requires
+#   the brief's "Delivery pipeline: no-mistakes" line to match that decision.
 #   The original brief remains unchanged.
 #   When the explicit mode carries less rigor than the project's standing posture,
 #   a loud one-line deviation notice is printed and the spawn continues.
@@ -2419,6 +2423,28 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
+  # config/no-mistakes opts an explicit no-mistakes ship into the real pipeline
+  # (bin/fm-dod-lib.sh owns the resolver and the --intent contract). A missing
+  # CLI refuses: a pipeline task must never quietly ship direct-PR instead.
+  NO_MISTAKES_PIPELINE_STATE=$(fm_no_mistakes_pipeline_state "$CONFIG")
+  NO_MISTAKES_PIPELINE=0
+  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ "$NO_MISTAKES_PIPELINE_STATE" != off ]; then
+    if [ "$NO_MISTAKES_PIPELINE_STATE" = unavailable ]; then
+      echo "error: $ID ships mode=no-mistakes and config/no-mistakes is set, but no no-mistakes binary is on PATH; install it or re-resolve the task to another mode - a pipeline task never falls back to direct-PR" >&2
+      exit 1
+    fi
+    NO_MISTAKES_PIPELINE=1
+    if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
+      CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
+    else
+      LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
+      CAPTAIN_INTENT=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
+      if [ -z "$(printf '%s' "$CAPTAIN_INTENT" | tr -d '[:space:]')" ]; then
+        echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
+        exit 1
+      fi
+    fi
+  fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
@@ -2428,7 +2454,9 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     cat "$SOURCE_BRIEF" &&
       printf '\n' &&
       fm_brief_worker_role
-    if [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || grep -qx 'Delivery contract: mode=no-mistakes' "$SOURCE_BRIEF"; }; then
+    if [ "$NO_MISTAKES_PIPELINE" -eq 1 ]; then
+      fm_brief_intent_overlay "$CAPTAIN_INTENT"
+    elif [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || grep -qx 'Delivery contract: mode=no-mistakes' "$SOURCE_BRIEF"; }; then
       printf '\n# Current delivery instructions\nThese instructions supersede earlier no-mistakes pipeline and --intent instructions.\n'
       fm_dod_block direct-PR "$ID"
     fi
@@ -2460,6 +2488,19 @@ if [ "$KIND" = ship ]; then
   elif [ "$(delivery_rigor_rank "$BRIEF_MODE")" != "$(delivery_rigor_rank "$MODE")" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
+  elif [ "$NO_MISTAKES_PIPELINE_STATE" != off ]; then
+    # With config/no-mistakes set, only a brief carrying the pipeline contract
+    # may launch a pipeline task, and such a brief launches nothing else.
+    BRIEF_PIPELINE=0
+    grep -qx 'Delivery pipeline: no-mistakes' "$BRIEF" && BRIEF_PIPELINE=1
+    if [ "$BRIEF_PIPELINE" -ne "$NO_MISTAKES_PIPELINE" ]; then
+      if [ "$BRIEF_PIPELINE" -eq 1 ]; then
+        echo "error: delivery mismatch for $ID: the brief carries the no-mistakes pipeline contract but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+      else
+        echo "error: delivery mismatch for $ID: this spawn runs the no-mistakes pipeline (config/no-mistakes is set) but the brief says mode=$BRIEF_MODE without the pipeline contract; re-scaffold the brief so the worker's instructions and the task record agree" >&2
+      fi
+      exit 1
+    fi
   fi
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An

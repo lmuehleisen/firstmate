@@ -222,10 +222,21 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## No-mistakes pipeline opt-in (config/no-mistakes)
+
+The optional local, gitignored `config/no-mistakes` presence flag lets this home run the real no-mistakes pipeline for an experiment without making the CLI a required tool.
+With the flag absent, a `no-mistakes` mode token ships exactly as `direct-PR`, and bootstrap stays silent about no-mistakes whether or not the CLI is installed.
+With the flag present, a ship task firstmate explicitly resolves to `--mode no-mistakes` gets the pipeline contract: its brief carries the doctor-and-init setup step, the shared-daemon rule, the ask-user escalation format, and the pipeline definition of done, a scout promotion to that mode delivers the same contract, and the spawn adds the captain-intent overlay for `--intent`.
+A `[no-mistakes]` or `[no-mistakes-prod-only]` token in `data/projects.md` still maps to `direct-PR` with the flag present, so no registered project moves onto the pipeline by default, and secondmate seeding never initializes a gate.
+When the flag is present and no `no-mistakes` binary is on PATH, bootstrap prints one non-blocking `BOOTSTRAP_INFO: no-mistakes pipeline unavailable` line, and a pipeline spawn or promotion refuses rather than falling back to `direct-PR`.
+A pipeline brief records a `Delivery pipeline: no-mistakes` line; with the flag present the spawn refuses a brief whose pipeline contract disagrees with its mode, and with the flag absent every launch, including a relaunch, supersedes that contract with `direct-PR` delivery.
+The flag is not inherited by secondmate homes.
+`bin/fm-dod-lib.sh` owns the resolver and the pipeline contract text.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` is retained only for compatibility with pull requests submitted to the upstream repository and repositories that keep its inherited workflow.
-This fork does not initialize or run no-mistakes for normal development, project delivery, or secondmate provisioning.
+This fork does not initialize or run no-mistakes for normal development or secondmate provisioning, and runs it for project delivery only under the opt-in above.
 Local and direct-PR validation uses the relevant repository tests and `bin/fm-lint.sh`, while GitHub operations use `gh` directly.
 The worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.

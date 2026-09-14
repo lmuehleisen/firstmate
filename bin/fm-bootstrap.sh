@@ -57,6 +57,12 @@
 #          This home does not require no-mistakes, gh-axi, chrome-devtools-axi,
 #          or lavish-axi. GitHub operations use gh. tasks-axi feature probes
 #          remain a separate defense-in-depth check.
+#          With the optional config/no-mistakes opt-in present and no
+#          no-mistakes binary on PATH, one non-blocking line is printed:
+#          "BOOTSTRAP_INFO: no-mistakes pipeline unavailable (config/no-mistakes
+#          is set; install: <command>) - direct-PR and local-only work may
+#          proceed; pipeline ships are refused until it is installed".
+#          Without the opt-in, bootstrap stays silent about no-mistakes.
 #          tasks-axi and quota-axi are required bootstrap tools. A compatible
 #          tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -161,6 +167,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh disable=SC1091
@@ -1427,6 +1435,11 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
+  # config/no-mistakes is an optional opt-in, never a required tool: a missing
+  # CLI is one non-blocking fact, and bin/fm-spawn.sh refuses the pipeline ship.
+  if [ "$(fm_no_mistakes_pipeline_state "$CONFIG")" = unavailable ]; then
+    echo "BOOTSTRAP_INFO: no-mistakes pipeline unavailable (config/no-mistakes is set; install: $(install_cmd no-mistakes)) - direct-PR and local-only work may proceed; pipeline ships are refused until it is installed"
+  fi
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"

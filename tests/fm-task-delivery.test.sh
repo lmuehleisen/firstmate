@@ -421,11 +421,136 @@ EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
 
+  mkdir -p "$home/config"
+  : > "$home/config/no-mistakes"
+  printf '%s\n' '- nmproj [no-mistakes] - fixture (added 2026-01-01)' >> "$home/data/projects.md"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" nmproj 2>/dev/null)
+  [ "$out" = "direct-PR off" ] || fail "config/no-mistakes moved a registered no-mistakes token onto the pipeline (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
+  [ "$out" = "direct-PR off" ] || fail "config/no-mistakes changed the conditional policy mapping (got '$out')"
+
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "a typo'd mode no longer falls back to direct-PR"
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
+}
+
+# A PATH with no no-mistakes executable, so "the CLI is missing" holds even on a
+# machine that has the real CLI installed.
+path_without_no_mistakes() {
+  local dir out='' IFS=:
+  for dir in $PATH; do
+    [ -x "$dir/no-mistakes" ] || out="${out:+$out:}$dir"
+  done
+  printf '%s\n' "$out"
+}
+
+# config/no-mistakes opts an explicitly resolved no-mistakes ship into the real
+# pipeline. The spawn then refuses without the CLI instead of shipping direct-PR,
+# carries the captain-intent overlay, and requires the brief's pipeline contract to
+# match; removing the flag returns every launch of that brief to direct-PR.
+test_no_mistakes_pipeline_opt_in_spawn() {
+  local rec home proj fakebin stubbin out status nocli id
+  rec=$(make_home pipeline-spawn)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  stubbin="$TMP_ROOT/pipeline-spawn/stub"
+  mkdir -p "$stubbin"
+  printf '#!/bin/sh\nexit 0\n' > "$stubbin/no-mistakes"
+  chmod +x "$stubbin/no-mistakes"
+  nocli=$(path_without_no_mistakes)
+  : > "$home/config/no-mistakes"
+  for id in pipeline-e1 pipeline-e2 pipeline-e3; do
+    PATH="$stubbin:$PATH" FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
+      || fail "$id: pipeline brief should scaffold"
+    fill_brief_subsections "$home/data/$id/brief.md" "Ship through the pipeline." "Keep it small."
+  done
+
+  out=$(PATH="$nocli" run_spawn "$home" "$fakebin" pipeline-e1 "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a pipeline spawn without the CLI should exit non-zero"
+  assert_contains "$out" "no no-mistakes binary is on PATH" "missing-CLI refusal did not name the missing CLI"
+  assert_contains "$out" "never falls back to direct-PR" "missing-CLI refusal did not rule out the fallback"
+  assert_absent "$home/state/pipeline-e1.meta" "refused pipeline spawn wrote task metadata"
+  assert_absent "$home/data/pipeline-e1/launch-brief.md" "refused pipeline spawn rendered a launch brief"
+
+  out=$(run_spawn "$home" "$stubbin:$fakebin" pipeline-e1 "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "delivery mismatch" "an agreeing pipeline brief was reported as a mismatch"
+  assert_not_contains "$out" "no no-mistakes binary" "an installed CLI was reported missing"
+  assert_grep "# Current no-mistakes intent contract" "$home/data/pipeline-e1/launch-brief.md" \
+    "pipeline launch did not carry the --intent overlay"
+  assert_grep "Ship through the pipeline." "$home/data/pipeline-e1/launch-brief.md" \
+    "pipeline launch did not carry the extracted captain intent"
+  assert_no_grep "# Current delivery instructions" "$home/data/pipeline-e1/launch-brief.md" \
+    "pipeline launch was superseded by direct-PR delivery"
+
+  out=$(run_spawn "$home" "$stubbin:$fakebin" pipeline-e2 "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a pipeline brief launched as direct-PR should exit non-zero"
+  assert_contains "$out" "the brief carries the no-mistakes pipeline contract but this spawn passed --mode direct-PR" \
+    "pipeline brief launched as direct-PR was not refused as a mismatch"
+
+  write_brief "$home" pipeline-e4 no-mistakes
+  out=$(run_spawn "$home" "$stubbin:$fakebin" pipeline-e4 "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a pipeline spawn of a direct-PR-remapped brief should exit non-zero"
+  assert_contains "$out" "without the pipeline contract" \
+    "a no-mistakes brief scaffolded without the opt-in launched the pipeline"
+
+  rm "$home/config/no-mistakes"
+  out=$(run_spawn "$home" "$stubbin:$fakebin" pipeline-e3 "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "delivery mismatch" "flag-absent launch of a pipeline brief was refused"
+  assert_grep "# Current delivery instructions" "$home/data/pipeline-e3/launch-brief.md" \
+    "flag-absent launch of a pipeline brief did not supersede it with direct-PR delivery"
+  assert_no_grep "# Current no-mistakes intent contract" "$home/data/pipeline-e3/launch-brief.md" \
+    "flag-absent launch still carried the pipeline --intent overlay"
+  pass "fm-spawn: config/no-mistakes runs only an agreeing, installed pipeline ship and never falls back"
+}
+
+# Promotion to no-mistakes follows the same opt-in: without the CLI it refuses and
+# leaves the scout untouched, and with it the worker receives the same pipeline
+# Definition of done and ask-user format an ordinary pipeline brief carries.
+test_no_mistakes_pipeline_opt_in_promote() {
+  local home meta out status stubbin id payload brief_dod delivered_dod
+  home="$TMP_ROOT/pipeline-promote/home"
+  stubbin="$TMP_ROOT/pipeline-promote/stub"
+  mkdir -p "$home/state" "$home/config" "$stubbin"
+  printf '#!/bin/sh\nexit 0\n' > "$stubbin/no-mistakes"
+  chmod +x "$stubbin/no-mistakes"
+  : > "$home/config/no-mistakes"
+  id=pipeline-promote-f1
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 || fail "scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "Ship the pipeline change." "Investigate first."
+
+  out=$(PATH="$(path_without_no_mistakes)" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a pipeline promotion without the CLI should exit non-zero"
+  assert_contains "$out" "no no-mistakes binary is on PATH" "promotion refusal did not name the missing CLI"
+  assert_grep 'kind=scout' "$meta" "refused pipeline promotion changed the task record"
+  assert_absent "$home/data/$id/ship-instructions.md" "refused pipeline promotion wrote ship instructions"
+
+  PATH="$stubbin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" "$id" --mode no-mistakes --yolo off >/dev/null 2>&1 || fail "a pipeline promotion with the CLI should succeed"
+  payload="$home/data/$id/ship-instructions.md"
+  grep -qx 'Delivery pipeline: no-mistakes' "$payload" || fail "promoted worker did not receive the pipeline contract"
+  assert_grep "$home/data/$id/nm-<run>-findings.txt" "$payload" "promoted worker did not receive the ask-user format"
+  assert_no_grep "Do NOT run /no-mistakes" "$payload" "promoted pipeline worker was told not to run the pipeline"
+
+  rm "$home/data/$id/brief.md"
+  PATH="$stubbin:$PATH" FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode no-mistakes >/dev/null 2>&1 \
+    || fail "ordinary pipeline brief should scaffold"
+  brief_dod="$TMP_ROOT/pipeline-promote/brief-dod"
+  delivered_dod="$TMP_ROOT/pipeline-promote/delivered-dod"
+  awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
+  awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
+  cmp -s "$brief_dod" "$delivered_dod" \
+    || fail "pipeline promotion and pipeline brief delivered different Definitions of done"
+  pass "fm-promote: config/no-mistakes delivers the pipeline contract and refuses without the CLI"
 }
 
 # Spawn and promotion refuse leftover Task-subsection placeholders through the
@@ -738,5 +863,7 @@ test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
+test_no_mistakes_pipeline_opt_in_spawn
+test_no_mistakes_pipeline_opt_in_promote
 test_spawn_and_promote_require_filled_task_subsections
 echo "# all fm-task-delivery tests passed"
