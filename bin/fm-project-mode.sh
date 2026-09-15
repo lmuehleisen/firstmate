@@ -24,6 +24,9 @@
 #                          output maps it to direct-PR
 #   no-mistakes-prod-only  a conditional policy, not a task mode.
 #                          Mechanical output maps it to direct-PR.
+# config/no-mistakes never changes this mapping: a registry token is standing
+# posture only, and the pipeline runs solely for a task firstmate explicitly
+# resolves to --mode no-mistakes (bin/fm-dod-lib.sh owns that opt-in).
 # yolo (orthogonal) = merge authority only: when on, firstmate merges green,
 #   in-scope work itself (AGENTS.md section 7).
 #

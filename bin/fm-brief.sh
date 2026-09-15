@@ -37,7 +37,9 @@
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
-#   no-mistakes  accepted for spawn compatibility; ships like direct-PR
+#   no-mistakes  ships like direct-PR; with config/no-mistakes present (this home's
+#                opt-in, docs/configuration.md) it renders the real pipeline contract:
+#                implement -> no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
@@ -116,6 +118,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -186,6 +189,12 @@ BRIEF="$DATA/$ID/brief.md"
 mkdir -p "$DATA/$ID"
 
 ASK_USER_BLOCK=
+DOD_PIPELINE=
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
+  && [ "$(fm_no_mistakes_pipeline_state "$CONFIG")" != off ]; then
+  DOD_PIPELINE=pipeline
+  ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
+fi
 
 shell_quote() {
   printf "'"
@@ -409,6 +418,7 @@ fi
 # which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.
+RULE7='7. Do not install or invoke no-mistakes, gh-axi, chrome-devtools-axi, or lavish-axi.'
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -418,12 +428,30 @@ case "$MODE" in
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     ;;
-  *)  # no-mistakes (ships like direct-PR in this home)
+  *)  # no-mistakes (ships like direct-PR unless config/no-mistakes opts in)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    if [ -n "$DOD_PIPELINE" ]; then
+      SETUP2="
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+      RULE1='1. Never push to the default branch. Never merge a PR.'
+      RULE7="7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
+   manages the daemon.
+   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
+   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
+   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
+   fixing, because that record can be stale after the daemon exits. A run record failed with a
+   daemon error is also a real block.
+   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
+   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
+   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
+   timed-out call was only waiting for a read while the run kept working.
+   Do not install no-mistakes, gh-axi, chrome-devtools-axi, or lavish-axi, and do not invoke gh-axi, chrome-devtools-axi, or lavish-axi."
+    fi
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$DOD_PIPELINE") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -467,7 +495,7 @@ $RULE1
 $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-7. Do not install or invoke no-mistakes, gh-axi, chrome-devtools-axi, or lavish-axi.
+$RULE7
 
 $INBOX_SECTION
 

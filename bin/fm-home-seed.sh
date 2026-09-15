@@ -708,7 +708,9 @@ sync_project_registry() {
 
 initialize_no_mistakes_project() {
   # This home does not run no-mistakes. Keep the function so callers and
-  # upstream patches still have a hook; it is a no-op.
+  # upstream patches still have a hook; it is a no-op. config/no-mistakes does
+  # not change that: registry tokens stay direct-PR (bin/fm-project-mode.sh), so
+  # no seeded project is a pipeline project and no gate is initialized.
   return 0
 }
 
