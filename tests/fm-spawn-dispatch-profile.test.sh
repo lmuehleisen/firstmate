@@ -1004,8 +1004,76 @@ test_invalid_worker_permissions_refuse() {
   pass 'invalid permission settings refuse before launching or publishing task metadata'
 }
 
+test_worker_permissions_trim_surrounding_whitespace() {
+  local value expected rec id out status launch count=0
+  for value in '  manual  ' $'manual\r' $'\tauto\n\n'; do
+    count=$((count + 1))
+    id="perm-trim-$count-z1"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    printf '%s' "$value" > "$HOME_DIR/config/crew-permissions"
+    case "$value" in *manual*) expected=manual ;; *) expected=auto ;; esac
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+    status=$?
+    expect_code 0 "$status" "whitespace around $expected must not refuse: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "--permission-mode $expected" "trimmed $expected mode was not applied"
+    assert_not_contains "$launch" 'dangerously' 'worker must not enable bypass'
+  done
+  pass 'surrounding whitespace and CRLF endings in config/crew-permissions select the trimmed mode'
+}
+
+test_worker_permissions_resolved_before_any_harness_mutation() {
+  local harness rec id out status
+  # A non-file refuses even for a harness the flags never reach: the setting is
+  # resolved once for the whole spawn, before metadata or launch delivery.
+  for harness in codex opencode; do
+    id="perm-nonfile-$harness-z1"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    mkdir "$HOME_DIR/config/crew-permissions"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness "$harness" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$harness spawn accepted a directory as config/crew-permissions"
+    assert_contains "$out" 'config/crew-permissions must be a readable file' 'missing actionable error'
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$harness non-file setting published metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$harness non-file setting launched an agent"
+  done
+  pass 'a non-file config/crew-permissions refuses every spawn before publishing or launching'
+}
+
+test_worker_permissions_inherited_by_secondmate() {
+  local rec id sm out status launch
+  id=perm-secondmate
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  printf 'manual\n' > "$HOME_DIR/config/crew-permissions"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$sm/config"
+  printf 'auto\n' > "$sm/config/crew-permissions"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn with a primary permission mode should succeed: $out"
+  cmp -s "$HOME_DIR/config/crew-permissions" "$sm/config/crew-permissions" \
+    || fail "secondmate did not inherit the primary's worker permission mode over its own"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" '--ask-for-approval on-request' 'secondmate launch did not use the manual mode'
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-config-inherit-lib.sh"
+    rm "$HOME_DIR/config/crew-permissions"
+    propagate_secondmate_inheritance "$HOME_DIR" "$sm" >/dev/null
+  ) || fail "permission mode removal failed to converge"
+  [ ! -e "$sm/config/crew-permissions" ] || fail "secondmate retained a removed permission mode"
+  pass "secondmate homes inherit config/crew-permissions from the primary, including its removal"
+}
+
 test_worker_permission_modes
 test_invalid_worker_permissions_refuse
+test_worker_permissions_trim_surrounding_whitespace
+test_worker_permissions_resolved_before_any_harness_mutation
+test_worker_permissions_inherited_by_secondmate
 # Execute the actual emitted command in a synthetic pane environment: the
 # fake backend records delivery, while real shells exercise the env boundary.
 # No developer environment or credential values are inspected by these probes.

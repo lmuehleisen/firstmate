@@ -329,7 +329,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 Claude, Codex, and agy workers use reviewed execution rather than permission bypass by default.
 An optional home-local `config/crew-permissions` selects `auto` (the default) or `manual`; `bin/fm-spawn.sh --help` owns exact launch flags, validation, directory grants, and exclusions.
 The setting is read for each new launch or relaunch, including a secondmate agent launched by this home; it does not change already-running agents or the primary's permission mode.
-This file is not inherited into secondmate homes: their own workers use their home's setting or the same safe default.
+The primary's file is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md), so a secondmate's own workers use the same review posture, and removing the primary's file restores the default there too.
 No global agent settings or hooks are installed by selecting a mode.
 Other harness adapters and explicit raw launch commands retain their existing permission behavior.
 This is the only worker permission setting: no value selects Claude's `--dangerously-skip-permissions`, and the upstream-only `config/claude-permission-mode` file is not read.
