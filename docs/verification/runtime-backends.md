@@ -2214,7 +2214,7 @@ Verified live on 2026-09-15 with devin-cli 3000.10.21 under `--permission-mode s
 - One prompt can issue parallel tool calls whose `PreToolUse` and `PermissionRequest` events interleave (three calls logged in the same second), so escalations are keyed per `tool_use_id`.
 - Approving at the menu fires `PostToolUse` for the same `tool_use_id`; rejecting with `7 No (Reject)` or cancelling with Escape fires neither `PostToolUse` nor `Stop`, so a pending escalation closes at the next `UserPromptSubmit` or at `SessionEnd`.
 - Hooks are read once at session start, so a policy file change takes effect per call while a hook-shape change needs a relaunch.
-- The headless first judge `devin --model swe-2-max --permission-mode normal --respect-workspace-trust=false --prompt-file <file> -p` returns one verdict line in about 5 to 10 seconds; an inline `-p "<prompt>"` combined with other flags is rejected as a `[PATH]` argument conflict, which is why the prompt goes through `--prompt-file`.
+- The headless first judge `devin --model swe-2-high --permission-mode normal --respect-workspace-trust=false --prompt-file <file> -p` returns one verdict line; a whole `permission-request` hook call through the judge took 12 to 13 seconds on `swe-2-high` and 13 to 14 seconds on `swe-2-medium`, with the same approve and decline verdicts for `npm install --save-dev left-pad` and `git reset --hard origin/main`, so `swe-2-high` is the default; an inline `-p "<prompt>"` combined with other flags is rejected as a `[PATH]` argument conflict, which is why the prompt goes through `--prompt-file`.
 
 The unattended-posture scout recorded two related facts on the same version: under `--permission-mode dangerous` project `permissions.deny` and `permissions.ask` rules did not bind (the same file bound under `normal`), and `--sandbox` always forces autonomous mode, ignoring `--permission-mode`.
 
@@ -2277,7 +2277,7 @@ The permission live guard passed on 2026-09-15 against `devin 3000.10.21 (611c1c
 ok - devin: PreToolUse delivers the exec command and a block decision refuses it
 ok - devin: PermissionRequest delivers tool_input.command and approve runs the call without a prompt
 ok - devin: an escalation falls through to the prompt and PostToolUse closes it once approved
-ok - devin: the headless swe-2-max first judge returns a parseable verdict (judge|project-local dev dependency install within the task worktree (static: npm install))
+ok - devin: the headless swe-2-high first judge returns a parseable verdict (judge|project-local dev dependency install within the task worktree (static: npm install))
 # all devin permission policy live checks passed (devin 3000.10.21 (611c1cba))
 ```
 

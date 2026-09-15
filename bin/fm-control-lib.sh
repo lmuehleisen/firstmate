@@ -261,6 +261,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # The directory and per-generation session bindings are retired through
     # fm-agy-hook.sh retire-worker; only this file is a flat wiring artifact.
     agy) printf '%s\n' "$state/$id.agy-hooks/.agents/hooks.json" ;;
+    # The sibling $id.devin-permission-pending/ escalation markers are retired
+    # through fm-devin-permission-policy.sh retire before these files go, so
+    # each open decision is closed as not-run while the policy file still
+    # names the status file.
     devin)
       printf '%s\n' "$wt/.devin/config.local.json"
       printf '%s\n' "$wt/.devin/rules/firstmate-attribution.md"

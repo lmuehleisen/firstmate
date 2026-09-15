@@ -4,8 +4,9 @@
 # hook interface: Devin-shaped JSON payloads on stdin, the per-task policy file,
 # and the observable stdout decision, exit code, status file, pending markers,
 # and log records. Covers the refusal list, the read-and-build approvals, the
-# first judge (a fake devin executable standing in for SWE-2 Max), escalation
-# and its closure on PostToolUse and Stop, and the no-policy-file fallback.
+# first judge (a fake devin executable standing in for SWE-2 High), escalation
+# and its closure on PostToolUse, Stop, and relaunch retirement, symlink-aware
+# recursive rm resolution, and the no-policy-file fallback.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -47,7 +48,7 @@ EOF
     '{task:"t1", worktree:$wt, status:($d+"/state/t1.status"), inbox:($d+"/state/t1.inbox"),
       data:($d+"/data/t1"), tasktmp:($d+"/tmp"), brief:($d+"/data/t1/brief.md"),
       log:($d+"/state/devin-permission-log.jsonl"), devin:$judge,
-      judge_model:(if $judge == "" then "" else "swe-2-max" end), judge_timeout:"5"}' \
+      judge_model:(if $judge == "" then "" else "swe-2-high" end), judge_timeout:"5"}' \
     > "$dir/state/t1.devin-permission.json"
   printf '%s\n' "$dir/state/t1.devin-permission.json"
 }
@@ -89,6 +90,11 @@ git push origin --force
 git push --force-with-lease origin fm/x
 git push --force-if-includes
 git push -fu origin fm/x
+git push --force-with-l origin fm/x
+git push --forc origin fm/x
+git push origin fm/x --force-if
+git push --receive-pack=/tmp/x origin fm/x
+git push -uz origin fm/x
 git push origin +HEAD:fm/x
 git -C /elsewhere push origin HEAD --force
 rm -rf /tmp/elsewhere
@@ -116,6 +122,9 @@ rm -rf build
 rm -rf build/*
 rm -f /tmp/one-file
 git push -u origin fm/x
+git push --set-upstream --no-verify origin fm/x
+git push -o ci.skip --dry-run origin fm/x
+git push -- origin fm/x
 gh pr create --repo a/b --title x
 command -v sudo
 grep -rn sudo tests
@@ -128,6 +137,61 @@ DOC"
   hook "$policy" pre-tool-use write "/etc/hosts"
   [ "$RC" = 0 ] && [ -z "$OUT" ] || fail "pre-tool-use must ignore non-exec tools, got rc=$RC out=$OUT"
   pass "fm-devin-permission-policy: pre-tool-use leaves in-worktree deletes, normal pushes, and quoted mentions alone"
+}
+
+test_recursive_rm_resolves_symlinked_components() {
+  local policy dir wt cmd
+  policy=$(new_case rm-symlink)
+  dir=$(case_dir "$policy")
+  wt=$(jq -r .worktree "$policy")
+  mkdir -p "$dir/outside/victim" "$wt/real/sub"
+  ln -s "$dir/outside" "$wt/link"
+  ln -s "$dir/outside/victim" "$wt/victim-link"
+  ln -s "$dir/absent" "$wt/dangling"
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" pre-tool-use exec "$cmd"
+    [ "$RC" = 2 ] || fail "pre-tool-use must refuse the symlink-escaping delete '$cmd', got rc=$RC out=$OUT"
+  done <<'EOF'
+rm -rf link/victim
+rm -rf victim-link/
+rm -rf link/.
+rm -rf real/../link/victim
+rm -rf link/../outside
+cd link && rm -rf victim
+rm -rf link/*
+rm -rf */victim
+rm -rf dangling/x
+EOF
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" pre-tool-use exec "$cmd"
+    [ "$RC" = 0 ] && [ -z "$OUT" ] || fail "pre-tool-use must not object to the in-worktree delete '$cmd', got rc=$RC out=$OUT"
+  done <<'EOF'
+rm -rf link
+rm -rf victim-link
+rm -rf real/sub
+rm -rf real/../build
+rm -rf not-yet/created
+rm -rf real/*
+EOF
+  [ -d "$dir/outside/victim" ] || fail "the policy must never delete anything itself"
+  pass "fm-devin-permission-policy: a recursive rm through a symlinked component is judged by where it physically lands"
+}
+
+test_retire_closes_orphaned_escalations() {
+  local policy dir
+  policy=$(new_case retire)
+  dir=$(case_dir "$policy")
+  hook "$policy" permission-request exec "npm install" "exec_1#orphan"
+  [ -n "$(status_open_decisions "$dir/state/t1.status")" ] || fail "the escalation must open"
+  "$POLICY_SH" retire "$policy" </dev/null >/dev/null 2>&1 || fail "retire must succeed"
+  [ ! -e "$dir/state/t1.devin-permission-pending" ] || fail "retire must remove the pending directory"
+  [ -z "$(status_open_decisions "$dir/state/t1.status")" ] || fail "retire must close the orphaned decision"
+  [ "$(tail -1 "$dir/state/devin-permission-log.jsonl" | jq -r '.decider + ":" + .decision')" = prompt:not-run ] \
+    || fail "retire must log the orphaned escalation as not-run"
+  "$POLICY_SH" retire "$policy" </dev/null >/dev/null 2>&1 || fail "retire with nothing pending must be a no-op success"
+  pass "fm-devin-permission-policy: retire closes escalations a dead worker left open"
 }
 
 test_read_and_build_approvals_are_silent() {
@@ -310,6 +374,8 @@ test_missing_policy_file_still_refuses() {
 
 test_refusal_list
 test_refusal_leaves_safe_commands_alone
+test_recursive_rm_resolves_symlinked_components
+test_retire_closes_orphaned_escalations
 test_read_and_build_approvals_are_silent
 test_residue_escalates_without_judge
 test_escalation_closes_on_post_tool_use_and_stop

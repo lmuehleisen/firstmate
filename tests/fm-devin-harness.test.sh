@@ -438,8 +438,8 @@ EOF
   # every tool. The policy file names this task's paths and the SWE-2 judge.
   local policy="$home/state/$id.devin-permission.json" cmd_pre cmd_perm cmd_post cmd_policy_stop payload
   [ -f "$policy" ] || fail "spawn must write the permission policy file at $policy"
-  [ "$(jq -r '.task + "|" + .judge_model + "|" + .log' "$policy")" = "$id|swe-2-max|$home/state/devin-permission-log.jsonl" ] \
-    || fail "policy file must name the task, the swe-2-max judge, and the home log: $(cat "$policy")"
+  [ "$(jq -r '.task + "|" + .judge_model + "|" + .log' "$policy")" = "$id|swe-2-high|$home/state/devin-permission-log.jsonl" ] \
+    || fail "policy file must name the task, the swe-2-high judge, and the home log: $(cat "$policy")"
   [ "$(jq -r .worktree "$policy")" = "$(cd "$wt" && pwd -P)" ] || fail "policy worktree must be the task worktree"
   [ "$(jq -r .status "$policy")" = "$home/state/$id.status" ] || fail "policy status must be the task status file"
   [ -x "$(jq -r .devin "$policy")" ] || fail "policy judge executable must be the resolved devin binary"

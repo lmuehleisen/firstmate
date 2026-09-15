@@ -1120,6 +1120,9 @@ clear_relaunch_harness_wiring() {
   if [ -n "$auth_path" ]; then
     rm -f -- "$auth_path" || return 1
   fi
+  if [ "$harness" = devin ]; then
+    "$SCRIPT_DIR/fm-devin-permission-policy.sh" retire "$state/$id.devin-permission.json" </dev/null || return 1
+  fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     rm -f -- "$path" || return 1
@@ -3696,7 +3699,7 @@ EOF
         # always-on rule .devin/rules/firstmate-attribution.md.
         # PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit, Stop, and
         # SessionEnd also run bin/fm-devin-permission-policy.sh, firstmate's permission
-        # decision layer (refuse list, read-and-build approvals, SWE-2 Max first
+        # decision layer (refuse list, read-and-build approvals, SWE-2 High first
         # judge, escalation to the status file); its header owns the policy. The
         # script and its per-task policy file under state/ live outside the
         # worktree, and Devin reads hooks once at session start.
@@ -3726,7 +3729,7 @@ EOF
           --arg status "$STATE_REAL/$ID.status" --arg inbox "$STATE_REAL/$ID.inbox" \
           --arg data "$devin_task_data" --arg tasktmp "$TASK_TMP" --arg brief "$BRIEF" \
           --arg log "$STATE_REAL/devin-permission-log.jsonl" --arg devin "${DEVIN_BIN:-}" \
-          '{task:$task, worktree:$worktree, status:$status, inbox:$inbox, data:$data, tasktmp:$tasktmp, brief:$brief, log:$log, devin:$devin, judge_model:"swe-2-max", judge_timeout:"60"}' \
+          '{task:$task, worktree:$worktree, status:$status, inbox:$inbox, data:$data, tasktmp:$tasktmp, brief:$brief, log:$log, devin:$devin, judge_model:"swe-2-high", judge_timeout:"60"}' \
           > "$devin_policy" || {
           echo "error: cannot spawn devin worker: could not write $devin_policy" >&2
           exit 1

@@ -7,8 +7,8 @@
 # rewrite the policy mid-session.
 #
 # Usage: fm-devin-permission-policy.sh <event> <policy-file>
-#   events: pre-tool-use | permission-request | post-tool-use | stop
-# The Devin hook payload arrives as JSON on stdin.
+#   events: pre-tool-use | permission-request | post-tool-use | stop | retire
+# The Devin hook payload arrives as JSON on stdin (retire reads none).
 #
 #   pre-tool-use (matcher ^exec$)
 #       Refuses the hard-line list for the whole command string, including
@@ -16,8 +16,11 @@
 #       eval strings, find -exec commands, and env / xargs / nohup / timeout
 #       wrappers: sudo, launchctl, a git push force in any argument position
 #       (--force, --force-with-lease, --force-if-includes, a short-flag
-#       cluster containing f, or a +refspec), a recursive rm whose target is
-#       not strictly inside the worktree or cannot be resolved, any gh repo
+#       cluster containing f, a +refspec, or any push option not on the exact
+#       list of known non-force spellings, since git accepts abbreviated long
+#       options), a recursive rm whose target, with its existing directory
+#       components resolved physically through symlinks, is not strictly
+#       inside the worktree or cannot be resolved, any gh repo
 #       command, and gh pr create without an explicit --repo / -R.
 #       A refusal prints {"decision":"block"} and exits 2; anything else exits
 #       0 silently so Devin's own permission layer decides.
@@ -27,7 +30,7 @@
 #       blocked here too. A command whose every segment is in the read-and-build
 #       set below is approved with {"decision":"approve"}, silently. The
 #       residue goes to a cheap first judge: a headless `devin -p` call on the
-#       policy's judge model (SWE-2 Max by default), run from an empty
+#       policy's judge model (SWE-2 High by default), run from an empty
 #       directory under the task temp root with the task instructions excerpt
 #       and the tool call as data, bounded by the policy's judge timeout. A
 #       judge line starting APPROVE approves silently. Anything the judge
@@ -46,6 +49,13 @@
 #       Any escalation still pending when the turn or session ends, or when a
 #       new prompt arrives, was not run (declined at the prompt, or cancelled by
 #       an interrupt, which fires no Stop): each is logged and closed.
+#
+#   retire (not a Devin hook)
+#       bin/fm-spawn.sh runs this when a relaunch retires the Devin wiring, so
+#       an escalation left by a worker that died at the prompt is logged and
+#       closed as not-run and the pending directory removed while the policy
+#       file still names the status file; no later hook could close it.
+#       Exits 1 when the pending directory cannot be retired.
 #
 # Read-and-build set (full-command inspection, not Exec prefix matching). A
 # command is approved only when it has no unquoted-delimiter heredoc, no
@@ -102,7 +112,9 @@
 #
 # Policy file (written by bin/fm-spawn.sh): JSON object with string fields
 # task, worktree, status, inbox, data, tasktmp, brief, log, devin (absolute
-# judge executable), judge_model (empty disables the judge), and
+# judge executable), judge_model (a `devin models list` id, which encodes the
+# effort level, e.g. swe-2-high or swe-2-medium; read on every call, so
+# editing it retargets a running worker's judge; empty disables the judge), and
 # judge_timeout (seconds). Pending escalation markers live in the sibling
 # directory <policy-file minus .json>-pending/.
 # With no readable policy file the refusal list still applies (every
@@ -120,20 +132,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 EVENT=${1-}
 POLICY=${2-}
 case "$EVENT" in
-  pre-tool-use|permission-request|post-tool-use|stop) ;;
+  pre-tool-use|permission-request|post-tool-use|stop|retire) ;;
   *)
     sed -n '9,11s/^# *//p' "${BASH_SOURCE[0]}" >&2
     exit 0
     ;;
 esac
-command -v jq >/dev/null 2>&1 || exit 0
-# shellcheck source=bin/fm-timeout-lib.sh
-. "$SCRIPT_DIR/fm-timeout-lib.sh"
-
 PENDING_DIR=
 case "$POLICY" in
   *.json) PENDING_DIR="${POLICY%.json}-pending" ;;
 esac
+if ! command -v jq >/dev/null 2>&1; then
+  # retire cannot close a pending escalation without jq, so it must not
+  # report the wiring retired while one is still open.
+  [ "$EVENT" = retire ] && [ -n "$PENDING_DIR" ] && [ -d "$PENDING_DIR" ] && exit 1
+  exit 0
+fi
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 # post-tool-use fires for every tool call; stay cheap when nothing is pending.
 if [ "$EVENT" = post-tool-use ] || [ "$EVENT" = stop ]; then
@@ -141,8 +157,12 @@ if [ "$EVENT" = post-tool-use ] || [ "$EVENT" = stop ]; then
   set -- "$PENDING_DIR"/*.pending
   [ -e "${1-}" ] || { cat >/dev/null; exit 0; }
 fi
+if [ "$EVENT" = retire ]; then
+  [ -n "$PENDING_DIR" ] && [ -d "$PENDING_DIR" ] || exit 0
+fi
 
-PAYLOAD=$(cat)
+PAYLOAD=
+[ "$EVENT" = retire ] || PAYLOAD=$(cat)
 
 TASK='' WORKTREE='' STATUS='' INBOX='' DATA_DIR='' TASKTMP='' BRIEF='' LOG='' DEVIN='' JUDGE_MODEL='' JUDGE_TIMEOUT=''
 if [ -n "$POLICY" ] && [ -r "$POLICY" ]; then
@@ -263,6 +283,52 @@ strictly_inside() {  # <abs> <root>
   [ "$root" != / ] || return 1
   case "$1" in "$root"/*) return 0 ;; esac
   return 1
+}
+
+# Physically resolve the path an rm operand acts on, as the kernel will: every
+# existing directory component is followed through symlinks, and the final
+# component stays literal (rm removes a symlink, not its target) unless a
+# trailing slash, ., or .. makes the kernel follow it too (<follow-final> 1
+# follows it regardless). A missing tail is appended lexically when it holds
+# no ..; a dangling symlink, a non-directory component, or a relative word with
+# an unknown cwd fails.
+physical_target() {  # <word> <cwd> <follow-final>
+  local full leaf='' cur=/ part next missing=0
+  local -a parts
+  case "$1" in
+    /*) full=$1 ;;
+    *) [ -n "$2" ] || return 1; full="$2/$1" ;;
+  esac
+  if [ "$3" != 1 ]; then
+    case "$full" in
+      */|*/.|*/..) ;;
+      *) leaf=${full##*/} full=${full%/*} ;;
+    esac
+  fi
+  IFS=/ read -r -a parts <<<"$full"
+  for part in ${parts[@]+"${parts[@]}"}; do
+    case "$part" in ''|.) continue ;; esac
+    if [ "$missing" -eq 1 ]; then
+      [ "$part" != .. ] || return 1
+      cur="${cur%/}/$part"
+      continue
+    fi
+    if [ "$part" = .. ]; then
+      cur=${cur%/*}
+      [ -n "$cur" ] || cur=/
+      continue
+    fi
+    next="${cur%/}/$part"
+    if [ -d "$next" ]; then
+      cur=$(CDPATH='' cd -P -- "$next" 2>/dev/null && pwd -P) || return 1
+    elif [ -e "$next" ] || [ -L "$next" ]; then
+      return 1
+    else
+      missing=1 cur=$next
+    fi
+  done
+  [ -z "$leaf" ] || cur="${cur%/}/$leaf"
+  norm_abs "$cur"
 }
 
 inside_task_write_roots() {  # <abs>
@@ -757,6 +823,10 @@ analyze_rm() {
   done
   no_approve "rm is never auto-approved"
   [ "$recursive" -eq 1 ] || return 0
+  # Symlinked components are resolved physically, so the worktree root is too.
+  local root
+  root=$(physical_target "${WORKTREE:-/nonexistent-worktree}" '' 1) \
+    || root=$(norm_abs "${WORKTREE:-/nonexistent-worktree}")
   for ((k = 0; k < ${#targets[@]}; k++)); do
     w=${targets[k]}
     if [ "${tv[k]}" = 1 ] || [ "$w" = '{}' ]; then
@@ -764,19 +834,24 @@ analyze_rm() {
       return 0
     fi
     if [ "${tg[k]}" = 1 ]; then
-      # A glob is judged by its literal directory prefix.
-      w=${w%%[*?[]*}
-      case "$w" in */*) w=${w%/*} ;; *) w=. ;; esac
+      # A glob is judged by its literal directory prefix; a glob that is not
+      # confined to the final component (dir*/x, dir/*/) matches entries the
+      # kernel then follows, which cannot be resolved here.
+      local pre=${w%%[*?[]*}
+      case "${w:${#pre}}" in
+        */*) refuse "recursive rm of a glob spanning directories ($w) is refused; name a literal path inside the worktree"; return 0 ;;
+      esac
+      case "$pre" in */*) w=${pre%/*} ;; *) w=. ;; esac
       [ -n "$w" ] || w=/
-      abs=$(resolve_path "$w" "$CWD") || { refuse "recursive rm with an unknown working directory is refused"; return 0; }
-      if [ "$abs" != "$(norm_abs "${WORKTREE:-/nonexistent-worktree}")" ] && ! strictly_inside "$abs" "$WORKTREE"; then
+      abs=$(physical_target "$w" "$CWD" 1) || { refuse "recursive rm of an unresolvable target (${targets[k]}) is refused"; return 0; }
+      if [ "$abs" != "$root" ] && ! strictly_inside "$abs" "$root"; then
         refuse "recursive rm outside the worktree is refused: ${targets[k]}"
         return 0
       fi
       continue
     fi
-    abs=$(resolve_path "$w" "$CWD") || { refuse "recursive rm with an unknown working directory is refused"; return 0; }
-    strictly_inside "$abs" "$WORKTREE" || { refuse "recursive rm outside the worktree is refused: $w"; return 0; }
+    abs=$(physical_target "$w" "$CWD" 0) || { refuse "recursive rm of an unresolvable target ($w) is refused"; return 0; }
+    strictly_inside "$abs" "$root" || { refuse "recursive rm outside the worktree is refused: $w"; return 0; }
   done
 }
 
@@ -808,12 +883,25 @@ analyze_git() {
   for ((a = first; a < ${#E[@]}; a++)); do args[${#args[@]}]=${E[a]}; done
 
   if [ "$sub" = push ]; then
+    # Git accepts any unique abbreviation of a long option (--force-with-l is
+    # --force-with-lease), so push options are matched against an exact list of
+    # known non-force spellings and everything else is refused.
     for w in ${args[@]+"${args[@]}"}; do
       case "$w" in
         --force|--force=*|--force-with-lease|--force-with-lease=*|--force-if-includes)
           refuse "git push with $w is refused by firstmate policy"; return 0 ;;
-        --*) ;;
-        -*f*) [[ $w =~ ^-[A-Za-z]+$ ]] && { refuse "git push with $w (force) is refused by firstmate policy"; return 0; } ;;
+        --|--verbose|--no-verbose|--quiet|--no-quiet|--repo|--repo=*|--all|--no-all|\
+        --branches|--no-branches|--mirror|--no-mirror|--delete|--no-delete|--tags|--no-tags|\
+        --dry-run|--no-dry-run|--porcelain|--no-porcelain|--no-force|--no-force-with-lease|\
+        --no-force-if-includes|--recurse-submodules|--recurse-submodules=*|--no-recurse-submodules|\
+        --thin|--no-thin|--set-upstream|--no-set-upstream|--progress|--no-progress|--prune|\
+        --no-prune|--no-verify|--verify|--follow-tags|--no-follow-tags|--signed|--signed=*|\
+        --no-signed|--atomic|--no-atomic|--push-option|--push-option=*|--no-push-option|\
+        --ipv4|--ipv6) ;;
+        -*f*) refuse "git push with $w (force) is refused by firstmate policy"; return 0 ;;
+        -o) ;;
+        -*) [[ $w =~ ^-[vqund46]+$ ]] \
+          || { refuse "git push with the unrecognized option $w is refused by firstmate policy (abbreviated long options can force)"; return 0; } ;;
         +*) refuse "git push with a +refspec ($w) forces the update and is refused by firstmate policy"; return 0 ;;
       esac
     done
@@ -1307,6 +1395,14 @@ case "$EVENT" in
       [ -f "$marker" ] || continue
       close_pending "$marker" not-run "the escalated call did not run (declined or cancelled at the prompt)"
     done
+    exit 0
+    ;;
+  retire)
+    for marker in "$PENDING_DIR"/*.pending; do
+      [ -f "$marker" ] || continue
+      close_pending "$marker" not-run "the escalated call did not run (the worker was relaunched)"
+    done
+    rm -rf -- "$PENDING_DIR" || exit 1
     exit 0
     ;;
 esac

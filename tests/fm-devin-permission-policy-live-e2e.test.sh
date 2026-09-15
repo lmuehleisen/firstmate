@@ -138,15 +138,15 @@ pass "devin: an escalation falls through to the prompt and PostToolUse closes it
 sleep 0.5
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter
 
-jq '.judge_model = "swe-2-max"' "$POLICY" > "$POLICY.new" && mv "$POLICY.new" "$POLICY"
+jq '.judge_model = "swe-2-high"' "$POLICY" > "$POLICY.new" && mv "$POLICY.new" "$POLICY"
 jq -nc '{hook_event_name:"PermissionRequest", tool_name:"exec", tool_input:{command:"npm install --save-dev left-pad"}, tool_use_id:"judge_1", session_id:"live"}' \
   | "$ROOT/bin/fm-devin-permission-policy.sh" permission-request "$POLICY" >/dev/null
 reason=$(jq -s -r 'map(select(.tool_use_id == "judge_1")) | last | .decider + "|" + .reason' "$LOG")
 case "$reason" in
-  judge\|*'first judge'*|judge\|) fail "the headless swe-2-max judge gave no usable verdict: $reason" ;;
+  judge\|*'first judge'*|judge\|) fail "the headless swe-2-high judge gave no usable verdict: $reason" ;;
   judge\|*) ;;
   *) fail "the judge call was not logged: $reason" ;;
 esac
-pass "devin: the headless swe-2-max first judge returns a parseable verdict ($reason)"
+pass "devin: the headless swe-2-high first judge returns a parseable verdict ($reason)"
 
 printf '# all devin permission policy live checks passed (%s)\n' "$DEVIN_VERSION"

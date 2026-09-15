@@ -57,7 +57,7 @@ Under the captain's 2026-09-15 posture decision, smart mode stays the default an
 It works by full-command inspection, so it covers what `Exec(...)` prefixes cannot: force pushes in any argument position, `gh pr create` without `--repo`, and every segment of a compound command.
 - Refused outright: `sudo`, `launchctl`, any git push force, a recursive `rm` not strictly inside the worktree, `gh repo`, and `gh pr create` without an explicit `--repo`.
 - Approved silently: the read-and-build set.
-- Judged: the residue goes to a headless SWE-2 Max first judge, and its approvals are silent too.
+- Judged: the residue goes to a headless SWE-2 High first judge (the policy file's `judge_model`, where the model id carries the effort level), and its approvals are silent too.
 - Escalated: only what the judge declines (or a judge failure) wakes firstmate, as a `needs-decision [key=devin-permission-<tool-use>]` status line naming the exact command and the judge's reason, then Devin shows its normal prompt.
   Approving at the prompt closes the key through `PostToolUse`; a reject or interrupt fires no hook, so the key closes at the worker's next prompt or at session end.
 
