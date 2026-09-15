@@ -264,6 +264,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     devin)
       printf '%s\n' "$wt/.devin/config.local.json"
       printf '%s\n' "$wt/.devin/rules/firstmate-attribution.md"
+      printf '%s\n' "$state/$id.devin-permission.json"
       ;;
   esac
 }

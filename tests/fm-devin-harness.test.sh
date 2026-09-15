@@ -2,7 +2,7 @@
 # Behavior tests for the devin (Devin CLI) harness adapter: harness
 # detection, ancestry anchoring, session-lock classification, approval-mode
 # mapping and refusals, launch template shape, model and effort handling,
-# lifecycle hooks generation, exclude registration, control mechanics,
+# lifecycle and permission-policy hooks generation, exclude registration, control mechanics,
 # collision refusal, teardown and relaunch wiring, raw launch, dispatch
 # validation, and composer classification.
 set -u
@@ -135,7 +135,8 @@ test_devin_control_contract() {
 
   paths=$(fm_control_harness_wiring_paths devin "$wt" "$state" "$id")
   [ "$paths" = "$wt/.devin/config.local.json
-$wt/.devin/rules/firstmate-attribution.md" ] || fail "devin wiring paths must cover config.local.json and the attribution rule, got '$paths'"
+$wt/.devin/rules/firstmate-attribution.md
+$state/$id.devin-permission.json" ] || fail "devin wiring paths must cover config.local.json, the attribution rule, and the permission policy file, got '$paths'"
 
   pass "fm-control-lib: devin control mechanics match specification"
 }
@@ -432,6 +433,46 @@ EOF
   ! jq -e '.hooks.SessionStart' "$hook_file" >/dev/null \
     || fail "SessionStart hook must be absent to prevent false busy on resume"
 
+  # Permission policy hooks: the script and policy file live outside the
+  # worktree, the refusal guard matches exec, and the decision hook matches
+  # every tool. The policy file names this task's paths and the SWE-2 judge.
+  local policy="$home/state/$id.devin-permission.json" cmd_pre cmd_perm cmd_post cmd_policy_stop payload
+  [ -f "$policy" ] || fail "spawn must write the permission policy file at $policy"
+  [ "$(jq -r '.task + "|" + .judge_model + "|" + .log' "$policy")" = "$id|swe-2-max|$home/state/devin-permission-log.jsonl" ] \
+    || fail "policy file must name the task, the swe-2-max judge, and the home log: $(cat "$policy")"
+  [ "$(jq -r .worktree "$policy")" = "$(cd "$wt" && pwd -P)" ] || fail "policy worktree must be the task worktree"
+  [ "$(jq -r .status "$policy")" = "$home/state/$id.status" ] || fail "policy status must be the task status file"
+  [ -x "$(jq -r .devin "$policy")" ] || fail "policy judge executable must be the resolved devin binary"
+  [ "$(jq -r '.hooks.PreToolUse[0].matcher' "$hook_file")" = '^exec$' ] || fail "PreToolUse guard must match exec"
+  [ "$(jq -r '.hooks.PermissionRequest[0].matcher' "$hook_file")" = '' ] || fail "PermissionRequest must match every tool"
+  cmd_pre=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$hook_file")
+  cmd_perm=$(jq -r '.hooks.PermissionRequest[0].hooks[0].command' "$hook_file")
+  cmd_post=$(jq -r '.hooks.PostToolUse[0].hooks[0].command' "$hook_file")
+  cmd_policy_stop=$(jq -r '.hooks.Stop[0].hooks[1].command' "$hook_file")
+  [ "$cmd_policy_stop" = "$(jq -r '.hooks.SessionEnd[0].hooks[1].command' "$hook_file")" ] \
+    && [ "$cmd_policy_stop" = "$(jq -r '.hooks.UserPromptSubmit[0].hooks[1].command' "$hook_file")" ] \
+    || fail "Stop, SessionEnd, and UserPromptSubmit must all close pending escalations"
+  case "$cmd_perm" in
+    *"$wt"*) fail "the permission hook command must not live inside the worktree: $cmd_perm" ;;
+  esac
+  payload='{"tool_name":"exec","tool_input":{"command":"sudo true"},"tool_use_id":"e1"}'
+  out=$(printf '%s' "$payload" | sh -c "$cmd_pre") && fail "generated PreToolUse hook must refuse sudo"
+  case "$out" in *'"decision":"block"'*) ;; *) fail "generated PreToolUse refusal must print block, got: $out" ;; esac
+  payload='{"tool_name":"exec","tool_input":{"command":"git merge-base HEAD origin/main"},"tool_use_id":"e2"}'
+  out=$(printf '%s' "$payload" | sh -c "$cmd_perm") || fail "generated PermissionRequest hook failed"
+  case "$out" in *'"decision":"approve"'*) ;; *) fail "generated PermissionRequest must approve git merge-base, got: $out" ;; esac
+  # The fake devin gives the judge no verdict, so residue escalates to the
+  # status file and the PostToolUse hook closes it.
+  payload='{"tool_name":"exec","tool_input":{"command":"make deploy"},"tool_use_id":"e3"}'
+  out=$(printf '%s' "$payload" | sh -c "$cmd_perm") || fail "generated PermissionRequest hook failed on residue"
+  [ -z "$out" ] || fail "residue must fall through to the prompt, got: $out"
+  grep -q '^needs-decision \[key=devin-permission-e3\]: .*make deploy' "$home/state/$id.status" \
+    || fail "residue must escalate to the task status file: $(cat "$home/state/$id.status" 2>/dev/null)"
+  printf '%s' "$payload" | sh -c "$cmd_post" || fail "generated PostToolUse hook failed"
+  grep -q '^resolved \[key=devin-permission-e3\]: ' "$home/state/$id.status" \
+    || fail "PostToolUse must close the escalation"
+  sh -c "$cmd_policy_stop" </dev/null || fail "generated policy Stop hook failed"
+
   # Verify git exclude
   exclude_file=$(git -C "$wt" rev-parse --git-path info/exclude)
   grep -qxF '.devin/config.local.json' "$exclude_file" \
@@ -556,6 +597,7 @@ EOF
   done
   [ ! -f "$wt/.devin/config.local.json" ] || fail "fm_control_harness_wiring_paths must cover .devin/config.local.json"
   [ ! -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "fm_control_harness_wiring_paths must cover .devin/rules/firstmate-attribution.md"
+  [ ! -f "$home/state/$id.devin-permission.json" ] || fail "fm_control_harness_wiring_paths must cover the permission policy file"
 
   # Teardown safety: ensure teardown uncommitted changes check does NOT ignore untracked .devin/ content
   # Create an actual untracked file in .devin/
@@ -583,6 +625,7 @@ EOF
   DEVIN_HARNESS_ARG="devin --raw-escape" run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
   [ ! -f "$wt/.devin/config.local.json" ] || fail "raw launch must not generate .devin/config.local.json"
   [ ! -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "raw launch must not generate the attribution rule"
+  [ ! -f "$home/state/$id.devin-permission.json" ] || fail "raw launch must not generate the permission policy file"
   [ ! -f "$home/state/$id.busy-gen" ] || fail "raw launch must not arm busy generation"
   pass "fm-spawn.sh: raw launch skips devin hook wiring and busy generation"
 }

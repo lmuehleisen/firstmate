@@ -3694,12 +3694,22 @@ EOF
         # Exec matching limits. "attribution": false is documented user-scope
         # only, so the same no-attribution policy is also installed as the
         # always-on rule .devin/rules/firstmate-attribution.md.
+        # PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit, Stop, and
+        # SessionEnd also run bin/fm-devin-permission-policy.sh, firstmate's permission
+        # decision layer (refuse list, read-and-build approvals, SWE-2 Max first
+        # judge, escalation to the status file); its header owns the policy. The
+        # script and its per-task policy file under state/ live outside the
+        # worktree, and Devin reads hooks once at session start.
         for managed in .devin/config.local.json .devin/rules/firstmate-attribution.md; do
           if [ -e "$WT/$managed" ] || [ -L "$WT/$managed" ] || git -C "$WT" ls-files --error-unmatch "$managed" >/dev/null 2>&1; then
             echo "error: cannot spawn devin worker: $WT/$managed already exists or is tracked" >&2
             exit 1
           fi
         done
+        command -v jq >/dev/null 2>&1 || {
+          echo "error: cannot spawn devin worker: jq is required by the devin permission policy hook; install jq or select a different verified harness" >&2
+          exit 1
+        }
         mkdir -p "$WT/.devin/rules"
         busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
         busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source devin-hook"
@@ -3711,8 +3721,24 @@ EOF
         d_write_status=$(json_escape "Write($STATE_REAL/$ID.status)")
         d_write_inbox=$(json_escape "Write($STATE_REAL/$ID.inbox)")
         d_write_tmp=$(json_escape "Write($TASK_TMP)")
+        devin_policy="$STATE_REAL/$ID.devin-permission.json"
+        jq -n --arg task "$ID" --arg worktree "$(cd "$WT" && pwd -P)" \
+          --arg status "$STATE_REAL/$ID.status" --arg inbox "$STATE_REAL/$ID.inbox" \
+          --arg data "$devin_task_data" --arg tasktmp "$TASK_TMP" --arg brief "$BRIEF" \
+          --arg log "$STATE_REAL/devin-permission-log.jsonl" --arg devin "${DEVIN_BIN:-}" \
+          '{task:$task, worktree:$worktree, status:$status, inbox:$inbox, data:$data, tasktmp:$tasktmp, brief:$brief, log:$log, devin:$devin, judge_model:"swe-2-max", judge_timeout:"60"}' \
+          > "$devin_policy" || {
+          echo "error: cannot spawn devin worker: could not write $devin_policy" >&2
+          exit 1
+        }
+        policy_cmd="$(shell_quote "$FM_ROOT/bin/fm-devin-permission-policy.sh")"
+        policy_file=$(shell_quote "$devin_policy")
+        d_pre=$(json_escape "$policy_cmd pre-tool-use $policy_file")
+        d_perm=$(json_escape "$policy_cmd permission-request $policy_file")
+        d_post=$(json_escape "$policy_cmd post-tool-use $policy_file")
+        d_policy_stop=$(json_escape "$policy_cmd stop $policy_file")
         cat > "$WT/.devin/config.local.json" <<EOF
-{"permissions":{"allow":["Exec(git add)","Exec(git commit)","Exec(git push)","Exec(git checkout)","Exec(git remote)","Exec(git fetch)","Exec(git status)","Exec(git log)","Exec(git diff)","Exec(ls)","Exec(gh pr create)","Exec(gh pr view)","Exec(gh pr list)","Exec(gh pr checks)","Exec(bin/fm-lint.sh)","Exec(./bin/fm-lint.sh)","Exec(bash bin/fm-lint.sh)","Exec(bin/fm-test-run.sh)","Exec(./bin/fm-test-run.sh)","Exec(bash bin/fm-test-run.sh)","Exec(bin/fm-install-shellcheck.sh)","Exec(./bin/fm-install-shellcheck.sh)","Exec(bash bin/fm-install-shellcheck.sh)","Exec(bin/fm-install-actionlint.sh)","Exec(./bin/fm-install-actionlint.sh)","Exec(bash bin/fm-install-actionlint.sh)","$d_write_data","$d_write_status","$d_write_inbox","$d_write_tmp"],"deny":["Exec(git push --force)","Exec(git push --force-with-lease)","Exec(git push --force-if-includes)","Exec(git push -f)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"}]}]}}
+{"permissions":{"allow":["Exec(git add)","Exec(git commit)","Exec(git push)","Exec(git checkout)","Exec(git remote)","Exec(git fetch)","Exec(git status)","Exec(git log)","Exec(git diff)","Exec(ls)","Exec(gh pr create)","Exec(gh pr view)","Exec(gh pr list)","Exec(gh pr checks)","Exec(bin/fm-lint.sh)","Exec(./bin/fm-lint.sh)","Exec(bash bin/fm-lint.sh)","Exec(bin/fm-test-run.sh)","Exec(./bin/fm-test-run.sh)","Exec(bash bin/fm-test-run.sh)","Exec(bin/fm-install-shellcheck.sh)","Exec(./bin/fm-install-shellcheck.sh)","Exec(bash bin/fm-install-shellcheck.sh)","Exec(bin/fm-install-actionlint.sh)","Exec(./bin/fm-install-actionlint.sh)","Exec(bash bin/fm-install-actionlint.sh)","$d_write_data","$d_write_status","$d_write_inbox","$d_write_tmp"],"deny":["Exec(git push --force)","Exec(git push --force-with-lease)","Exec(git push --force-if-includes)","Exec(git push -f)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"},{"type":"command","command":"$d_policy_stop","timeout":30}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"},{"type":"command","command":"$d_policy_stop","timeout":30}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"},{"type":"command","command":"$d_policy_stop","timeout":30}]}],"PreToolUse":[{"matcher":"^exec$","hooks":[{"type":"command","command":"$d_pre","timeout":30}]}],"PermissionRequest":[{"matcher":"","hooks":[{"type":"command","command":"$d_perm","timeout":120}]}],"PostToolUse":[{"matcher":"","hooks":[{"type":"command","command":"$d_post","timeout":30}]}]}}
 EOF
         cat > "$WT/.devin/rules/firstmate-attribution.md" <<'EOF'
 ---

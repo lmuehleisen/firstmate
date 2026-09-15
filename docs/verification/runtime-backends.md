@@ -2206,6 +2206,18 @@ The interactive prompt for non-git commands presents an 8-option menu:
 The prompt for git commands offers a 7-option menu without option 5.
 Under captain decision D1 (extended 2026-09-14), Firstmate pre-allows the approved non-destructive `Exec(...)` set in `.devin/config.local.json` so unattended worker turns do not park on routine commands; the harness-adapters devin reference owns the list.
 
+### Permission policy hooks
+
+Verified live on 2026-09-15 with devin-cli 3000.10.21 under `--permission-mode smart`, using the hook shapes `bin/fm-spawn.sh` writes and `bin/fm-devin-permission-policy.sh`:
+- `PreToolUse` (matcher `^exec$`) receives `tool_input.command` verbatim, and `{"decision":"block"}` with exit 2 rejects the call; the pane shows `Tool rejected: {"decision":"block","reason":"Blocked by firstmate policy: sudo is refused by firstmate policy"}`.
+- `PermissionRequest` fires only for calls Devin would otherwise prompt on, with `tool_name`, `tool_input`, `tool_use_id`, and `session_id`; `{"decision":"approve"}` runs the call with no prompt, and exit 0 with no output falls through to the normal approval menu.
+- One prompt can issue parallel tool calls whose `PreToolUse` and `PermissionRequest` events interleave (three calls logged in the same second), so escalations are keyed per `tool_use_id`.
+- Approving at the menu fires `PostToolUse` for the same `tool_use_id`; rejecting with `7 No (Reject)` or cancelling with Escape fires neither `PostToolUse` nor `Stop`, so a pending escalation closes at the next `UserPromptSubmit` or at `SessionEnd`.
+- Hooks are read once at session start, so a policy file change takes effect per call while a hook-shape change needs a relaunch.
+- The headless first judge `devin --model swe-2-max --permission-mode normal --respect-workspace-trust=false --prompt-file <file> -p` returns one verdict line in about 5 to 10 seconds; an inline `-p "<prompt>"` combined with other flags is rejected as a `[PATH]` argument conflict, which is why the prompt goes through `--prompt-file`.
+
+The unattended-posture scout recorded two related facts on the same version: under `--permission-mode dangerous` project `permissions.deny` and `permissions.ask` rules did not bind (the same file bound under `normal`), and `--sandbox` always forces autonomous mode, ignoring `--permission-mode`.
+
 ### Workspace trust
 
 Untrusted directories trigger an interactive blocking prompt:
@@ -2226,6 +2238,7 @@ The lifecycle hooks are:
 - `UserPromptSubmit`: applies `busy` with event `user-prompt-submit`.
 - `Stop`: touches `$TURNEND` and applies `idle` with event `stop`.
 - `SessionEnd`: applies `idle` with event `session-end`.
+- `PreToolUse`, `PermissionRequest`, and `PostToolUse`, plus a second `UserPromptSubmit`, `Stop`, and `SessionEnd` entry: the permission policy hooks above.
 
 `SessionStart` is omitted because it fires on resume (`source=resume`) with an empty composer, which would strand a false `busy` record.
 Each hook command appends `>/dev/null 2>&1 || true`.
@@ -2253,7 +2266,18 @@ While busy, the delivery token `(esc twice to interrupt)` (or `(esc again to int
 Run the portable regression and live guard with:
 
 ```sh
-bin/fm-test-run.sh tests/fm-devin-harness.test.sh
+bin/fm-test-run.sh tests/fm-devin-harness.test.sh tests/fm-devin-permission-policy.test.sh
 FM_DEVIN_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-devin-signals-live-e2e.test.sh
+FM_DEVIN_PERMISSION_LIVE=1 bin/fm-test-run.sh tests/fm-devin-permission-policy-live-e2e.test.sh
+```
+
+The permission live guard passed on 2026-09-15 against `devin 3000.10.21 (611c1cba)`:
+
+```text
+ok - devin: PreToolUse delivers the exec command and a block decision refuses it
+ok - devin: PermissionRequest delivers tool_input.command and approve runs the call without a prompt
+ok - devin: an escalation falls through to the prompt and PostToolUse closes it once approved
+ok - devin: the headless swe-2-max first judge returns a parseable verdict (judge|project-local dev dependency install within the task worktree (static: npm install))
+# all devin permission policy live checks passed (devin 3000.10.21 (611c1cba))
 ```
 
