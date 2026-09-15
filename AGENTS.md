@@ -73,6 +73,7 @@ config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignore
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = the configured tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), herdr has its own required CI lane (docs/herdr-backend.md), while zellij, orca, and cmux remain experimental with no dedicated real-backend CI lane (docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; inherited by secondmate homes under the primary-authoritative contract in secondmate-provisioning
+config/no-mistakes  optional presence flag opting explicitly resolved no-mistakes ship tasks into the real pipeline; LOCAL, gitignored, and not inherited; see docs/configuration.md "No-mistakes pipeline opt-in"
 config/calm     Pi Calm presentation preference; LOCAL, gitignored, and not inherited; see docs/configuration.md "Pi Calm preference"
 config/supervision-branch-model config/supervision-branch-effort  Pi supervision-branch model and reasoning-effort pins written by /supervision-model; LOCAL, gitignored, independently settable, and not inherited; see docs/configuration.md "Pi supervision branch model and effort"
 config/startup-memory-budget     primary-authoritative per-home startup-memory budget; LOCAL, gitignored, materialized as 7,500 estimated tokens by locked primary bootstrap and inherited into secondmate homes; see docs/configuration.md "Startup memory budget"
@@ -212,7 +213,7 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 ## 4. Harness and runtime dispatch
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
-The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `cursor`, `omp`, and `agy`, plus `muse`, `gemini`, and `rovo` for crewmates and scouts only; never dispatch on an unverified adapter.
+The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `cursor`, `omp`, and `agy`, plus `muse`, `gemini`, `rovo`, and `devin` for crewmates and scouts only; never dispatch on an unverified adapter.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
@@ -311,7 +312,7 @@ Resolve every ship task's concrete delivery mode and `yolo` merge posture at int
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
 On a `no-mistakes-prod-only` project, ship `direct-PR`.
-This home does not run the no-mistakes pipeline; treat a registered `no-mistakes` posture as `direct-PR`.
+Treat a registered `no-mistakes` posture as `direct-PR`.
 An unregistered project or absent registry resolves to `direct-PR` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
 
@@ -340,16 +341,15 @@ Supervise all live work under section 8.
 ### Selected delivery path and merge authority
 
 The selected delivery path owns its own rigor.
-This home ships `direct-PR` or `local-only`.
-Treat a `no-mistakes` mode token as `direct-PR`: the worker pushes and opens the PR with `gh`.
-Do not start a no-mistakes pipeline.
+Without `config/no-mistakes`, treat a `no-mistakes` mode token as `direct-PR` and never start a no-mistakes pipeline: the worker pushes and opens the PR with `gh`.
+With it present, only a task you explicitly resolve to `no-mistakes` runs the real pipeline, where you send the worker's no-mistakes skill invocation in its harness's form through `fm-send` after its `done:` summary and its ready signal is `done: PR <url> checks green`, while a missing CLI refuses that spawn and registry tokens still mean `direct-PR`.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 The path's worker, automated gates, and captain approval remain authoritative:
 
 - **direct-PR** has the worker push and open a PR with `gh`, then waits for the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
   Load `captain-hold-lifecycle` when that completed work must wait for the captain; it owns the durable wait and finished-worker parking procedure.
-- **no-mistakes** is accepted as a spawn/registry token and ships as `direct-PR`.
+- **no-mistakes** is accepted as a spawn/registry token and ships as described above.
 
 Delivery mode and `yolo` are orthogonal.
 `yolo` governs merge authority only: with it off, the captain approves every PR merge and every local-only landing; with it on, firstmate merges green, in-scope work itself.
@@ -364,7 +364,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 For a `direct-PR` ship (including a `no-mistakes` token remapped to that path), the worker pushes the branch and opens the PR with `gh` after its implementation commit, then reports `done: PR <url>`.
 The worker's verification contract is owned by `bin/fm-dod-lib.sh`; removing the pipeline does not remove project tests, lint, or accurate reporting of unverified behavior.
-Do not invoke no-mistakes.
+Never invoke no-mistakes yourself.
 When the captain adds or changes an ask mid-task, append the captain's words to that brief's `## Captain's intent` and steer the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
 Once the PR is open, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work.
 Judge current state through `bin/fm-crew-state.sh` when it matters, not by shell liveness or the last status event.

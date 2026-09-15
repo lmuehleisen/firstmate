@@ -57,6 +57,12 @@
 #          This home does not require no-mistakes, gh-axi, chrome-devtools-axi,
 #          or lavish-axi. GitHub operations use gh. tasks-axi feature probes
 #          remain a separate defense-in-depth check.
+#          With the optional config/no-mistakes opt-in present and no
+#          no-mistakes binary on PATH, one non-blocking line is printed:
+#          "BOOTSTRAP_INFO: no-mistakes pipeline unavailable (config/no-mistakes
+#          is set; install: <command>) - direct-PR and local-only work may
+#          proceed; pipeline ships are refused until it is installed".
+#          Without the opt-in, bootstrap stays silent about no-mistakes.
 #          tasks-axi and quota-axi are required bootstrap tools. A compatible
 #          tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -161,6 +167,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh disable=SC1091
@@ -861,6 +869,7 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    devin) echo "brew install --cask devin-cli  # or see https://docs.devin.ai/cli" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
@@ -1076,7 +1085,7 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","gemini","agy","muse","rovo","omp","devin"] | index($h);
     def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -1088,7 +1097,7 @@ crew_dispatch_validate() {
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "rovo" then (["low","medium","high","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
+      elif $h == "opencode" or $h == "kimi" or $h == "cursor" or $h == "gemini" or $h == "devin" then false
       else true
       end;
     def profiles($value):
@@ -1426,7 +1435,15 @@ detect_local_config() {
   if [ "$crew" = cursor ] && ! fm_cursor_resolve_binary >/dev/null 2>&1; then
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
+  if [ "$crew" = devin ] && ! command -v devin >/dev/null 2>&1; then
+    missing_tool_diagnostic devin
+  fi
   crew_dispatch_validate
+  # config/no-mistakes is an optional opt-in, never a required tool: a missing
+  # CLI is one non-blocking fact, and bin/fm-spawn.sh refuses the pipeline ship.
+  if [ "$(fm_no_mistakes_pipeline_state "$CONFIG")" = unavailable ]; then
+    echo "BOOTSTRAP_INFO: no-mistakes pipeline unavailable (config/no-mistakes is set; install: $(install_cmd no-mistakes)) - direct-PR and local-only work may proceed; pipeline ships are refused until it is installed"
+  fi
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
