@@ -676,6 +676,8 @@ The production worker installer preserves the project hook file and writes its o
 An approval wait remains busy.
 Escape emits no Stop, so the semantic state conservatively stays busy and control reports cancellation unconfirmed.
 This positive guard supersedes the earlier negative hook probe, which used an incompatible schema.
+Re-verified on 2026-09-14 with Agy 1.2.2 on macOS 25.6.0: the `-i` opening prompt of a launch with the production worker hooks replaced the spawn seed with an `agy-hook` record and settled to `idle agy-hook`.
+That record is the signal `bin/fm-spawn.sh` now waits for before reporting an agy ship or scout spawn, and `tests/fm-agy-harness.test.sh` pins the gate's success and fail-and-close paths portably.
 
 ```sh
 FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
