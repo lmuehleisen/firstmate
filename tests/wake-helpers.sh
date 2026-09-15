@@ -177,6 +177,15 @@ case "${1:-}" in
   list-windows)
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
+  list-panes)
+    # The exact pane inventory the presence probe reads for an index or pane-id
+    # supervisor target (firstmate:0, %0); a dead pane is simply absent from it.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 0
+    case " $* " in
+      *" -s "*) printf '0:0:%%0:@0:main\n' ;;
+      *) printf '%%0\n' ;;
+    esac
+    exit 0 ;;
   capture-pane)
     # Honor a single-line band capture (-S N -E M, both non-negative) for the
     # composer reader's non-bordered compatibility fallback; otherwise (e.g. its
@@ -263,7 +272,14 @@ case "${1:-}" in
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) printf 'win\n'; exit 0 ;;
+  list-panes)
+    # The pane inventory the presence probe reads for the supervisor target.
+    case " $* " in
+      *" -s "*) printf '0:0:%%0:@0:main\n' ;;
+      *) printf '%%0\n' ;;
+    esac
+    exit 0 ;;
   send-keys)
     shift
     text=""; is_enter=0; lit=0

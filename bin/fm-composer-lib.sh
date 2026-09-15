@@ -56,7 +56,7 @@
 #                still starts and ends with the family's rule glyph is
 #                tolerated, not ambiguity.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
-#                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
+#                codex `›`, muse `⟩`, cursor `→`, devin `❭`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
@@ -72,13 +72,16 @@
 #                never a bare shell glyph, proves this input region. Agy's
 #                accept-edits hint needs styling to distinguish it from text;
 #                without that evidence a matching hint remains unknown.
+#   devin      - a `❭` row between a top mode rule and a solid bottom rule,
+#                followed immediately by its model/context footer. The full
+#                structure proves this input region.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
 # genuine empty agent composer ONLY inside a bordered container. On a bare row
 # it is a dead-shell prompt and classifies `unknown` (never a safe injection
 # target). The AGENT glyphs `❯` (claude), `›` (codex), `⟩` (U+27E9, muse),
-# and `→` (U+2192, cursor) are a genuine empty agent composer either way.
+# `→` (U+2192, cursor), and `❭` (U+276D, devin) are a genuine empty agent composer either way.
 # Both glyph sets are declared
 # exactly once below; every decision reaches them through the declarations.
 #
@@ -382,9 +385,10 @@ fm_composer_strip_ghost() {
 # and when its composer becomes unreadable during a turn the idle-to-busy footer
 # transition must acknowledge the submit so callers do not retry an already
 # accepted command.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|\(esc (twice|again) to interrupt\)'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
+FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT='\(esc (twice|again) to interrupt\)'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 # omp (Oh My Pi) renders its TUI busy line as `Working…` with U+2026 HORIZONTAL
@@ -432,6 +436,7 @@ fm_busy_lines_match() {  # [harness]
     case "$harness" in
       claude) regex=$FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
+      devin) regex=$FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
       omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
@@ -457,7 +462,7 @@ fm_busy_lines_match() {  # [harness]
 # consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
 # literal and no entry is ever exposed to pathname expansion.
 FM_COMPOSER_CODEX_PROMPT_GLYPH='›'
-FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' "$FM_COMPOSER_CODEX_PROMPT_GLYPH" '⟩' '→')
+FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' "$FM_COMPOSER_CODEX_PROMPT_GLYPH" '⟩' '→' '❭')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
@@ -468,7 +473,7 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, search, build anything$|^Add a follow-up$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Guide Devin while it works$'
 FM_COMPOSER_AGY_HINT='Accept-edits mode: file edits auto-approved (shift+tab to cycle)'
 # Agy 1.2.0 renders this one hint in SGR 90, not dim/truecolor. Remove only
 # this exact styled hint within the proven Agy shape; palette colours in any
@@ -1239,6 +1244,77 @@ _fm_composer_select_cursorless() {
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
 
+# Devin's composer has top rule `──── (smart mode on) ─` (or mode on),
+# prompt row opening with `❭` (U+276D), bottom solid `─` rule,
+# and model / context footer row (e.g. `SWE-2 Max Context: 13k / 262k tokens (5%)`).
+_fm_composer_select_devin() {  # <plain-screen>
+  local plain=$1 total_rows r footer_row=-1 bottom_row=-1 first=-1 last=-1 top_row=-1
+  local row_text bottom_text top_text below_text
+  total_rows=$(printf '%s\n' "$plain" | wc -l | tr -d ' ')
+  [ "$total_rows" -ge 4 ] || return 1
+
+  # Find bottom-most footer matching Devin's Context / token usage footer
+  r=$((total_rows - 1))
+  while [ "$r" -ge 3 ]; do
+    row_text=$(_fm_composer_screen_row "$r" "$plain")
+    if printf '%s\n' "$row_text" | LC_ALL=C grep -qE 'Context:[[:space:]]*[0-9]+.*tokens'; then
+      footer_row=$r
+      break
+    fi
+    r=$((r - 1))
+  done
+  [ "$footer_row" -ge 3 ] || return 1
+
+  # No later input or popup may hide behind the recognized footer
+  below_text=$(printf '%s\n' "$plain" | tail -n "+$((footer_row + 2))")
+  fm_composer_normalize_trim_var below_text
+  [ -z "$below_text" ] || return 1
+
+  # Directly above footer row is the solid bottom rule
+  bottom_row=$((footer_row - 1))
+  bottom_text=$(_fm_composer_screen_row "$bottom_row" "$plain")
+  case "$bottom_text" in
+    *────────*) ;;
+    *) return 1 ;;
+  esac
+
+  # Directly above bottom rule are content rows, ending at last = bottom_row - 1
+  last=$((bottom_row - 1))
+  [ "$last" -ge 1 ] || return 1
+
+  # Find the opening content row starting with `❭` (up to 8 rows above)
+  r=$last
+  while [ "$r" -ge 1 ] && [ "$r" -ge "$((last - 7))" ]; do
+    row_text=$(_fm_composer_screen_row "$r" "$plain")
+    case "$row_text" in
+      '❭'|'❭'\ *)
+        first=$r
+        break
+        ;;
+    esac
+    r=$((r - 1))
+  done
+  [ "$first" -ge 1 ] || return 1
+
+  # Directly above first content row is the top rule
+  top_row=$((first - 1))
+  top_text=$(_fm_composer_screen_row "$top_row" "$plain")
+  case "$top_text" in
+    *─*\(?*mode\ on\)*─*|*────────*) ;;
+    *) return 1 ;;
+  esac
+
+  FM_COMPOSER_SELECTED_KIND=devin
+  FM_COMPOSER_SELECTED_FIRST=$first
+  FM_COMPOSER_SELECTED_LAST=$last
+}
+
+_fm_composer_devin_verdict() {  # <screen> <styled>
+  local screen=$1 styled=$2
+  _fm_composer_classify_rows "$screen" "$styled" 0 \
+    "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
+}
+
 # Agy's separated prompt needs its own footer proof; the same `>` between
 # transcript rules without that footer can be an exited shell, never empty.
 _fm_composer_select_agy() {  # <plain-screen>
@@ -1313,7 +1389,7 @@ EOF
   _fm_composer_normalize_codex_animation_screen_var screen "$styled"
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
-  _fm_composer_select_agy "$plain" || _fm_composer_select_cursorless "$plain" || return 1
+  _fm_composer_select_devin "$plain" || _fm_composer_select_agy "$plain" || _fm_composer_select_cursorless "$plain" || return 1
   if [ "$FM_COMPOSER_SELECTED_KIND" = agy ] && [ "$styled" = 1 ]; then
     screen=${screen//"$FM_COMPOSER_AGY_HINT_STYLED"/}
   fi
@@ -1341,7 +1417,7 @@ EOF
           leading_blank=0
         fi
         ;;
-      box|agy)
+      box|agy|devin)
         if [ "$prompt_row" -lt 0 ] \
            && fm_composer_leading_prompt_glyph_var glyph "$content"; then
           prompt_row=$row
@@ -1366,7 +1442,8 @@ EOF
     # idle-regex exceptions here.
     if [ -z "$content" ] \
        || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
-              || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
+              || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; } \
+              || [ "$FM_COMPOSER_SELECTED_KIND" = devin ]; } \
             && [ "$placeholder_position" = 1 ] \
             && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
@@ -1400,6 +1477,14 @@ EOF
   _fm_composer_normalize_codex_animation_screen_var screen "$styled" "$cy"
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cy"
+  if _fm_composer_select_devin "$plain"; then
+    if [ -n "$cy" ] && { [ "$cy" -lt "$FM_COMPOSER_SELECTED_FIRST" ] || [ "$cy" -gt "$FM_COMPOSER_SELECTED_LAST" ]; }; then
+      printf 'unknown'
+    else
+      _fm_composer_devin_verdict "$screen" "$styled"
+    fi
+    return 0
+  fi
   if _fm_composer_select_agy "$plain"; then
     if [ -n "$cy" ] && { [ "$cy" -lt "$FM_COMPOSER_SELECTED_FIRST" ] || [ "$cy" -gt "$FM_COMPOSER_SELECTED_LAST" ]; }; then
       printf 'unknown'

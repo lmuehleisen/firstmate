@@ -280,6 +280,7 @@ family_for_basename() {
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-captain-hold-completed-ship.test.sh|fm-captain-hold-rehold.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-devin-harness.test.sh|\
     fm-harness-precedence.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
@@ -347,6 +348,7 @@ family_for_basename() {
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|\
     fm-agy-primary-live-e2e.test.sh|\
+    fm-devin-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
@@ -682,6 +684,8 @@ tests/fm-branch-supervision.test.sh 5729
 tests/fm-busy-adapter-wiring.test.sh 49731
 tests/fm-busy-state.test.sh 2926
 tests/fm-calm-pi-extension.test.sh 256
+tests/fm-captain-hold-completed-ship.test.sh 6976
+tests/fm-captain-hold-rehold.test.sh 15358
 tests/fm-check-unregister.test.sh 481
 tests/fm-classify-corr-token.test.sh 38742
 tests/fm-classify-decision-key.test.sh 1167
@@ -689,8 +693,10 @@ tests/fm-claude-stop-autoarm-live-e2e.test.sh 21
 tests/fm-claude-stop-autoarm.test.sh 60709
 tests/fm-cmux-claude-composer-live-e2e.test.sh 23
 tests/fm-codex-continuity-live-e2e.test.sh 21
+tests/fm-composer-agy.test.sh 812
 tests/fm-composer-matrix-live-e2e.test.sh 23
 tests/fm-control-relaunch.test.sh 48210
+tests/fm-control-relaunch-bindings.test.sh 1901
 tests/fm-control.test.sh 54301
 tests/fm-cursor-harness.test.sh 30103
 tests/fm-cursor-primary-live-e2e.test.sh 21
@@ -698,6 +704,7 @@ tests/fm-cursor-primary.test.sh 54947
 tests/fm-daemon.test.sh 26870
 tests/fm-documentation-audiences.test.sh 732
 tests/fm-extension-binding.test.sh 7398
+tests/fm-fleet-snapshot-captain-hold.test.sh 129
 tests/fm-fleet-snapshot-view.test.sh 8547
 tests/fm-fleet-sync.test.sh 37749
 tests/fm-gate-refuse.test.sh 4977
@@ -787,11 +794,13 @@ tests/fm-test-fixture-cleanup.test.sh 915
 tests/fm-test-fixtures.test.sh 151
 tests/fm-test-isolation-proof.test.sh 2567
 tests/fm-tmux-agent-liveness.test.sh 1516
+tests/fm-tmux-submit-busy-agy.test.sh 420
 tests/fm-tool-update-check.test.sh 14176
 tests/fm-trace-context-lib.test.sh 209
 tests/fm-trace-context-spawn.test.sh 44702
 tests/fm-turnend-guard.test.sh 42565
 tests/fm-update.test.sh 5212
+tests/fm-upstream-callsite-scan.test.sh 120
 tests/fm-vendor-auth-probe.test.sh 43316
 tests/fm-voice-relay.test.sh 28699
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7381
@@ -802,6 +811,7 @@ tests/fm-wake-drain-unread-status.test.sh 35078
 tests/fm-wake-queue.test.sh 56674
 tests/fm-watch-arm.test.sh 69464
 tests/fm-watch-checkpoint.test.sh 5779
+tests/fm-watch-completed-ship-hold.test.sh 11558
 tests/fm-watch-recovery-loop.test.sh 58731
 tests/fm-watch-triage.test.sh 262626
 tests/fm-watcher-lock.test.sh 88554

@@ -337,6 +337,52 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief: legacy mode uses direct PR with normal verification"
 }
 
+# config/no-mistakes opts an explicitly resolved no-mistakes ship into the real
+# pipeline contract. Without it, an installed CLI changes nothing; with it, only
+# the no-mistakes scaffold changes, and every other scaffold stays as it was.
+# shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+test_no_mistakes_pipeline_opt_in() {
+  local off on stub kind id args brief
+  off="$TMP_ROOT/pipeline-off-home"
+  on="$TMP_ROOT/pipeline-on-home"
+  stub="$TMP_ROOT/pipeline-stub-bin"
+  mkdir -p "$off/data" "$on/data" "$on/config" "$stub"
+  : > "$on/config/no-mistakes"
+  printf '#!/bin/sh\nexit 0\n' > "$stub/no-mistakes"
+  chmod +x "$stub/no-mistakes"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    args="--mode $kind"
+    [ "$kind" != scout ] || args=--scout
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    FM_HOME="$off" "$ROOT/bin/fm-brief.sh" "plain-$kind" some-proj $args >/dev/null
+    # shellcheck disable=SC2086
+    PATH="$stub:$PATH" FM_HOME="$off" "$ROOT/bin/fm-brief.sh" "stub-$kind" some-proj $args >/dev/null
+    # shellcheck disable=SC2086
+    PATH="$stub:$PATH" FM_HOME="$on" "$ROOT/bin/fm-brief.sh" "opted-$kind" some-proj $args >/dev/null
+    sed "s/stub-$kind/plain-$kind/g" "$off/data/stub-$kind/brief.md" | cmp -s - "$off/data/plain-$kind/brief.md" \
+      || fail "$kind: an installed no-mistakes CLI changed the brief without config/no-mistakes"
+    [ "$kind" = no-mistakes ] && continue
+    sed "s#$on/#$off/#g; s/opted-$kind/plain-$kind/g" "$on/data/opted-$kind/brief.md" \
+      | cmp -s - "$off/data/plain-$kind/brief.md" \
+      || fail "$kind: config/no-mistakes changed a brief that is not a no-mistakes ship"
+  done
+
+  id=opted-no-mistakes
+  brief="$on/data/$id/brief.md"
+  grep -qx 'Delivery contract: mode=no-mistakes' "$brief" || fail "pipeline brief lost its delivery contract line"
+  grep -qx 'Delivery pipeline: no-mistakes' "$brief" || fail "pipeline brief did not record the pipeline contract"
+  assert_grep 'Run `no-mistakes doctor`' "$brief" "pipeline brief lost the doctor-and-init setup step"
+  assert_grep 'Never stop, restart, or update the shared `no-mistakes` daemon' "$brief" "pipeline brief lost the shared-daemon rule"
+  assert_grep "$on/data/$id/nm-<run>-findings.txt" "$brief" "pipeline brief lost the ask-user escalation format"
+  assert_grep 'append `done: PR {url} checks green`' "$brief" "pipeline brief lost the pipeline ready signal"
+  assert_grep 'NEVER pass `--yes`' "$brief" "pipeline brief lost the --yes ban"
+  assert_no_grep 'Do NOT run /no-mistakes' "$brief" "pipeline brief still forbids the pipeline"
+  assert_no_grep 'This home does not run the no-mistakes pipeline' "$brief" "pipeline brief kept the direct-PR remap"
+  assert_no_grep 'Delivery pipeline:' "$off/data/plain-no-mistakes/brief.md" "flag-absent brief recorded a pipeline contract"
+  pass "fm-brief: config/no-mistakes renders the pipeline contract only for an explicit no-mistakes ship"
+}
+
 test_ask_user_escalation_format() {
   local home="$TMP_ROOT/ask-user-home" mode brief
   mkdir -p "$home/data"
@@ -804,6 +850,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_pipeline_opt_in
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

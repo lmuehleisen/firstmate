@@ -41,7 +41,7 @@ Use this fork's repository when cloning for these changes; the upstream project 
 `tasks-axi` and `quota-axi` remain required, along with the selected backend's dependencies.
 Merge approval and unlanded-work safeguards still apply; inherited upstream contribution and CI requirements are explained in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Upstream changes are integrated on disposable review branches using real merges that preserve upstream ancestry, then fast-forwarded into the installation after review.
+Upstream changes are integrated on disposable review branches using real merges that preserve upstream ancestry, then fast-forwarded into the installation after review; the [upstream integration checklist](docs/upstream-integration.md) owns each run's steps.
 The [updater](.agents/skills/updatefirstmate/SKILL.md) fetches this fork's `origin` and requires fast-forward ancestry; it does not merge upstream itself.
 
 ## What it is
