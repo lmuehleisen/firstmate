@@ -282,6 +282,7 @@
 #     __PERMISSIONDIRS__ additional quoted state and task-data directory flags
 #     __AGYBIN__   quoted absolute agy executable resolved from PATH
 #     __DEVINBIN__ quoted absolute devin executable resolved from PATH
+#     __TASKTMP__  quoted per-task temp root for Devin's TMPDIR
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -1490,9 +1491,10 @@ launch_template() {
         # devin (Devin CLI): auto selects --permission-mode smart, which uses a
         # fast model to judge safety and auto-approves workspace edits while
         # mutating git commands and in-repo scripts prompt. Firstmate pre-allows
-        # Exec(git commit) and Exec(git push) in .devin/config.local.json (D1).
-        # manual selects --permission-mode normal, prompting for all writes and
-        # shell commands. Neither setting ever reaches dangerous / bypass mode.
+        # the approved routine command and task-scoped write set in
+        # .devin/config.local.json. manual selects --permission-mode normal,
+        # prompting for all writes and shell commands. Neither setting ever
+        # reaches dangerous / bypass or sandbox autonomous mode.
         devin:auto) permission_flags='--permission-mode smart' ;;
         devin:manual) permission_flags='--permission-mode normal' ;;
         *)
@@ -1711,9 +1713,11 @@ launch_template() {
     # devin (Devin CLI): interactive session with positional prompt.
     # --respect-workspace-trust false suppresses workspace trust prompts on
     # fresh worktrees. --permission-mode smart (for auto) auto-approves workspace
-    # edits; mutating git and in-repo scripts still prompt, with git commit and
-    # git push pre-allowed in .devin/config.local.json. normal (for manual)
-    # prompts for all writes and bash commands. Dangerous / bypass is never emitted.
+    # edits; the generated local config pre-allows the approved routine command
+    # and task-scoped write set. normal (for manual) prompts for all writes and
+    # bash commands. Dangerous / bypass and sandbox autonomous are never emitted.
+    # TMPDIR is isolated under the task temp root so test and build output does
+    # not inherit another harness's temporary directory.
     # Foreign primary markers are cleared so an inherited CLAUDECODE cannot outrank
     # devin's own marker in a process that only reads the environment.
     # Devin has no CLI reasoning-effort flag (interactive Alt+T only), so effort
@@ -1721,7 +1725,7 @@ launch_template() {
     # Its turn-end and busy-state signals do not ride the launch command; they are
     # lifecycle hooks written into $WT/.devin/config.local.json below.
     devin)
-      printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS FM_DEVIN_HARNESS=devin __DEVINBIN__ '
+      printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS FM_DEVIN_HARNESS=devin TMPDIR=__TASKTMP__ __DEVINBIN__ '
       [ -n "$permission_flags" ] && printf '%s ' "$permission_flags"
       printf '%s' '--respect-workspace-trust false __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       ;;
@@ -3661,8 +3665,13 @@ EOF
         d_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit >/dev/null 2>&1 || true")
         d_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true")
         d_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true")
+        devin_task_data=$(cd "$(dirname "$BRIEF")" && pwd -P)
+        d_write_data=$(json_escape "Write($devin_task_data)")
+        d_write_status=$(json_escape "Write($STATE_REAL/$ID.status)")
+        d_write_inbox=$(json_escape "Write($STATE_REAL/$ID.inbox)")
+        d_write_tmp=$(json_escape "Write($TASK_TMP)")
         cat > "$WT/.devin/config.local.json" <<EOF
-{"permissions":{"allow":["Exec(git commit)","Exec(git push)","Exec(git checkout)","Exec(git remote)","Exec(git fetch)","Exec(git status)","Exec(git log)","Exec(git diff)","Exec(ls)","Exec(gh pr create)","Exec(gh pr view)","Exec(gh pr list)","Exec(gh pr checks)","Exec(bin/fm-lint.sh)","Exec(./bin/fm-lint.sh)","Exec(bash bin/fm-lint.sh)","Exec(bin/fm-test-run.sh)","Exec(./bin/fm-test-run.sh)","Exec(bash bin/fm-test-run.sh)","Exec(bin/fm-install-shellcheck.sh)","Exec(./bin/fm-install-shellcheck.sh)","Exec(bash bin/fm-install-shellcheck.sh)","Exec(bin/fm-install-actionlint.sh)","Exec(./bin/fm-install-actionlint.sh)","Exec(bash bin/fm-install-actionlint.sh)"],"deny":["Exec(git push --force)","Exec(git push --force-with-lease)","Exec(git push --force-if-includes)","Exec(git push -f)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"}]}]}}
+{"permissions":{"allow":["Exec(git add)","Exec(git commit)","Exec(git push)","Exec(git checkout)","Exec(git remote)","Exec(git fetch)","Exec(git status)","Exec(git log)","Exec(git diff)","Exec(ls)","Exec(gh pr create)","Exec(gh pr view)","Exec(gh pr list)","Exec(gh pr checks)","Exec(bin/fm-lint.sh)","Exec(./bin/fm-lint.sh)","Exec(bash bin/fm-lint.sh)","Exec(bin/fm-test-run.sh)","Exec(./bin/fm-test-run.sh)","Exec(bash bin/fm-test-run.sh)","Exec(bin/fm-install-shellcheck.sh)","Exec(./bin/fm-install-shellcheck.sh)","Exec(bash bin/fm-install-shellcheck.sh)","Exec(bin/fm-install-actionlint.sh)","Exec(./bin/fm-install-actionlint.sh)","Exec(bash bin/fm-install-actionlint.sh)","$d_write_data","$d_write_status","$d_write_inbox","$d_write_tmp"],"deny":["Exec(git push --force)","Exec(git push --force-with-lease)","Exec(git push --force-if-includes)","Exec(git push -f)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"}]}]}}
 EOF
         cat > "$WT/.devin/rules/firstmate-attribution.md" <<'EOF'
 ---
@@ -4153,6 +4162,7 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+sq_tasktmp=$(shell_quote "$TASK_TMP")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -4181,6 +4191,7 @@ case "$HARNESS" in
   devin) LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "${DEVIN_BIN:-}")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+LAUNCH=${LAUNCH//__TASKTMP__/$sq_tasktmp}
 case "$HARNESS" in
   claude|codex)
     permission_dirs="--add-dir $(shell_quote "$STATE_REAL") --add-dir $(shell_quote "$(cd "$(dirname "$BRIEF")" && pwd -P)") "
