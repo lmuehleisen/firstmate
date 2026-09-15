@@ -147,12 +147,25 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message)
-    # A killed window stops resolving, which is how spawn confirms closure.
-    [ ! -e "$FM_FAKE_LAUNCH_LOG.closed" ] || exit 1
-    printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window) exit 0 ;;
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  new-window)
+    prev=
+    for arg in "$@"; do
+      [ "$prev" != -n ] || printf '%s\n' "$arg" > "$FM_FAKE_LAUNCH_LOG.window"
+      prev=$arg
+    done
+    exit 0
+    ;;
+  list-windows)
+    # Presence is the session's exact window inventory: the launched window
+    # stays listed until a kill really closes it, which is how spawn confirms
+    # closure.
+    if [ -s "$FM_FAKE_LAUNCH_LOG.window" ] && [ ! -e "$FM_FAKE_LAUNCH_LOG.closed" ]; then
+      cat "$FM_FAKE_LAUNCH_LOG.window"
+    fi
+    exit 0
+    ;;
+  has-session|new-session) exit 0 ;;
   kill-window)
     printf 'kill-window %s\n' "$*" >> "$FM_FAKE_LAUNCH_LOG.kills"
     # FM_FAKE_KILL_FAILS models a kill that leaves the window running.
