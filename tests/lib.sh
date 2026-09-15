@@ -441,6 +441,28 @@ SH
   chmod +x "$fakebin/ps"
 }
 
+# fm_fake_blind_ancestry_above <fakebin> <pid>
+# Like fm_fake_blind_ancestry, but cuts the parent-chain walk at ONE pid only:
+# the field-first per-pid queries the walks use for <pid> answer comm bash,
+# args bash, and ppid 1, while queries for every other pid pass through to the
+# real ps. A probe launched below the cut still has its intermediate ancestors
+# examined under their real names, so a case can prove the layer it asserts on
+# is genuinely inspected instead of passing vacuously behind a blanket blind
+# that hides the process under test itself.
+fm_fake_blind_ancestry_above() {
+  local fakebin=$1 cut_pid=$2 real_ps
+  real_ps=$(command -v ps) || return 1
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  '-o comm= -p $cut_pid'|'-o args= -p $cut_pid') printf '%s\n' bash ;;
+  '-o ppid= -p $cut_pid') printf '%s\n' 1 ;;
+  *) exec "$real_ps" "\$@" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation
