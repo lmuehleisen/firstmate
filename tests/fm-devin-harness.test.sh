@@ -131,7 +131,8 @@ test_devin_control_contract() {
   [ "$(fm_control_exit_command devin)" = '/exit' ] || fail "devin exit command must be /exit"
 
   paths=$(fm_control_harness_wiring_paths devin "$wt" "$state" "$id")
-  [ "$paths" = "$wt/.devin/config.local.json" ] || fail "devin wiring path must be .devin/config.local.json, got '$paths'"
+  [ "$paths" = "$wt/.devin/config.local.json
+$wt/.devin/rules/firstmate-attribution.md" ] || fail "devin wiring paths must cover config.local.json and the attribution rule, got '$paths'"
 
   pass "fm-control-lib: devin control mechanics match specification"
 }
@@ -379,9 +380,42 @@ EOF
   # Attribution pinned to false
   [ "$(jq -r '.attribution' "$hook_file")" = "false" ] || fail "attribution must be false"
 
-  # Pre-allowed permissions for git commit and push
-  jq -e '.permissions.allow | index("Exec(git commit)") and index("Exec(git push)")' "$hook_file" >/dev/null \
-    || fail "permissions.allow must contain Exec(git commit) and Exec(git push)"
+  # Pre-allowed permissions: the captain-approved non-destructive Exec set
+  # (D1 extended 2026-09-14), checked through the generated config.
+  local entry
+  for entry in \
+    "Exec(git commit)" "Exec(git push)" "Exec(git checkout)" "Exec(git remote)" \
+    "Exec(git fetch)" "Exec(git status)" "Exec(git log)" "Exec(git diff)" \
+    "Exec(ls)" \
+    "Exec(gh pr create)" "Exec(gh pr view)" "Exec(gh pr list)" "Exec(gh pr checks)" \
+    "Exec(bin/fm-lint.sh)" "Exec(./bin/fm-lint.sh)" "Exec(bash bin/fm-lint.sh)" \
+    "Exec(bin/fm-test-run.sh)" "Exec(./bin/fm-test-run.sh)" "Exec(bash bin/fm-test-run.sh)" \
+    "Exec(bin/fm-install-shellcheck.sh)" "Exec(./bin/fm-install-shellcheck.sh)" "Exec(bash bin/fm-install-shellcheck.sh)" \
+    "Exec(bin/fm-install-actionlint.sh)" "Exec(./bin/fm-install-actionlint.sh)" "Exec(bash bin/fm-install-actionlint.sh)"; do
+    jq -e --arg e "$entry" '.permissions.allow | index($e)' "$hook_file" >/dev/null \
+      || fail "permissions.allow must contain $entry"
+  done
+
+  # Force-push spellings are denied back out of the allowed Exec(git push)
+  # prefix; rm, gh repo, and blanket bypass stay unallowed.
+  for entry in \
+    "Exec(git push --force)" "Exec(git push --force-with-lease)" \
+    "Exec(git push --force-if-includes)" "Exec(git push -f)"; do
+    jq -e --arg e "$entry" '.permissions.deny | index($e)' "$hook_file" >/dev/null \
+      || fail "permissions.deny must contain $entry"
+  done
+  ! jq -e '.permissions.allow | map(select(test("Exec\\(rm[ )]|gh repo|git push.*force|Exec\\(git\\)|Exec\\(gh\\)|Exec\\(bash\\)|\\*"))) | length > 0' "$hook_file" >/dev/null \
+    || fail "permissions.allow must not contain rm, gh repo, force-push, or blanket entries"
+
+  # The no-attribution policy is also installed as an always-on project rule.
+  local rule_file="$wt/.devin/rules/firstmate-attribution.md"
+  [ -f "$rule_file" ] || fail "attribution rule was not created at $rule_file"
+  grep -q 'trigger: always_on' "$rule_file" \
+    || fail "attribution rule must be always_on, got: $(cat "$rule_file")"
+  grep -q 'Co-Authored-By' "$rule_file" \
+    || fail "attribution rule must forbid Co-Authored-By attribution"
+  grep -q 'Generated with' "$rule_file" \
+    || fail "attribution rule must forbid Generated with attribution"
 
   # Hooks events: UserPromptSubmit, Stop, SessionEnd present; SessionStart absent
   jq -e '.hooks.UserPromptSubmit and .hooks.Stop and .hooks.SessionEnd' "$hook_file" >/dev/null \
@@ -393,6 +427,8 @@ EOF
   exclude_file=$(git -C "$wt" rev-parse --git-path info/exclude)
   grep -qxF '.devin/config.local.json' "$exclude_file" \
     || fail ".devin/config.local.json must be in git info/exclude"
+  grep -qxF '.devin/rules/firstmate-attribution.md' "$exclude_file" \
+    || fail ".devin/rules/firstmate-attribution.md must be in git info/exclude"
 
   # Verify busy generation was armed
   [ -f "$home/state/$id.busy-gen" ] || fail "busy generation was not armed: missing $id.busy-gen"
@@ -469,6 +505,24 @@ EOF
     *) fail "refusal must mention tracked .devin/config.local.json, got: $out" ;;
   esac
 
+  # Case 3: .devin/rules/firstmate-attribution.md already exists (excluded so the
+  # pooled worktree refreshes clean, same as case 1).
+  fields=$(make_spawn_case collision-rule)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  mkdir -p "$wt/.devin/rules"
+  echo 'existing rule' > "$wt/.devin/rules/firstmate-attribution.md"
+  exclude_file=$(git -C "$wt" rev-parse --git-path info/exclude)
+  echo '.devin/rules/firstmate-attribution.md' >> "$exclude_file"
+  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
+    fail "spawn must refuse when .devin/rules/firstmate-attribution.md already exists"
+  case "$out" in
+    *'firstmate-attribution.md already exists or is tracked'*) ;;
+    *) fail "refusal must mention the attribution rule path, got: $out" ;;
+  esac
+
   pass "fm-spawn.sh: devin spawn refuses when .devin/config.local.json exists or is tracked"
 }
 
@@ -483,13 +537,16 @@ EOF
   : "$case_dir"
   run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
   [ -f "$wt/.devin/config.local.json" ] || fail "expected .devin/config.local.json to exist"
+  [ -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "expected .devin/rules/firstmate-attribution.md to exist"
 
-  # Test that fm_control_harness_wiring_paths covers .devin/config.local.json so relaunch clears it
+  # Test that fm_control_harness_wiring_paths covers .devin/config.local.json and the
+  # attribution rule so relaunch clears them
   local p
   for p in $(fm_control_harness_wiring_paths devin "$wt" "$home/state" "$id"); do
     [ -n "$p" ] && rm -f -- "$p"
   done
   [ ! -f "$wt/.devin/config.local.json" ] || fail "fm_control_harness_wiring_paths must cover .devin/config.local.json"
+  [ ! -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "fm_control_harness_wiring_paths must cover .devin/rules/firstmate-attribution.md"
 
   # Teardown safety: ensure teardown uncommitted changes check does NOT ignore untracked .devin/ content
   # Create an actual untracked file in .devin/
@@ -516,6 +573,7 @@ EOF
   : "$case_dir"
   DEVIN_HARNESS_ARG="devin --raw-escape" run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
   [ ! -f "$wt/.devin/config.local.json" ] || fail "raw launch must not generate .devin/config.local.json"
+  [ ! -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "raw launch must not generate the attribution rule"
   [ ! -f "$home/state/$id.busy-gen" ] || fail "raw launch must not arm busy generation"
   pass "fm-spawn.sh: raw launch skips devin hook wiring and busy generation"
 }
