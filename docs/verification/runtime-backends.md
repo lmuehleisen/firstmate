@@ -2249,6 +2249,7 @@ A single Escape renders `(esc again to interrupt)` for under 5 seconds, while bu
 Interruption prints `✱ Canceled. What should Devin do?` and leaves the composer empty.
 Interruption emits no `Stop` hook and leaves the busy state unchanged, matching the behavior of agy and Claude.
 Typing `/exit` or `exit` quits the session cleanly, firing `SessionEnd` (reason `prompt_input_exit`).
+Firstmate's control path (`fm_control_exit_command`) sends plain `exit`, not `/exit`: the slash form is ambiguous against Devin's `/revert <step>` fuzzy slash-command search and was live-observed opening that menu instead of exiting, which left the control path's verified exit unconfirmed within its timeout; plain `exit` has no such ambiguity.
 On exit, Devin prints `Resume this session with devin -r <id>`, where `<id>` is a hyphenated word pair (e.g. `aloud-powder`, `booming-flute`).
 
 ### Composer classification

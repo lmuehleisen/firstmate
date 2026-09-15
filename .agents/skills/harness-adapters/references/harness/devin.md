@@ -15,7 +15,7 @@ Verified for crewmate and scout work only, never a secondmate or primary.
 | Busy state | `devin-hook`: `UserPromptSubmit` opens a turn (busy); `Stop` and `SessionEnd` close it (idle). `SessionStart` is omitted to avoid false busy on resume. Double-Escape interruption leaves the record busy. |
 | Rendered tail | Delivery guard only via `(esc (twice\|again) to interrupt)`. Not a worker-state source. |
 | Turn end | Native `Stop` hook in `$WT/.devin/config.local.json` touches `$TURNEND`. |
-| Exit | `/exit` or plain `exit`, one Enter. |
+| Exit | Firstmate sends plain `exit`, one Enter (`fm_control_exit_command`). `/exit` is documented as an equivalent alias but is ambiguous against Devin's `/revert <step>` fuzzy slash-command search and was live-observed opening that menu instead of exiting; plain `exit` has no such ambiguity. |
 | Interrupt | Double `Escape` (repeat 2) cancels the running turn. A single `Escape` displays `(esc again to interrupt)` for under 5 seconds. Devin prints `✱ Canceled. What should Devin do?` and leaves the composer empty. Interruption emits no `Stop` event and leaves the busy record unchanged. |
 | Resume | `devin -c` / `--continue` for the most recent session, or `devin -r <SESSION_ID>` / `--resume <SESSION_ID>`. Session IDs are hyphenated word pairs (e.g. `aloud-powder`, `booming-flute`). |
 | Models | `--model <model>`. |
@@ -105,7 +105,8 @@ The composer is structured between a top mode rule (e.g. `──── (smart mo
 The idle placeholder `Ask Devin to build features, fix bugs, or work on your code` and the active-work placeholder `Guide Devin while it works` are recognized as composer furniture.
 While Devin is busy thinking, the delivery token `(esc twice to interrupt)` (or `(esc again to interrupt)`) appears on the status line.
 `bin/fm-composer-lib.sh` defines `FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT='\(esc (twice|again) to interrupt\)'` to confirm submitted keystrokes.
-Typing `!` on an empty composer enters bash mode; typing `/exit` or `exit` quits the session.
+Typing `!` on an empty composer enters bash mode; typing `exit` quits the session.
+`/exit` is documented as an equivalent alias, but Firstmate never sends it: it is ambiguous against Devin's `/revert <step>` fuzzy slash-command search (see Exit mechanics below), so `fm_control_exit_command` sends plain `exit` for devin.
 
 ## Live verification evidence
 
@@ -119,7 +120,7 @@ The environment was authenticated with a Devin subscription (`Logged in (via Dev
 
 2. Hook execution sequence:
    A test session with `.devin/config.local.json` verified that lifecycle hooks fire in sequence:
-   `UserPromptSubmit` applies busy, `Stop` touches `$TURNEND` and applies idle, and `SessionEnd` applies idle on `/exit`.
+   `UserPromptSubmit` applies busy, `Stop` touches `$TURNEND` and applies idle, and `SessionEnd` applies idle on exit.
    `SessionStart` is omitted to prevent resume from stranding a false busy state.
 
 3. Interactive TUI launch:
@@ -134,5 +135,9 @@ The environment was authenticated with a Devin subscription (`Logged in (via Dev
    `fm_control_interrupt_repeat` was configured to `2`.
 
 5. Exit mechanics:
-   Typing `/exit` or `exit` followed by `Enter` fired `SessionEnd` (reason `prompt_input_exit`) and terminated the process cleanly.
-   Devin printed `Resume this session with devin -r <id>` where `<id>` was a hyphenated word pair (e.g. `aloud-powder`).
+   Typing `/exit` or `exit` followed by `Enter` fired `SessionEnd` (reason `prompt_input_exit`) and terminated the process cleanly in this isolated single-command probe.
+
+6. Exit mechanics, `/exit` ambiguity (live-observed 2026-09-15, `fm-devin-harness-morning-ready-h9`):
+   In a live worker session, sending `/exit` through `fm-control.sh exit` opened Devin's `/revert <step>` fuzzy slash-command search menu instead of exiting, and the control path's verified exit then timed out waiting for the process to end.
+   Devin's own docs (`essential-commands.mdx`, `reference/commands.mdx`) document plain `exit` (no `/` prefix) as an equivalent, unambiguous alias that does not open the slash-command search.
+   Firstmate's `fm_control_exit_command` now returns plain `exit` for devin (`bin/fm-control-lib.sh`); every other verified harness keeps its documented exit command unchanged.
