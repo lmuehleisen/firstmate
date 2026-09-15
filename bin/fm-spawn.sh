@@ -283,6 +283,7 @@
 #   writes. State is shared across this home's tasks, not per-task isolation.
 #   Git protected paths and network requests still follow the harness's review.
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __CLAUDEPERMFLAG__ the claude permission flag selected by config/crew-permissions, then __PERMISSIONDIRS__
 #     __PERMISSIONDIRS__ additional quoted state and task-data directory flags
 #     __AGYBIN__   quoted absolute agy executable resolved from PATH
 #     __DEVINBIN__ quoted absolute devin executable resolved from PATH
@@ -1506,6 +1507,15 @@ launch_template() {
       esac
       ;;
   esac
+  local template
+  template=$(launch_command_template "$harness" "$kind" "${permission_flags:-}") || return 1
+  # Claude's flag and grants ride __CLAUDEPERMFLAG__ ahead of --settings, so no
+  # variadic --add-dir can swallow the positional brief.
+  printf '%s' "${template//__CLAUDEPERMFLAG__ /${permission_flags:-} __PERMISSIONDIRS__}"
+}
+
+launch_command_template() {  # <harness> <kind> <permission-flags>
+  local harness=$1 kind=$2 permission_flags=$3
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
@@ -1535,7 +1545,7 @@ launch_template() {
     # sources are not guaranteed to load that scope, so a worker would
     # otherwise run with attribution back on; carrying it per launch keeps the
     # policy in force regardless of which settings scopes end up loaded.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude ' "$permission_flags" ' --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG____PERMISSIONDIRS__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__' "$permission_flags" ' __PERMISSIONDIRS__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
