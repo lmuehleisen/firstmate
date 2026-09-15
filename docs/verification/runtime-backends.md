@@ -19,16 +19,32 @@ codex --sandbox workspace-write --ask-for-approval on-request -c approvals_revie
 ```
 
 The Claude launch carries its flag and both grants through the `__CLAUDEPERMFLAG__` seam, ahead of `--settings`, with no `--` before the positional brief.
-On 2026-09-14, Claude Code 2.1.270 parsed that order in one short print-mode turn, listing both variadic grants and still receiving the positional prompt:
+On 2026-09-15, Claude Code 2.1.273 on macOS 26.6.2 parsed that order in one short print-mode turn, listing both variadic grants and still receiving the positional prompt.
+The grant directories sit outside the working directory, because a grant nested under it is folded into the working directory and not listed separately:
 
 ```sh
+mkdir -p /tmp/fm-claude-verify/state /tmp/fm-claude-verify/brief /tmp/fm-claude-verify-cwd
+cd /tmp/fm-claude-verify-cwd
+STATE=/tmp/fm-claude-verify/state
+BRIEF_DIR=/tmp/fm-claude-verify/brief
 claude -p --permission-mode auto --add-dir "$STATE" --add-dir "$BRIEF_DIR" \
   --settings '{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}' \
   --model haiku --effort low \
   "Without using any tools, list every additional working directory path from your environment context, one per line, then a final line PROMPT_RECEIVED."
+echo "exit=$?"
 ```
 
-The output was the resolved `$STATE` path, the resolved `$BRIEF_DIR` path, and `PROMPT_RECEIVED`.
+Captured output:
+
+```text
+/tmp/fm-claude-verify-cwd
+/tmp/fm-claude-verify/state
+/tmp/fm-claude-verify/brief
+PROMPT_RECEIVED
+exit=0
+```
+
+The first line is the working directory, which the model included alongside the two grants; the wording of a model reply can vary between runs, but both grant paths and `PROMPT_RECEIVED` must appear.
 
 `tests/fm-spawn-dispatch-profile.test.sh` exercises generated worker commands, default and explicit harness selection, auto/manual modes, reporting-directory grants, and rejection of invalid permission settings through the real spawn entry point with isolated Git worktrees and fake endpoints.
 `tests/fm-secondmate-harness.test.sh` and `tests/fm-backend-orca.test.sh` cover the other affected launch shapes.
