@@ -970,6 +970,31 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   pass "fm-spawn --relaunch: switching away from cursor retires its session binding"
 }
 
+test_devin_pending_permission_escalation_is_retired_on_a_harness_switch() {
+  local dir state key=devin-permission-exec_1-dead
+  command -v jq >/dev/null 2>&1 || { printf 'skip - devin pending escalation retirement: jq not installed\n'; return 0; }
+  dir=$(new_case devinpending rl36)
+  add_ship_task "$dir" rl36 devin
+  state="$dir/home/state"
+  jq -n --arg s "$state" '{task:"rl36", status:($s+"/rl36.status"), log:($s+"/devin-permission-log.jsonl")}' \
+    > "$state/rl36.devin-permission.json"
+  # A Devin worker that died while waiting at an escalated permission prompt.
+  mkdir -p "$state/rl36.devin-permission-pending"
+  printf '%s\n%s\n' "$key" "npm install" > "$state/rl36.devin-permission-pending/exec_1-dead.pending"
+  printf 'needs-decision [key=%s]: Devin is waiting at a permission prompt for exec: npm install\n' "$key" \
+    > "$state/rl36.status"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl36 --relaunch --harness claude >/dev/null
+  [ ! -e "$state/rl36.devin-permission-pending" ] \
+    || fail "the retired devin incarnation's pending escalation markers must not outlive it"
+  [ ! -e "$state/rl36.devin-permission.json" ] || fail "the devin permission policy file must be retired"
+  grep -qF "resolved [key=$key]: " "$state/rl36.status" \
+    || fail "the orphaned escalation must be closed in the status log: $(cat "$state/rl36.status")"
+  [ "$(jq -r 'select(.decider == "prompt") | .decision' "$state/devin-permission-log.jsonl")" = not-run ] \
+    || fail "the orphaned escalation must be logged as not-run"
+  pass "fm-spawn --relaunch: switching away from devin closes and retires its pending permission escalations"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1585,6 +1610,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
+test_devin_pending_permission_escalation_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

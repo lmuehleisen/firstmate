@@ -11,11 +11,11 @@ Verified for crewmate and scout work only, never a secondmate or primary.
 | Binary | `devin` resolved from `PATH` (e.g. `/opt/homebrew/bin/devin`, installed via Homebrew cask `devin-cli`). A single arm64 Mach-O binary. Refused at spawn when missing. |
 | Launch | Positional prompt `-- "<prompt>"` starts the interactive session. `--print` / `-p` is headless and never used for a worker. |
 | Directory grants | None needed; Devin CLI operates in the working directory. `--respect-workspace-trust false` bypasses the workspace trust prompt. |
-| Approvals | Reviewed mode via `--permission-mode smart` for `auto` and `--permission-mode normal` for `manual`. Unconditional bypass (`dangerous`) is never emitted. The captain-approved non-destructive command set is pre-allowed in `.devin/config.local.json` (see Approvals and permissions). |
+| Approvals | Reviewed mode via `--permission-mode smart` for `auto` and `--permission-mode normal` for `manual`. Unconditional bypass (`dangerous`) is never emitted. The captain-approved non-destructive command set is pre-allowed in `.devin/config.local.json`, and firstmate's permission policy hooks refuse, approve, judge, or escalate the rest (see Approvals and permissions). |
 | Busy state | `devin-hook`: `UserPromptSubmit` opens a turn (busy); `Stop` and `SessionEnd` close it (idle). `SessionStart` is omitted to avoid false busy on resume. Double-Escape interruption leaves the record busy. |
 | Rendered tail | Delivery guard only via `(esc (twice\|again) to interrupt)`. Not a worker-state source. |
 | Turn end | Native `Stop` hook in `$WT/.devin/config.local.json` touches `$TURNEND`. |
-| Exit | `/exit` or plain `exit`, one Enter. |
+| Exit | Firstmate sends plain `exit`, one Enter (`fm_control_exit_command`). `/exit` is documented as an equivalent alias but is ambiguous against Devin's `/revert <step>` fuzzy slash-command search and was live-observed opening that menu instead of exiting; plain `exit` has no such ambiguity. |
 | Interrupt | Double `Escape` (repeat 2) cancels the running turn. A single `Escape` displays `(esc again to interrupt)` for under 5 seconds. Devin prints `✱ Canceled. What should Devin do?` and leaves the composer empty. Interruption emits no `Stop` event and leaves the busy record unchanged. |
 | Resume | `devin -c` / `--continue` for the most recent session, or `devin -r <SESSION_ID>` / `--resume <SESSION_ID>`. Session IDs are hyphenated word pairs (e.g. `aloud-powder`, `booming-flute`). |
 | Models | `--model <model>`. |
@@ -50,6 +50,21 @@ The captain's 2026-09-14 extension of D1 widens `permissions.allow` to the rest 
 Two consequences follow: force flags in later argument positions (`git push origin --force`) and combined short flags (`git push -fv`) evade the deny list, and `bash tests/<name>.test.sh` cannot be pattern-allowed because the token after `tests` varies; the covered test path is `bin/fm-test-run.sh tests/<name>.test.sh`.
 Not pre-allowed by design: `rm`, anything under `gh repo`, and any unconditional bypass.
 
+### Permission policy hooks
+
+Under the captain's 2026-09-15 posture decision, smart mode stays the default and `../../../../../bin/fm-devin-permission-policy.sh` is firstmate's decision layer on top of it; its header owns the refuse list, the read-and-build approve set, the judge contract, and the log format.
+`bin/fm-spawn.sh` wires it as `PreToolUse`, `PermissionRequest`, `PostToolUse`, `UserPromptSubmit`, `Stop`, and `SessionEnd` hooks in `.devin/config.local.json`, pointing at the script under `bin/` and the per-task policy file `state/<id>.devin-permission.json`, both outside the worktree; Devin reads hooks once at session start.
+It works by full-command inspection, so it covers what `Exec(...)` prefixes cannot: force pushes in any argument position, `gh pr create` without `--repo`, and every segment of a compound command.
+- Refused outright: `sudo`, `launchctl`, any git push force, a recursive `rm` not strictly inside the worktree, `gh repo`, and `gh pr create` without an explicit `--repo`.
+- Approved silently: the read-and-build set.
+- Judged: the residue goes to a headless SWE-2 High first judge (the policy file's `judge_model`, where the model id carries the effort level), and its approvals are silent too.
+- Escalated: only what the judge declines (or a judge failure) wakes firstmate, as a `needs-decision [key=devin-permission-<tool-use>]` status line naming the exact command and the judge's reason, then Devin shows its normal prompt.
+  Approving at the prompt closes the key through `PostToolUse`; a reject or interrupt fires no hook, so the key closes at the worker's next prompt or at session end.
+
+Every refusal, approval, judge verdict, escalation, and escalation outcome is one JSON line in the home-wide `state/devin-permission-log.jsonl`, the evidence for tuning the approve set and the posture, for example `jq -s 'group_by(.decision) | map({decision: .[0].decision, n: length})' state/devin-permission-log.jsonl`.
+Firstmate answers an escalation at the prompt or steers the worker; it never picks the menu's "always allow" or bypass options on the captain's behalf.
+Never move a Devin worker to `--permission-mode dangerous` behind a deny list: under bypass, project `permissions.deny` and `permissions.ask` rules were observed not to bind, and `--sandbox` forces autonomous mode regardless of `--permission-mode` (`../../../../../docs/verification/runtime-backends.md`).
+
 ## Workspace trust
 
 Every task worktree is a fresh path created for that task.
@@ -66,16 +81,17 @@ Devin CLI reads configuration and hooks from three layers:
 Under captain decision D2, Firstmate writes its per-task configuration and lifecycle hooks to `$WT/.devin/config.local.json`.
 Writing to `.devin/config.local.json` avoids overwriting a project's committed `.devin/hooks.v1.json` and avoids using `--config`, which would override and drop the captain's user config.
 `bin/fm-spawn.sh` refuses to launch if `.devin/config.local.json` or `.devin/rules/firstmate-attribution.md` already exists or is tracked by git.
-Both files are added to `.git/info/exclude` so git status remains clean, and they are removed during teardown.
+Both files are added to `.git/info/exclude` so git status remains clean, and they are removed during teardown together with the permission policy file and its pending-escalation markers under `state/`.
 The configuration pins `"attribution": false`; because the vendor documents that key as user-scope only, Firstmate also installs `.devin/rules/firstmate-attribution.md`, an always-on rule instructing the worker never to add `Generated with Devin`, `Co-Authored-By: Devin`, or other tool attribution to commit messages or pull request bodies.
 The allowed and denied `Exec(...)` sets are owned by Approvals and permissions above.
 The installed hooks in `$WT/.devin/config.local.json` cover:
 - `UserPromptSubmit`: fires when a user submits a prompt, applying `busy` with event `user-prompt-submit`.
 - `Stop`: fires when the turn ends, touching `$TURNEND` and applying `idle` with event `stop`.
 - `SessionEnd`: fires when the session terminates, applying `idle` with event `session-end`.
+- The permission policy hooks owned by Approvals and permissions above.
 
 `SessionStart` is intentionally omitted because it fires on `resume` with an empty composer, which would strand a false `busy` state.
-Each hook command appends `>/dev/null 2>&1 || true` so a refused event cannot break Devin CLI's lifecycle.
+Each busy-state hook command appends `>/dev/null 2>&1 || true` so a refused event cannot break Devin CLI's lifecycle.
 Double-Escape interruption emits no `Stop` hook and leaves the busy state unchanged, matching the behavior of agy and Claude.
 
 ## Claude hook import
@@ -105,7 +121,8 @@ The composer is structured between a top mode rule (e.g. `──── (smart mo
 The idle placeholder `Ask Devin to build features, fix bugs, or work on your code` and the active-work placeholder `Guide Devin while it works` are recognized as composer furniture.
 While Devin is busy thinking, the delivery token `(esc twice to interrupt)` (or `(esc again to interrupt)`) appears on the status line.
 `bin/fm-composer-lib.sh` defines `FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT='\(esc (twice|again) to interrupt\)'` to confirm submitted keystrokes.
-Typing `!` on an empty composer enters bash mode; typing `/exit` or `exit` quits the session.
+Typing `!` on an empty composer enters bash mode; typing `exit` quits the session.
+`/exit` is documented as an equivalent alias, but Firstmate never sends it: it is ambiguous against Devin's `/revert <step>` fuzzy slash-command search (see Exit mechanics below), so `fm_control_exit_command` sends plain `exit` for devin.
 
 ## Live verification evidence
 
@@ -119,7 +136,7 @@ The environment was authenticated with a Devin subscription (`Logged in (via Dev
 
 2. Hook execution sequence:
    A test session with `.devin/config.local.json` verified that lifecycle hooks fire in sequence:
-   `UserPromptSubmit` applies busy, `Stop` touches `$TURNEND` and applies idle, and `SessionEnd` applies idle on `/exit`.
+   `UserPromptSubmit` applies busy, `Stop` touches `$TURNEND` and applies idle, and `SessionEnd` applies idle on exit.
    `SessionStart` is omitted to prevent resume from stranding a false busy state.
 
 3. Interactive TUI launch:
@@ -134,5 +151,9 @@ The environment was authenticated with a Devin subscription (`Logged in (via Dev
    `fm_control_interrupt_repeat` was configured to `2`.
 
 5. Exit mechanics:
-   Typing `/exit` or `exit` followed by `Enter` fired `SessionEnd` (reason `prompt_input_exit`) and terminated the process cleanly.
-   Devin printed `Resume this session with devin -r <id>` where `<id>` was a hyphenated word pair (e.g. `aloud-powder`).
+   Typing `/exit` or `exit` followed by `Enter` fired `SessionEnd` (reason `prompt_input_exit`) and terminated the process cleanly in this isolated single-command probe.
+
+6. Exit mechanics, `/exit` ambiguity (live-observed 2026-09-15, `fm-devin-harness-morning-ready-h9`):
+   In a live worker session, sending `/exit` through `fm-control.sh exit` opened Devin's `/revert <step>` fuzzy slash-command search menu instead of exiting, and the control path's verified exit then timed out waiting for the process to end.
+   Devin's own docs (`essential-commands.mdx`, `reference/commands.mdx`) document plain `exit` (no `/` prefix) as an equivalent, unambiguous alias that does not open the slash-command search.
+   Firstmate's `fm_control_exit_command` now returns plain `exit` for devin (`bin/fm-control-lib.sh`); every other verified harness keeps its documented exit command unchanged.
