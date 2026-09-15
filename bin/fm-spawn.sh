@@ -146,7 +146,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -274,15 +274,20 @@
 #   --dangerously-skip-permissions is emitted by neither setting and is never a
 #   fallback, so an agy worker parks at a visible in-pane approval prompt rather
 #   than widening its own permissions.
-#   Empty, unreadable, or unknown settings refuse the launch.
-#   This applies to ship, scout, and secondmate launches, not an already-running
+#   The file is resolved once, before any mutation, on every spawn: surrounding
+#   whitespace (including a CRLF ending) is trimmed, proven absence means auto,
+#   and an uninspectable path, a non-file, an unreadable file, or any value other
+#   than auto or manual after trimming refuses the spawn, whatever its harness.
+#   The flags apply to ship, scout, and secondmate launches, not an already-running
 #   primary, other harnesses, or the explicit raw-command escape hatch.
+#   Secondmate homes inherit the file from the primary (bin/fm-config-inherit-lib.sh).
 #   There is no fallback to permission or sandbox bypass on failure or denial.
 #   Both modes add only the owning home's state directory and the brief's
 #   directory to the worker's existing worktree access, for status/inbox/report
 #   writes. State is shared across this home's tasks, not per-task isolation.
 #   Git protected paths and network requests still follow the harness's review.
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __CLAUDEPERMFLAG__ the claude permission flag selected by config/crew-permissions, then __PERMISSIONDIRS__
 #     __PERMISSIONDIRS__ additional quoted state and task-data directory flags
 #     __AGYBIN__   quoted absolute agy executable resolved from PATH
 #     __DEVINBIN__ quoted absolute devin executable resolved from PATH
@@ -319,6 +324,13 @@
 # Every agy launch grants physically resolved worktree and hook paths: without
 # the worktree grant agy writes into its own scratch, and an unresolved path
 # parks on a non-workspace approval prompt.
+# An agy ship or scout spawn reports success only once the worker hook's
+# PreInvocation record replaces the fm-spawn seed (FM_AGY_READY_POLLS polls,
+# default 120, every FM_AGY_POLL_INTERVAL seconds, default 0.5); otherwise it
+# closes the endpoint, appends failed:, retires a fresh spawn's hooks, and exits
+# 1. When closure cannot be confirmed (the backend still finds the target), the
+# task record, busy generation, and hooks are kept for teardown instead, and
+# the failure says the worker may still be running.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -450,6 +462,29 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     echo "error: config/launch-env-allowlist must contain one environment name per line, blank lines, or # comments" >&2
     exit 1
   fi
+fi
+# Worker permission mode: resolved once, before any mutation, for every spawn.
+# Absence (proven by lstat) means auto; a path that cannot be inspected, a
+# non-file, or an unreadable file refuses. Surrounding whitespace is trimmed.
+if ! CREW_PERMISSIONS_PRESENT=$(fm_config_source_present "$CONFIG/crew-permissions"); then
+  exit 1
+fi
+CREW_PERMISSION_MODE=auto
+if [ "$CREW_PERMISSIONS_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/crew-permissions" ] || [ ! -r "$CONFIG/crew-permissions" ]; then
+    echo "error: config/crew-permissions must be a readable file containing auto or manual" >&2
+    exit 1
+  fi
+  CREW_PERMISSION_MODE=$(cat "$CONFIG/crew-permissions") || exit 1
+  CREW_PERMISSION_MODE=${CREW_PERMISSION_MODE#"${CREW_PERMISSION_MODE%%[![:space:]]*}"}
+  CREW_PERMISSION_MODE=${CREW_PERMISSION_MODE%"${CREW_PERMISSION_MODE##*[![:space:]]}"}
+  case "$CREW_PERMISSION_MODE" in
+    auto|manual) ;;
+    *)
+      echo "error: invalid config/crew-permissions (expected auto or manual); refusing launch" >&2
+      exit 1
+      ;;
+  esac
 fi
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
@@ -1386,7 +1421,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1467,17 +1502,10 @@ omp_model_validate() {  # <omp-bin> <model>
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
-  local harness=$1 kind=${2:-ship} permission_mode=auto permission_flags
+  local harness=$1 kind=${2:-ship} permission_flags
   case "$harness" in
     claude|codex|agy|devin)
-      if [ -e "$CONFIG/crew-permissions" ] || [ -L "$CONFIG/crew-permissions" ]; then
-        if [ ! -f "$CONFIG/crew-permissions" ] || [ ! -r "$CONFIG/crew-permissions" ]; then
-          echo "error: config/crew-permissions must be a readable file containing auto or manual" >&2
-          return 1
-        fi
-        permission_mode=$(cat "$CONFIG/crew-permissions") || return 1
-      fi
-      case "$harness:$permission_mode" in
+      case "$harness:$CREW_PERMISSION_MODE" in
         claude:auto) permission_flags='--permission-mode auto' ;;
         claude:manual) permission_flags='--permission-mode manual' ;;
         codex:auto) permission_flags='--approve-for-me' ;;
@@ -1511,6 +1539,15 @@ launch_template() {
       esac
       ;;
   esac
+  local template
+  template=$(launch_command_template "$harness" "$kind" "${permission_flags:-}") || return 1
+  # Claude's flag and grants ride __CLAUDEPERMFLAG__ ahead of --settings, so no
+  # variadic --add-dir can swallow the positional brief.
+  printf '%s' "${template//__CLAUDEPERMFLAG__ /${permission_flags:-} __PERMISSIONDIRS__}"
+}
+
+launch_command_template() {  # <harness> <kind> <permission-flags>
+  local harness=$1 kind=$2 permission_flags=$3
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
@@ -1540,7 +1577,7 @@ launch_template() {
     # sources are not guaranteed to load that scope, so a worker would
     # otherwise run with attribution back on; carrying it per launch keeps the
     # policy in force regardless of which settings scopes end up loaded.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude ' "$permission_flags" ' --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG____PERMISSIONDIRS__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__' "$permission_flags" ' __PERMISSIONDIRS__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -2033,7 +2070,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp|devin)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -3381,6 +3418,64 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
 }
 
+# agy starts its brief itself (-i), so there is no pointer to deliver; what
+# spawn must prove is that the brief actually began running. The worker hook's
+# PreInvocation is agy's own report of that: it replaces the fm-spawn seed with
+# an agy-hook record under this incarnation's gen. Only that source counts - the
+# seed is busy from the start, and a rendered footer is not consulted. A launch
+# parked on an authentication prompt, a trust dialog, a feedback survey, or a
+# refused model id never invokes the model and so never publishes it.
+agy_wait_for_started() {
+  local record source i=0 max=${FM_AGY_READY_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    # A valid record reads "<state> <source> <event> <seq>".
+    if record=$(fm_busy_record_read "$STATE_REAL" "$ID"); then
+      source=${record#* }
+      [ "${source%% *}" != agy-hook ] || return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+# Close the launched agy endpoint and prove it is gone. A kill command's own
+# status is not proof (tmux's adapter reports success either way), so closure
+# counts only once the backend no longer finds the target.
+agy_endpoint_close_confirmed() {
+  local tab_id='' i=0 max=${FM_AGY_CLOSE_POLLS:-10} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_kill orca "$T" 2>/dev/null || return 1
+  else
+    fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || return 1
+  fi
+  while [ "$i" -lt "$max" ]; do
+    fm_backend_target_exists "$BACKEND" "$T" "$W" || return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+agy_spawn_fail() {  # <detail>
+  if agy_endpoint_close_confirmed; then
+    printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+    echo "error: $1; closed window $T" >&2
+    # A relaunch's abort trap retires its replacement wiring; a fresh spawn's
+    # rollback removes only the record and generation, so retire its hooks here.
+    [ "$RELAUNCH" -eq 1 ] || "$FM_ROOT/bin/fm-agy-hook.sh" retire-worker "$STATE_REAL" "$ID" || true
+    return 0
+  fi
+  # The agy process may still be running. Keep the task record, busy
+  # generation, and hooks so teardown and supervision still own it: skip the
+  # fresh-spawn rollback the EXIT trap would otherwise run.
+  SPAWN_FRESH_COMMIT_PENDING=0
+  printf 'failed: %s; its endpoint %s could not be confirmed closed, so the task record was kept\n' "$1" "$T" >> "$STATE/$ID.status"
+  echo "error: $1, and closing endpoint $T could not be confirmed; the agy worker may still be running." >&2
+  echo "error: task record $STATE/$ID.meta, its busy generation, and its hooks were kept; close the endpoint, then run bin/fm-teardown.sh $ID." >&2
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -4285,7 +4380,7 @@ case "$HARNESS" in
     ;;
 esac
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|agy|muse|rovo|devin)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo|agy|devin)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac
@@ -4459,6 +4554,12 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = agy ] && [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! agy_wait_for_started; then
+    agy_spawn_fail "agy did not report starting its brief through its worker hook in window $T"
     exit 1
   fi
 fi

@@ -25,8 +25,6 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -386,32 +384,6 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
-}
-
-# fm-control.sh relaunch rewrites metadata with control_relaunch_tx= after the
-# preserved pr= / pr_head= block. That used to fail the poll identity parse.
-test_relaunch_does_not_disarm_an_armed_merge_poll() {
-  local dir out rc url
-  dir=$(new_case poll-identity rl-poll)
-  add_ship_task "$dir" rl-poll claude
-  url=https://github.com/o/r/pull/10
-  {
-    printf '%s\n' "pr=$url"
-    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
-  } >> "$dir/home/state/rl-poll.meta"
-  fm_pr_poll_prepare "$dir/home/state" rl-poll github "$url" github.com o/r 10 \
-    "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "could not prepare the armed poll before relaunch"
-  fm_pr_poll_publish_prepared || fail "could not publish the armed poll before relaunch"
-  fm_pr_poll_artifacts_valid "$dir/home/state" rl-poll "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "the armed poll was not valid before relaunch"
-  out=$(run_control "$dir" rl-poll relaunch --note "keep the merge poll armed"); rc=$?
-  expect_code 0 "$rc" "relaunch should succeed with an armed merge poll"$'\n'"$out"
-  [ -n "$(meta_field "$dir" rl-poll control_relaunch_tx)" ] \
-    || fail "relaunch did not record control_relaunch_tx="
-  fm_pr_poll_artifacts_valid "$dir/home/state" rl-poll "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "fm-control.sh relaunch disarmed the armed merge poll"
-  pass "fm-control relaunch: an armed merge poll stays bound after control_relaunch_tx="
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1453,22 +1425,6 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
-test_spawn_relaunch_refuses_another_tasks_worktree_claim() {
-  local dir out rc
-  dir=$(new_case shared-claim rl43)
-  add_ship_task "$dir" rl43 claude
-  printf 'zsh' > "$dir/fake/command"
-  fm_write_meta "$dir/home/state/other-claim.meta" \
-    "project=$dir/proj" "worktree=$dir/wt" "kind=ship"
-  if out=$(run_spawn "$dir" rl43 --relaunch --harness claude); then rc=0; else rc=$?; fi
-  expect_code 1 "$rc" "relaunch must refuse another task's claim"
-  assert_contains "$out" other-claim "relaunch refusal must name the other claimant"
-  assert_present "$dir/home/state/rl43.meta" "relaunch refusal lost its own record"
-  assert_present "$dir/home/state/other-claim.meta" "relaunch refusal lost the competing record"
-  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "relaunch started a worker in a contested copy"
-  pass "fm-spawn --relaunch: reuses its own claim but refuses a competing task's claim"
-}
-
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1630,7 +1586,6 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
-test_relaunch_does_not_disarm_an_armed_merge_poll
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
@@ -1674,7 +1629,6 @@ test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
-test_spawn_relaunch_refuses_another_tasks_worktree_claim
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close

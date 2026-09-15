@@ -21,6 +21,12 @@
 #      adapter must emit at most one of them.
 #   4. Worker hooks bind generation and conversation before closing busy;
 #      primary hooks compose the shared guard without bypassing review.
+#   5. Herdr's registry already tracks agy, and exit detection proves the
+#      agent at process level before trusting any registration (the shared
+#      post-#4115 contract in bin/backends/herdr.sh): a registered status plus
+#      a process view naming agy is live and refuses replacement, a registered
+#      status over a proven shell-only pane is the explicit stale-agent state,
+#      and nothing short of that shared proof flips an agy pane to agent-free.
 #
 # Detection and launch shape are harness-dependent facts, so this portable
 # suite pins the classifier and the rendered command with real processes and no
@@ -135,6 +141,154 @@ C
   pass "fm-harness.sh: agy ancestry is anchored to the exact command name"
 }
 
+test_agy_tmux_names_the_native_binary_an_agent() {
+  local got
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  fm_backend_source tmux || fail "fm_backend_source tmux failed"
+  got=$(fm_agent_process_classify_name agy)
+  [ "$got" = agent ] || fail "tmux liveness must read the agy binary as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name magyk)
+  [ "$got" = other ] || fail "tmux liveness must not read magyk as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name bash)
+  [ "$got" = shell ] || fail "tmux liveness must still read bash as a shell, got '$got'"
+  pass "bin/fm-agent-process-lib.sh: agy is an agent, fragments are not"
+}
+
+# Canned `pane process-info` bodies for the herdr fixtures. The shared
+# exit-detection contract proves a registered agent at process level before
+# trusting it (bin/backends/herdr.sh fm_backend_herdr_pane_process_state), so
+# every registered-status fixture pairs its `agent get` body with a process
+# view. The agy-shaped body names the foreground process exactly `agy`, which
+# is the same identity surface the tmux liveness probe and the ancestry
+# detector use - no real agy process is needed because the foreground branch
+# answers before the descendant walk touches the process table.
+agy_herdr_process_info_body() {  # <shell-pid> <foreground-name> -> JSON
+  printf '%s\n' "{\"result\":{\"type\":\"pane_process_info\",\"process_info\":{\"pane_id\":\"w9:p1\",\"shell_pid\":$1,\"foreground_processes\":[{\"pid\":$(( $1 + 1 )),\"name\":\"$2\",\"argv\":[\"$2\",\"--prompt-interactive\"],\"argv0\":\"$2\",\"cmdline\":\"$2 --prompt-interactive\"}]}}}"
+}
+
+agy_herdr_agent_state() {  # <fixture-dir> -> verdict; logs every CLI call
+  local dir=$1
+  : > "$dir/calls.log"
+  AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_PROC="$dir/process-info.json" \
+    AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$AGY_FIX_LOG"
+      case "$*" in
+        *"agent get"*) cat "$AGY_FIX_RESP" ;;
+        *"pane process-info"*) cat "$AGY_FIX_PROC" ;;
+        *) exit 0 ;;
+      esac
+    }
+    fm_backend_herdr_pane_agent_state testsession w9:p1' "$ROOT" 2>&1
+}
+
+test_herdr_done_with_live_registry_stays_live() {
+  local dir out
+  dir="$TMP_ROOT/herdr-done"; mkdir -p "$dir"
+  printf '%s\n' '{"result":{"agent":{"agent":"agy","agent_status":"done","pane_id":"w9:p1"}}}' > "$dir/agent-get.json"
+  agy_herdr_process_info_body 424242 agy > "$dir/process-info.json"
+  out=$(agy_herdr_agent_state "$dir")
+  [ "$out" = live ] || fail "a registered done status with an agy process view must stay live, got '$out'"
+  grep -q "process-info" "$dir/calls.log" \
+    || fail "the shared contract proves a registered agent at process level; the verdict trusted the registration alone"
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_PROC="$dir/process-info.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"agent get"*) cat "$AGY_FIX_RESP" ;;
+        *"pane process-info"*) cat "$AGY_FIX_PROC" ;;
+        *) exit 0 ;;
+      esac
+    }
+    fm_backend_herdr_tab_is_husk testsession w9:p1 && printf husk || printf refused' "$ROOT" 2>&1)
+  [ "$out" = refused ] || fail "a live pane must refuse husk replacement, got '$out'"
+  pass "herdr exit detection: done with a live registry and an agy process view stays live and refuses replacement"
+}
+
+test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live() {
+  local dir out shell_pid
+  dir="$TMP_ROOT/herdr-stale"; mkdir -p "$dir"
+  # The descendant walk reads the REAL process table, so the canned pane shell
+  # must be a process this test owns and can prove alive: a short-lived sleep.
+  sleep 30 & shell_pid=$!
+  printf '%s\n' '{"result":{"agent":{"agent":"agy","agent_status":"done","pane_id":"w9:p1"}}}' > "$dir/agent-get.json"
+  agy_herdr_process_info_body "$shell_pid" bash > "$dir/process-info.json"
+  out=$(agy_herdr_agent_state "$dir")
+  kill "$shell_pid" 2>/dev/null || true
+  [ "$out" = stale-agent ] || fail "a registered status over a proven shell-only pane must read stale-agent, got '$out'"
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_PROC="$dir/process-info.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"agent get"*) cat "$AGY_FIX_RESP" ;;
+        *"pane process-info"*) cat "$AGY_FIX_PROC" ;;
+        *) exit 0 ;;
+      esac
+    }
+    fm_backend_herdr_tab_is_husk testsession w9:p1 && printf husk || printf refused' "$ROOT" 2>&1)
+  [ "$out" = refused ] || fail "a stale registration must still refuse husk replacement, got '$out'"
+  pass "herdr exit detection: a registered status over a shell-only pane is stale-agent and still refuses closing"
+}
+
+test_herdr_shell_first_with_live_registry_stays_live() {
+  local dir out
+  dir="$TMP_ROOT/herdr-idle"; mkdir -p "$dir"
+  printf '%s\n' '{"result":{"agent":{"agent":"agy","agent_status":"idle","pane_id":"w9:p1"}}}' > "$dir/agent-get.json"
+  # The pane shell is present in the process view too (shell_pid), but the
+  # foreground names agy: the verified harness identity outranks shell-first
+  # ranking, and the shared contract's process proof is satisfied.
+  agy_herdr_process_info_body 424242 agy > "$dir/process-info.json"
+  out=$(agy_herdr_agent_state "$dir")
+  [ "$out" = live ] || fail "a registered idle status with an agy foreground must stay live, got '$out'"
+  grep -q "process-info" "$dir/calls.log" \
+    || fail "the shared contract proves a registered agent at process level; the verdict trusted the registration alone"
+  pass "herdr exit detection: a registered pane with an agy foreground stays live however its shell ranks"
+}
+
+test_herdr_lone_unregistered_pane_is_agent_free() {
+  local dir out
+  dir="$TMP_ROOT/herdr-gone"; mkdir -p "$dir"
+  printf '%s\n' '{"error":{"code":"agent_not_found","message":"agent target w9:p1 not found"}}' > "$dir/agent-get.json"
+  out=$(agy_herdr_agent_state "$dir")
+  [ "$out" = no-agent ] || fail "an unregistered pane must read no-agent, got '$out'"
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      case "$*" in *"agent get"*) cat "$AGY_FIX_RESP" ;; *) exit 0 ;; esac
+    }
+    fm_backend_herdr_tab_is_husk testsession w9:p1 && printf husk || printf refused' "$ROOT" 2>&1)
+  [ "$out" = husk ] || fail "an agent-free pane must allow husk replacement, got '$out'"
+  pass "herdr exit detection: only a positively unregistered pane is agent-free"
+}
+
+test_herdr_malformed_and_failed_reads_stay_unknown() {
+  local dir out
+  dir="$TMP_ROOT/herdr-malformed"; mkdir -p "$dir"
+  printf '%s\n' '{not json at all' > "$dir/agent-get.json"
+  out=$(agy_herdr_agent_state "$dir")
+  [ "$out" = unknown ] || fail "a malformed registry response must read unknown, got '$out'"
+  dir="$TMP_ROOT/herdr-failed"; mkdir -p "$dir"
+  printf '%s\n' '{"result":{}}' > "$dir/agent-get.json"
+  export AGY_FIX_FAIL=1
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$AGY_FIX_LOG"
+      case "$*" in *"agent get"*) [ "${AGY_FIX_FAIL:-0}" = 1 ] && exit 3; cat "$AGY_FIX_RESP" ;; *) exit 0 ;; esac
+    }
+    fm_backend_herdr_pane_agent_state testsession w9:p1' "$ROOT" 2>&1)
+  unset AGY_FIX_FAIL
+  [ "$out" = unknown ] || fail "a failed registry query must read unknown, got '$out'"
+  pass "herdr exit detection: malformed and failed reads stay unknown"
+}
+
 # --- spawn scaffolding ------------------------------------------------------
 
 make_spawn_fakebin() {
@@ -148,17 +302,56 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    prev=
+    for arg in "$@"; do
+      [ "$prev" != -n ] || printf '%s\n' "$arg" > "$FM_FAKE_LAUNCH_LOG.window"
+      prev=$arg
+    done
+    exit 0
+    ;;
+  list-windows)
+    # Presence is the session's exact window inventory: the launched window
+    # stays listed until a kill really closes it, which is how spawn confirms
+    # closure.
+    if [ -s "$FM_FAKE_LAUNCH_LOG.window" ] && [ ! -e "$FM_FAKE_LAUNCH_LOG.closed" ]; then
+      cat "$FM_FAKE_LAUNCH_LOG.window"
+    fi
+    exit 0
+    ;;
+  has-session|new-session) exit 0 ;;
+  kill-window)
+    printf 'kill-window %s\n' "$*" >> "$FM_FAKE_LAUNCH_LOG.kills"
+    # FM_FAKE_KILL_FAILS models a kill that leaves the window running.
+    [ "${FM_FAKE_KILL_FAILS:-0}" = 1 ] || : > "$FM_FAKE_LAUNCH_LOG.closed"
+    exit 0
+    ;;
   send-keys)
     prev=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
-        break
+        case "$arg" in
+          *.agy-hooks*)
+            printf '%s\n' "$arg" | grep -o "[^' ]*\.agy-hooks" | head -n 1 \
+              > "$FM_FAKE_LAUNCH_LOG.agy-hooks"
+            ;;
+        esac
+        exit 0
       fi
       prev=$arg
     done
+    # Stand-in for agy starting its brief: the Enter that submits the launch
+    # line runs the installed worker PreInvocation hook with the payload agy
+    # sends, unless the case models a launch that never reaches the model.
+    if [ "${*: -1}" = Enter ] && [ "${FM_FAKE_AGY_START:-1}" = 1 ] \
+       && [ -s "$FM_FAKE_LAUNCH_LOG.agy-hooks" ]; then
+      hooks="$(cat "$FM_FAKE_LAUNCH_LOG.agy-hooks")/.agents/hooks.json"
+      cmd=$(jq -r '."firstmate-worker".PreInvocation[0].command' "$hooks" 2>/dev/null) || exit 0
+      wt=$(cd "$FM_FAKE_PANE_PATH" 2>/dev/null && pwd -P) || exit 0
+      jq -n --arg wt "$wt" '{conversationId:"fake-conversation",workspacePaths:[$wt]}' \
+        | bash -c "$cmd"
+    fi
     exit 0
     ;;
 esac
@@ -479,6 +672,93 @@ EOF
   pass "fm-spawn.sh: agy secondmate launches without worker wiring"
 }
 
+# --- start confirmation -----------------------------------------------------
+
+test_agy_spawn_confirms_the_brief_started() {
+  local fields case_dir home proj wt fakebin id out record
+  fields=$(make_spawn_case started)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) \
+    || fail "agy spawn whose worker hook reported the brief failed: $out"
+  case "$out" in
+    *"spawned $id harness=agy kind=scout"*) ;;
+    *) fail "a confirmed agy start did not report success: $out" ;;
+  esac
+  record=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"' _ "$ROOT" "$home/state" "$id") \
+    || fail "confirmed agy start left no valid busy record: $record"
+  case "$record" in
+    'busy agy-hook pre-invocation '*) ;;
+    *) fail "spawn reported success without the worker hook's own record, got: $record" ;;
+  esac
+  [ -f "$home/state/$id.meta" ] || fail "a confirmed agy start did not keep its task record"
+  [ ! -e "$home/launch.log.kills" ] || fail "a confirmed agy start closed its endpoint: $(cat "$home/launch.log.kills")"
+  pass "fm-spawn.sh: agy spawn succeeds only after the worker hook reports the brief started"
+}
+
+test_agy_spawn_fails_and_closes_when_the_brief_never_starts() {
+  local fields case_dir home proj wt fakebin id out status record
+  fields=$(make_spawn_case never-started)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  # The launch is typed and submitted, and spawn's own seed record is busy the
+  # whole time, but agy never invokes the model (an auth prompt, a trust dialog,
+  # a refused model id). The seed must not pass for a started brief.
+  out=$(FM_FAKE_AGY_START=0 FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0.1 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "agy spawn reported success though its brief never started: $out"
+  grep -Fq '.agy-hooks' "$home/launch.log" || fail "the case never delivered the agy launch: $out"
+  case "$out" in
+    *'agy did not report starting its brief'*) ;;
+    *) fail "the refusal must say the brief never started, got: $out" ;;
+  esac
+  grep -q '^failed: agy did not report starting its brief' "$home/state/$id.status" \
+    || fail "a never-started agy spawn did not record a failure: $(cat "$home/state/$id.status" 2>/dev/null)"
+  grep -Fq "fm-$id" "$home/launch.log.kills" 2>/dev/null \
+    || fail "a never-started agy spawn left its endpoint running: $(cat "$home/launch.log.kills" 2>/dev/null)"
+  [ ! -e "$home/state/$id.meta" ] || fail "a never-started agy spawn kept its task record"
+  [ ! -e "$home/state/$id.agy-hooks" ] || fail "a never-started agy spawn left its worker hooks installed"
+  if record=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"' _ "$ROOT" "$home/state" "$id"); then
+    fail "a never-started agy spawn left a live busy record: $record"
+  fi
+  pass "fm-spawn.sh: agy spawn fails, records it, and closes the endpoint when the brief never starts"
+}
+
+test_agy_spawn_keeps_its_record_when_the_endpoint_will_not_close() {
+  local fields case_dir home proj wt fakebin id out status record
+  fields=$(make_spawn_case close-unconfirmed)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  # The brief never starts and the kill leaves the window in place, so the agy
+  # process may still be running: its record, generation, and hooks must stay
+  # for teardown rather than being rolled back underneath a live worker.
+  out=$(FM_FAKE_AGY_START=0 FM_FAKE_KILL_FAILS=1 FM_AGY_READY_POLLS=4 \
+    FM_AGY_CLOSE_POLLS=3 FM_AGY_POLL_INTERVAL=0.1 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "agy spawn reported success though its brief never started: $out"
+  grep -Fq "fm-$id" "$home/launch.log.kills" 2>/dev/null \
+    || fail "the case never attempted to close the endpoint: $out"
+  case "$out" in
+    *'could not be confirmed; the agy worker may still be running'*) ;;
+    *) fail "an unconfirmed close must be reported, got: $out" ;;
+  esac
+  grep -q '^failed: agy did not report starting its brief.*could not be confirmed closed' "$home/state/$id.status" \
+    || fail "the failure record did not say the endpoint may still run: $(cat "$home/state/$id.status" 2>/dev/null)"
+  [ -f "$home/state/$id.meta" ] || fail "an unconfirmed close rolled back the task record"
+  record=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"' _ "$ROOT" "$home/state" "$id") \
+    || fail "an unconfirmed close retired the busy generation: $record"
+  [ -f "$home/state/$id.agy-hooks/.agents/hooks.json" ] || fail "an unconfirmed close retired the worker hooks"
+  pass "fm-spawn.sh: an agy spawn whose endpoint cannot be confirmed closed keeps its record for teardown"
+}
+
 # --- control mechanics ------------------------------------------------------
 
 test_agy_control_mechanics_are_the_verified_ones() {
@@ -646,6 +926,12 @@ test_agy_marker_outranks_inherited_claudecode
 test_agy_marker_is_the_cli_not_the_ide
 test_agy_does_not_claim_the_gemini_identity
 test_agy_ancestry_matches_only_the_exact_command_name
+test_agy_tmux_names_the_native_binary_an_agent
+test_herdr_done_with_live_registry_stays_live
+test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live
+test_herdr_shell_first_with_live_registry_stays_live
+test_herdr_lone_unregistered_pane_is_agent_free
+test_herdr_malformed_and_failed_reads_stay_unknown
 test_agy_auto_uses_accept_edits_and_never_bypass
 test_agy_manual_reviews_everything_and_never_bypass
 test_agy_absent_setting_defaults_to_accept_edits
@@ -656,6 +942,9 @@ test_agy_effort_caps_at_high
 test_agy_effort_passes_supported_levels_through
 test_agy_suffixed_model_id_suppresses_the_effort_flag
 test_agy_secondmate_launch_is_supported
+test_agy_spawn_confirms_the_brief_started
+test_agy_spawn_fails_and_closes_when_the_brief_never_starts
+test_agy_spawn_keeps_its_record_when_the_endpoint_will_not_close
 test_agy_control_mechanics_are_the_verified_ones
 test_agy_supports_all_task_kinds
 test_agy_wiring_has_a_cleanup_owner

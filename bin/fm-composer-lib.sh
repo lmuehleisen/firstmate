@@ -359,8 +359,7 @@ fm_composer_strip_ghost() {
 # Matching a footer to confirm a keystroke landed is a different question from
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; omp: "Working…"; grok: "Ctrl+c:cancel";
-# agy: "esc to cancel".
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; omp: "Working…"; grok: "Ctrl+c:cancel"; agy: "esc to cancel".
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -435,7 +434,6 @@ fm_busy_lines_match() {  # [harness]
     regex=$FM_BUSY_REGEX
   else
     case "$harness" in
-      agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       claude) regex=$FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
       devin) regex=$FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT ;;
@@ -443,6 +441,7 @@ fm_busy_lines_match() {  # [harness]
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
       omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;

@@ -421,8 +421,16 @@ jobs:
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
           snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 19 ] || {
-            echo "::error::expected 19 snapshot/fleet-view tests, got $snapshot_count"
+          [ "$snapshot_count" -eq 18 ] || {
+            echo "::error::expected 18 snapshot/fleet-view tests, got $snapshot_count"
+            exit 1
+          }
+
+          captain_hold_snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-captain-hold.test.sh)
+          printf '%s\n' "$captain_hold_snapshot_output"
+          captain_hold_snapshot_count=$(printf '%s\n' "$captain_hold_snapshot_output" | grep -c '^ok - ')
+          [ "$captain_hold_snapshot_count" -eq 1 ] || {
+            echo "::error::expected 1 captain-hold snapshot test, got $captain_hold_snapshot_count"
             exit 1
           }
 
