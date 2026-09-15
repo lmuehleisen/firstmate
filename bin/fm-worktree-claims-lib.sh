@@ -31,6 +31,45 @@ try {
 JS
 }
 
+# Positive owner proof before a slot is returned, read from the same record.
+# Spawn leases with holder "<FM_HOME>:<task-id>"; the home half compares by
+# resolved path against each spelling the caller names for the task's own home
+# (its configured home and the home owning its state directory), so a symlinked
+# or overridden spelling of that same home still matches.
+# A home argument of "-" also accepts the bare "<task-id>" holder that
+# bin/fm-home-seed.sh records when it leases a secondmate home.
+# Prints "mine", "unleased" (no durable holder: a pre-lease claim), or
+# "other <holder>"; returns 1 when the record cannot answer (missing,
+# unsafe, malformed, or no single entry for the slot).
+fm_worktree_lease_owner() {  # <canonical-slot> <task-id> <home>...
+  local slot=$1 id=$2 pool
+  shift 2
+  pool=$(dirname "$(dirname "$slot")")
+  [ -f "$pool/treehouse-state.json" ] && [ ! -L "$pool/treehouse-state.json" ] || return 1
+  node - "$pool/treehouse-state.json" "$slot" "$id" "$@" <<'JS'
+const fs = require('fs');
+const [file, slot, id, ...homes] = process.argv.slice(2);
+const real = p => { try { return fs.realpathSync(p); } catch { return p; } };
+try {
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!Array.isArray(state.worktrees)) process.exit(1);
+  const matches = state.worktrees.filter(entry => {
+    if (typeof entry.path !== 'string') throw new Error('invalid path');
+    return real(entry.path) === slot;
+  });
+  if (matches.length !== 1) process.exit(1);
+  const entry = matches[0];
+  if (entry.leased !== true) { console.log('unleased'); process.exit(0); }
+  const holder = typeof entry.lease_holder === 'string' ? entry.lease_holder : '';
+  const split = holder.lastIndexOf(':');
+  const bare = homes.includes('-') && holder === id;
+  const mine = bare || (split > 0 && holder.slice(split + 1) === id
+    && homes.some(home => home !== '-' && real(holder.slice(0, split)) === real(home)));
+  console.log(mine ? 'mine' : `other ${holder || '<no holder>'}`);
+} catch { process.exit(1); }
+JS
+}
+
 fm_worktree_claims_for_path() {  # <own-meta> <state> <worktree>
   local own=$1 state=$2 worktree=$3 slot dir meta field path matched
   FM_WORKTREE_CLAIMS=()

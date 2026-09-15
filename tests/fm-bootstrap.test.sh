@@ -322,6 +322,34 @@ test_dropped_tools_are_not_required() {
   pass "bootstrap does not require no-mistakes, gh-axi, chrome-devtools-axi, or lavish-axi"
 }
 
+# config/no-mistakes is an optional opt-in: an installed CLI alone says nothing,
+# and an opted-in home without the CLI gets one non-blocking fact, never MISSING.
+test_no_mistakes_opt_in_reports_unavailable_cli() {
+  local case_dir fakebin out label flag cli expect
+  while IFS='|' read -r label flag cli expect; do
+    [ -n "$label" ] || continue
+    case_dir="$TMP_ROOT/no-mistakes-opt-in-$flag-$cli"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    [ "$flag" = off ] || : > "$case_dir/home/config/no-mistakes"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    [ "$cli" = present ] || rm -f "$fakebin/no-mistakes"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    case "$expect" in
+      silent) [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      info)
+        [ "$out" = "BOOTSTRAP_INFO: no-mistakes pipeline unavailable (config/no-mistakes is set; install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh) - direct-PR and local-only work may proceed; pipeline ships are refused until it is installed" ] \
+          || fail "$label: expected exactly the unavailable fact, got: $out" ;;
+    esac
+  done <<'ROWS'
+flag absent with the CLI installed|off|present|silent
+flag present with the CLI installed|on|present|silent
+flag present without the CLI|on|absent|info
+ROWS
+  pass "bootstrap reports an opted-in but unavailable no-mistakes CLI as one non-blocking fact"
+}
+
 test_tasks_axi_min_version() {
   local label version mode case_dir fakebin out missing n archive_body multi_id
   missing='MISSING: tasks-axi (install: npm install -g tasks-axi)'
@@ -1079,6 +1107,7 @@ ROWS
 
 test_bootstrap_reporting
 test_dropped_tools_are_not_required
+test_no_mistakes_opt_in_reports_unavailable_cli
 test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction

@@ -36,7 +36,15 @@ test_devin_marker_requires_ancestry() {
   local out
   # FM_DEVIN_HARNESS=devin without a real devin process in ancestry must NOT
   # detect devin. It fails closed to prevent an inherited env var from hijacking
-  # identity.
+  # identity. That premise is false when the suite itself runs under devin, so
+  # ask fm-harness.sh's public ancestry walk first and skip when it already
+  # finds a devin ancestor above this test process.
+  case $("$HARNESS" ancestry) in
+    *" devin")
+      printf 'skip - fm-harness.sh: devin marker case needs a non-devin ancestry, running under devin\n'
+      return 0
+      ;;
+  esac
   out=$(env FM_DEVIN_HARNESS=devin "$HARNESS")
   [ "$out" != devin ] \
     || fail "FM_DEVIN_HARNESS=devin without devin ancestry must not detect devin"
@@ -44,7 +52,7 @@ test_devin_marker_requires_ancestry() {
 }
 
 test_devin_ancestry_detection_and_anchoring() {
-  local dir="$TMP_ROOT/ancestry" out clean probe
+  local dir="$TMP_ROOT/ancestry" out clean probe blind_fakebin blind_probe
   mkdir -p "$dir"
   command -v cc >/dev/null 2>&1 || {
     printf 'skip - fm-harness.sh: devin ancestry needs cc to build a named process\n'
@@ -69,15 +77,27 @@ C
   out=$("$dir/devin" "env FM_DEVIN_HARNESS=devin $probe" | tr -d '\n')
   [ "$out" = devin ] || fail "FM_DEVIN_HARNESS + devin ancestor must detect devin, got '$out'"
 
-  # Anchored match: devin-other or mydevin must NOT detect devin.
+  # Anchored match: devin-other or mydevin must NOT detect devin. Their probes
+  # must see no devin ancestor at all, so the walk is cut only above this test
+  # shell's own pid (fm_fake_blind_ancestry_above) - a real devin process above
+  # the suite is exactly what they would otherwise detect. The decoy layer
+  # below the cut is still examined under its real name, proven by the
+  # exact-name probe under the same cut so the anchored asserts cannot pass
+  # vacuously.
+  blind_fakebin=$(fm_fakebin "$dir/blind-ancestry")
+  fm_fake_blind_ancestry_above "$blind_fakebin" "$$"
+  blind_probe="$clean PATH='$blind_fakebin:$PATH' $HARNESS"
+  out=$("$dir/devin" "$blind_probe" | tr -d '\n')
+  [ "$out" = devin ] \
+    || fail "an exact devin ancestor must still detect under the ancestry cut, got '$out'"
   cc -o "$dir/devin-other" "$dir/run.c" 2>/dev/null \
     || fail "could not build the devin-other probe"
-  out=$("$dir/devin-other" "$probe" | tr -d '\n')
+  out=$("$dir/devin-other" "$blind_probe" | tr -d '\n')
   [ "$out" != devin ] || fail "devin-other must not be detected as devin"
 
   cc -o "$dir/mydevin" "$dir/run.c" 2>/dev/null \
     || fail "could not build the mydevin probe"
-  out=$("$dir/mydevin" "$probe" | tr -d '\n')
+  out=$("$dir/mydevin" "$blind_probe" | tr -d '\n')
   [ "$out" != devin ] || fail "mydevin must not be detected as devin"
 
   pass "fm-harness.sh: devin ancestry detects devin and is strictly anchored"
