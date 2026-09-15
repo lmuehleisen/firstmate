@@ -128,7 +128,10 @@ test_devin_control_contract() {
   [ "$(fm_control_interrupt_repeat devin)" = 2 ] || fail "devin interrupt repeat must be 2"
   [ -z "$(fm_control_interrupt_clear_key devin)" ] || fail "devin interrupt clear key must be empty"
   [ "$(fm_control_interrupt_ack_source devin)" = none ] || fail "devin interrupt ack source must be none"
-  [ "$(fm_control_exit_command devin)" = '/exit' ] || fail "devin exit command must be /exit"
+  # /exit is ambiguous against devin's /revert <step> fuzzy command search
+  # (live-observed opening the revert menu instead of exiting); plain `exit`
+  # is devin's documented unambiguous alias.
+  [ "$(fm_control_exit_command devin)" = 'exit' ] || fail "devin exit command must be plain exit, not the ambiguous /exit slash form"
 
   paths=$(fm_control_harness_wiring_paths devin "$wt" "$state" "$id")
   [ "$paths" = "$wt/.devin/config.local.json
@@ -224,8 +227,8 @@ EOF
     *) fail "auto must launch devin with --permission-mode smart, got: $launch" ;;
   esac
   case "$launch" in
-    *dangerous*|*bypass*|*autonomous*|*--yolo*)
-      fail "auto must never reach blanket approval bypass: $launch" ;;
+    *dangerous*|*bypass*|*autonomous*|*--sandbox*|*--yolo*)
+      fail "auto must never reach blanket approval bypass or sandbox autonomous mode: $launch" ;;
   esac
   pass "fm-spawn.sh: devin auto selects --permission-mode smart, never bypass"
 }
@@ -322,6 +325,10 @@ EOF
     *'--respect-workspace-trust false'*) ;;
     *) fail "launch must pass --respect-workspace-trust false, got: $launch" ;;
   esac
+  case "$launch" in
+    *"TMPDIR='/tmp/fm-$id'"*) ;;
+    *) fail "launch must isolate Devin temporary files under the task temp root, got: $launch" ;;
+  esac
 
   # Model is passed
   case "$launch" in
@@ -384,14 +391,16 @@ EOF
   # (D1 extended 2026-09-14), checked through the generated config.
   local entry
   for entry in \
-    "Exec(git commit)" "Exec(git push)" "Exec(git checkout)" "Exec(git remote)" \
+    "Exec(git add)" "Exec(git commit)" "Exec(git push)" "Exec(git checkout)" "Exec(git remote)" \
     "Exec(git fetch)" "Exec(git status)" "Exec(git log)" "Exec(git diff)" \
     "Exec(ls)" \
     "Exec(gh pr create)" "Exec(gh pr view)" "Exec(gh pr list)" "Exec(gh pr checks)" \
     "Exec(bin/fm-lint.sh)" "Exec(./bin/fm-lint.sh)" "Exec(bash bin/fm-lint.sh)" \
     "Exec(bin/fm-test-run.sh)" "Exec(./bin/fm-test-run.sh)" "Exec(bash bin/fm-test-run.sh)" \
     "Exec(bin/fm-install-shellcheck.sh)" "Exec(./bin/fm-install-shellcheck.sh)" "Exec(bash bin/fm-install-shellcheck.sh)" \
-    "Exec(bin/fm-install-actionlint.sh)" "Exec(./bin/fm-install-actionlint.sh)" "Exec(bash bin/fm-install-actionlint.sh)"; do
+    "Exec(bin/fm-install-actionlint.sh)" "Exec(./bin/fm-install-actionlint.sh)" "Exec(bash bin/fm-install-actionlint.sh)" \
+    "Write($home/data/$id)" "Write($home/state/$id.status)" \
+    "Write($home/state/$id.inbox)" "Write(/tmp/fm-$id)"; do
     jq -e --arg e "$entry" '.permissions.allow | index($e)' "$hook_file" >/dev/null \
       || fail "permissions.allow must contain $entry"
   done
