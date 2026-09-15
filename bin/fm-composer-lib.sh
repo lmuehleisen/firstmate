@@ -1250,7 +1250,7 @@ _fm_composer_select_cursorless() {
 # and model / context footer row (e.g. `SWE-2 Max Context: 13k / 262k tokens (5%)`).
 _fm_composer_select_devin() {  # <plain-screen>
   local plain=$1 total_rows r footer_row=-1 bottom_row=-1 first=-1 last=-1 top_row=-1
-  local row_text footer_text bottom_text top_text below_text
+  local row_text bottom_text top_text below_text
   total_rows=$(printf '%s\n' "$plain" | wc -l | tr -d ' ')
   [ "$total_rows" -ge 4 ] || return 1
 
@@ -1260,7 +1260,6 @@ _fm_composer_select_devin() {  # <plain-screen>
     row_text=$(_fm_composer_screen_row "$r" "$plain")
     if printf '%s\n' "$row_text" | LC_ALL=C grep -qE 'Context:[[:space:]]*[0-9]+.*tokens'; then
       footer_row=$r
-      footer_text=$row_text
       break
     fi
     r=$((r - 1))
