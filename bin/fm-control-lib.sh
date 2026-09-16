@@ -12,9 +12,11 @@
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
-# This file owns three capability tables plus their pure artifact-path tables
-# and nothing else. It has no side effects, runs no backend command, and reads
-# no state, so it can be sourced by a test as a pure contract:
+# This file owns three capability tables plus their artifact-path tables and
+# nothing else. It has no side effects and runs no backend command, so it can
+# be sourced by a test as a pure contract; fm_control_devin_wiring_owned is the
+# one exception that reads state - the worktree's git index and info/exclude -
+# because only the repo itself can prove a managed file is firstmate's:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
 #      point on the control plane; a caller either names an allowlisted verb or
@@ -288,6 +290,26 @@ fm_control_harness_wiring_dirs() {  # <harness> <worktree>
       printf '%s\n' "$wt/.devin"
       ;;
   esac
+}
+
+# Whether the devin managed file at <worktree>/<relpath> is provably
+# firstmate-owned wiring, safe to retire. A path git tracks is the project's
+# own and never qualifies - removing it would strand a dirty worktree missing
+# a tracked file if the worktree return then fails, and bin/fm-spawn.sh's
+# launch refusal means a devin incarnation's own copies were never tracked to
+# begin with. An untracked path qualifies when the task's recorded harness
+# resolves to devin, or when the path still sits in the git info/exclude list
+# fm-spawn writes for exactly its two managed files: the shape a pooled
+# worktree keeps after an older teardown left the files behind under a later
+# non-devin task.
+fm_control_devin_wiring_owned() {  # <recorded-harness> <worktree> <relpath>
+  local harness=${1-} wt=${2-} rel=${3-} excl
+  [ -n "$wt" ] && [ -n "$rel" ] || return 1
+  ! git -C "$wt" ls-files --error-unmatch "$rel" >/dev/null 2>&1 || return 1
+  [ "$(fm_control_harness_family "$harness" 2>/dev/null || true)" = devin ] && return 0
+  excl=$(git -C "$wt" rev-parse --path-format=absolute --git-path info/exclude 2>/dev/null) \
+    && [ -n "$excl" ] || return 1
+  grep -qxF "$rel" "$excl" 2>/dev/null
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

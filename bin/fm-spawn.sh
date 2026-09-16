@@ -1160,6 +1160,12 @@ clear_relaunch_harness_wiring() {
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    # A worktree-resident devin path still needs the shared ownership proof: a
+    # file git tracks there is the project's own, not this incarnation's
+    # wiring, and a blind rm would strand a dirty worktree missing it.
+    if [ "$harness" = devin ] && [ "${path#"$wt"/}" != "$path" ]; then
+      fm_control_devin_wiring_owned devin "$wt" "${path#"$wt"/}" || continue
+    fi
     rm -f -- "$path" || return 1
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")

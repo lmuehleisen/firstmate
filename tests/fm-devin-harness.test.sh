@@ -723,6 +723,82 @@ EOF
   pass "fm-teardown: devin teardown removes managed files and only-empty .devin directories"
 }
 
+test_teardown_keeps_project_tracked_devin_files_for_a_nondevin_task() {
+  local fields case_dir home proj wt fakebin id
+  fields=$(make_spawn_case teardown-tracked)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  # A non-devin task whose project legitimately tracks the managed paths: both
+  # are the project's own, committed on the task branch like any content.
+  mkdir -p "$wt/.devin/rules"
+  printf '{"local":true}\n' > "$wt/.devin/config.local.json"
+  printf 'project rule\n' > "$wt/.devin/rules/firstmate-attribution.md"
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    add .devin/config.local.json .devin/rules/firstmate-attribution.md
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "Track devin config and attribution rule"
+  # The task record belongs to a non-devin harness, so nothing under .devin/
+  # is firstmate's to retire.
+  fm_write_meta "$home/state/$id.meta" \
+    "window=fmses:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$wt" \
+    "project=$proj" \
+    "harness=claude" \
+    "kind=ship" \
+    "tasktmp=/tmp/fm-$id"
+  run_devin_teardown "$home" "$fakebin" "$id" --force >/dev/null \
+    || fail "teardown of the non-devin task should succeed"
+  [ -f "$wt/.devin/config.local.json" ] \
+    || fail "teardown must never remove a git-tracked .devin/config.local.json"
+  [ -f "$wt/.devin/rules/firstmate-attribution.md" ] \
+    || fail "teardown must never remove a git-tracked .devin/rules/firstmate-attribution.md"
+  [ -d "$wt/.devin/rules" ] && [ -d "$wt/.devin" ] \
+    || fail "teardown must leave .devin dirs that still hold tracked project content"
+  [ -z "$(git -C "$wt" status --porcelain)" ] \
+    || fail "retained tracked files must leave the worktree clean: $(git -C "$wt" status --porcelain)"
+
+  pass "fm-teardown: a non-devin task's git-tracked .devin files survive teardown"
+}
+
+test_teardown_removes_a_nondevin_tasks_devin_leftover_when_exclude_proves_it() {
+  local fields case_dir home proj wt fakebin id exclude_file
+  fields=$(make_spawn_case teardown-poolleftover)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  # The pooled-slot shape: a previous devin incarnation's files survived under
+  # a later non-devin task - untracked, and still listed in the info/exclude
+  # entry fm-spawn wrote for them. Provably firstmate's, so teardown retires
+  # them even though this task never ran devin.
+  mkdir -p "$wt/.devin/rules"
+  printf '{"attribution":false}\n' > "$wt/.devin/config.local.json"
+  printf 'no attribution\n' > "$wt/.devin/rules/firstmate-attribution.md"
+  exclude_file=$(git -C "$wt" rev-parse --path-format=absolute --git-path info/exclude)
+  printf '%s\n' '.devin/config.local.json' '.devin/rules/firstmate-attribution.md' >> "$exclude_file"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=fmses:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$wt" \
+    "project=$proj" \
+    "harness=claude" \
+    "kind=ship" \
+    "tasktmp=/tmp/fm-$id"
+  run_devin_teardown "$home" "$fakebin" "$id" --force >/dev/null \
+    || fail "teardown of the non-devin task should succeed"
+  [ ! -e "$wt/.devin/config.local.json" ] \
+    || fail "teardown must remove the untracked excluded .devin/config.local.json leftover"
+  [ ! -e "$wt/.devin/rules/firstmate-attribution.md" ] \
+    || fail "teardown must remove the untracked excluded attribution-rule leftover"
+  [ ! -d "$wt/.devin/rules" ] || fail "teardown must remove the emptied .devin/rules directory"
+  [ ! -d "$wt/.devin" ] || fail "teardown must remove the emptied .devin directory"
+
+  pass "fm-teardown: a non-devin task's excluded .devin leftover is retired"
+}
+
 # --- raw launch -------------------------------------------------------------
 
 test_devin_raw_launch() {
@@ -849,6 +925,8 @@ test_devin_hooks_generation_validation_and_execution
 test_devin_collision_refusal
 test_devin_teardown_and_relaunch
 test_devin_teardown_removes_managed_wiring_and_empty_dirs
+test_teardown_keeps_project_tracked_devin_files_for_a_nondevin_task
+test_teardown_removes_a_nondevin_tasks_devin_leftover_when_exclude_proves_it
 test_devin_raw_launch
 test_devin_bootstrap_dispatch_validation
 test_devin_composer_classification

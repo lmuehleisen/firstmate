@@ -1049,6 +1049,41 @@ test_devin_relaunch_keeps_project_owned_devin_content() {
   pass "fm-spawn --relaunch: switching away from devin keeps project-owned .devin content and its directories"
 }
 
+# A devin worker can also make a managed path project-owned mid-task by
+# committing it (the Exec allowlist permits git add/commit). Once git tracks
+# the file it is the project's own, so the harness switch must leave it -
+# tearing it out would strand a dirty worktree missing a tracked file.
+test_devin_relaunch_keeps_a_tracked_attribution_rule() {
+  local dir state
+  dir=$(new_case devintracked rl39)
+  add_ship_task "$dir" rl39 devin
+  state="$dir/home/state"
+  mkdir -p "$dir/wt/.devin/rules"
+  printf '{"attribution":false}\n' > "$dir/wt/.devin/config.local.json"
+  printf 'no attribution\n' > "$dir/wt/.devin/rules/firstmate-attribution.md"
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    add .devin/rules/firstmate-attribution.md
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "Worker committed the attribution rule"
+  printf '{"task":"rl39","status":"%s","log":"%s"}\n' \
+    "$state/rl39.status" "$state/devin-permission-log.jsonl" \
+    > "$state/rl39.devin-permission.json"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl39 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunch away from devin should succeed"$'\n'"$out"
+  [ ! -e "$dir/wt/.devin/config.local.json" ] \
+    || fail "the retired devin incarnation's untracked config.local.json must not outlive it"
+  [ ! -e "$state/rl39.devin-permission.json" ] \
+    || fail "the retired devin incarnation's permission policy file must not outlive it"
+  [ -f "$dir/wt/.devin/rules/firstmate-attribution.md" ] \
+    || fail "a relaunch must never remove a git-tracked .devin/rules/firstmate-attribution.md"
+  [ -d "$dir/wt/.devin/rules" ] && [ -d "$dir/wt/.devin" ] \
+    || fail ".devin directories that still hold a tracked file must survive a relaunch away from devin"
+  [ -z "$(git -C "$dir/wt" status --porcelain)" ] \
+    || fail "a retained tracked file must leave the worktree clean: $(git -C "$dir/wt" status --porcelain)"
+  pass "fm-spawn --relaunch: switching away from devin keeps a git-tracked attribution rule"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1667,6 +1702,7 @@ test_cursor_session_binding_is_retired_on_a_harness_switch
 test_devin_pending_permission_escalation_is_retired_on_a_harness_switch
 test_devin_worktree_wiring_is_retired_on_a_harness_switch
 test_devin_relaunch_keeps_project_owned_devin_content
+test_devin_relaunch_keeps_a_tracked_attribution_rule
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
