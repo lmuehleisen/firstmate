@@ -995,6 +995,60 @@ test_devin_pending_permission_escalation_is_retired_on_a_harness_switch() {
   pass "fm-spawn --relaunch: switching away from devin closes and retires its pending permission escalations"
 }
 
+# A devin incarnation leaves two firstmate-owned files under the worktree's
+# .devin/; a pooled slot keeps them across reset/clean because both sit in git
+# info/exclude. Retiring the files without their directories still strands the
+# shell of the wiring - the next devin spawn into that slot then refuses on the
+# leftover - so the directories go too, but only while empty.
+test_devin_worktree_wiring_is_retired_on_a_harness_switch() {
+  local dir state
+  dir=$(new_case devinwiring rl37)
+  add_ship_task "$dir" rl37 devin
+  state="$dir/home/state"
+  mkdir -p "$dir/wt/.devin/rules"
+  printf '{"attribution":false}\n' > "$dir/wt/.devin/config.local.json"
+  printf 'no attribution\n' > "$dir/wt/.devin/rules/firstmate-attribution.md"
+  printf '{"task":"rl37","status":"%s","log":"%s"}\n' \
+    "$state/rl37.status" "$state/devin-permission-log.jsonl" \
+    > "$state/rl37.devin-permission.json"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl37 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunch away from devin should succeed"$'\n'"$out"
+  [ ! -e "$dir/wt/.devin/config.local.json" ] \
+    || fail "the retired devin incarnation's config.local.json must not outlive it"
+  [ ! -e "$dir/wt/.devin/rules/firstmate-attribution.md" ] \
+    || fail "the retired devin incarnation's attribution rule must not outlive it"
+  [ ! -e "$state/rl37.devin-permission.json" ] \
+    || fail "the retired devin incarnation's permission policy file must not outlive it"
+  [ ! -d "$dir/wt/.devin/rules" ] \
+    || fail "the emptied .devin/rules directory must not outlive the retired devin incarnation"
+  [ ! -d "$dir/wt/.devin" ] \
+    || fail "the emptied .devin directory must not outlive the retired devin incarnation"
+  pass "fm-spawn --relaunch: switching away from devin retires its worktree wiring and emptied directories"
+}
+
+test_devin_relaunch_keeps_project_owned_devin_content() {
+  local dir
+  dir=$(new_case devinkeep rl38)
+  add_ship_task "$dir" rl38 devin
+  mkdir -p "$dir/wt/.devin/rules"
+  printf '{"attribution":false}\n' > "$dir/wt/.devin/config.local.json"
+  printf 'no attribution\n' > "$dir/wt/.devin/rules/firstmate-attribution.md"
+  printf 'project rule\n' > "$dir/wt/.devin/rules/project-rule.md"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl38 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunch away from devin should succeed"$'\n'"$out"
+  [ ! -e "$dir/wt/.devin/config.local.json" ] \
+    || fail "the retired devin incarnation's config.local.json must not outlive it"
+  [ ! -e "$dir/wt/.devin/rules/firstmate-attribution.md" ] \
+    || fail "the retired devin incarnation's attribution rule must not outlive it"
+  [ -f "$dir/wt/.devin/rules/project-rule.md" ] \
+    || fail "a relaunch must not remove project-owned .devin content"
+  [ -d "$dir/wt/.devin/rules" ] && [ -d "$dir/wt/.devin" ] \
+    || fail ".devin directories that still hold project content must survive a relaunch away from devin"
+  pass "fm-spawn --relaunch: switching away from devin keeps project-owned .devin content and its directories"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1611,6 +1665,8 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_devin_pending_permission_escalation_is_retired_on_a_harness_switch
+test_devin_worktree_wiring_is_retired_on_a_harness_switch
+test_devin_relaunch_keeps_project_owned_devin_content
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

@@ -273,6 +273,23 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   esac
 }
 
+# The directories a retired harness incarnation's worktree wiring lived in.
+# A relaunch removes each with rmdir after the wiring files above are gone, so
+# a directory leaves only while empty: a project's own content under the same
+# path is never firstmate wiring and must survive a harness switch. Prints zero
+# or more absolute paths, one per line, deepest first so each parent is
+# attempted only after its managed child is gone.
+fm_control_harness_wiring_dirs() {  # <harness> <worktree>
+  local harness=${1-} wt=${2-}
+  [ -n "$wt" ] || return 1
+  case "$harness" in
+    devin)
+      printf '%s\n' "$wt/.devin/rules"
+      printf '%s\n' "$wt/.devin"
+      ;;
+  esac
+}
+
 # The firstmate-owned global turn-end registry entry a harness mints per task.
 # grok and kimi are the two adapters whose turn-end hook is global and gated by
 # a private token file; every other adapter's wiring is fully covered by

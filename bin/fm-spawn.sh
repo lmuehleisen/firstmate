@@ -1164,6 +1164,14 @@ clear_relaunch_harness_wiring() {
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
+  # Directories the retired wiring lived in go with it, but only while empty;
+  # rmdir's own check protects any project content sharing the path.
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rmdir "$path" 2>/dev/null || true
+  done <<EOF
+$(fm_control_harness_wiring_dirs "$harness" "$wt")
+EOF
   if [ "$harness" = agy ]; then
     "$SCRIPT_DIR/fm-agy-hook.sh" retire-worker "$state" "$id" || return 1
   fi
@@ -3799,8 +3807,12 @@ EOF
         # script and its per-task policy file under state/ live outside the
         # worktree, and Devin reads hooks once at session start.
         for managed in .devin/config.local.json .devin/rules/firstmate-attribution.md; do
-          if [ -e "$WT/$managed" ] || [ -L "$WT/$managed" ] || git -C "$WT" ls-files --error-unmatch "$managed" >/dev/null 2>&1; then
-            echo "error: cannot spawn devin worker: $WT/$managed already exists or is tracked" >&2
+          if git -C "$WT" ls-files --error-unmatch "$managed" >/dev/null 2>&1; then
+            echo "error: cannot spawn devin worker: $WT/$managed is tracked by git" >&2
+            exit 1
+          fi
+          if [ -e "$WT/$managed" ] || [ -L "$WT/$managed" ]; then
+            echo "error: cannot spawn devin worker: $WT/$managed already exists as an untracked leftover" >&2
             exit 1
           fi
         done

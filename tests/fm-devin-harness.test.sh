@@ -158,6 +158,10 @@ test_devin_control_contract() {
 $wt/.devin/rules/firstmate-attribution.md
 $state/$id.devin-permission.json" ] || fail "devin wiring paths must cover config.local.json, the attribution rule, and the permission policy file, got '$paths'"
 
+  paths=$(fm_control_harness_wiring_dirs devin "$wt")
+  [ "$paths" = "$wt/.devin/rules
+$wt/.devin" ] || fail "devin wiring dirs must cover .devin/rules then .devin, got '$paths'"
+
   pass "fm-control-lib: devin control mechanics match specification"
 }
 
@@ -229,6 +233,16 @@ run_devin_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     FM_FAKE_LAUNCH_LOG="$home/launch.log" \
     PATH="${FM_TEST_PATH_OVERRIDE:-$fakebin:$PATH}" \
     "$SPAWN" "$id" "$proj" "$harness" "$@" 2>&1
+}
+
+run_devin_teardown() {  # <home> <fakebin> <id> [extra args...]
+  local home=$1 fakebin=$2 id=$3
+  shift 3
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" \
+    PATH="${FM_TEST_PATH_OVERRIDE:-$fakebin:$PATH}" \
+    "$ROOT/bin/fm-teardown.sh" "$id" "$@" 2>&1
 }
 
 # --- permissions & launch template ------------------------------------------
@@ -551,8 +565,11 @@ EOF
   out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
     fail "spawn must refuse when .devin/config.local.json already exists"
   case "$out" in
-    *'.devin/config.local.json already exists or is tracked'*) ;;
-    *) fail "refusal must mention .devin/config.local.json, got: $out" ;;
+    *'.devin/config.local.json already exists as an untracked leftover'*) ;;
+    *) fail "refusal must report .devin/config.local.json as an untracked leftover, got: $out" ;;
+  esac
+  case "$out" in
+    *'tracked by git'*) fail "an untracked leftover must not be reported as tracked: $out" ;;
   esac
 
   # Case 2: .devin/config.local.json is tracked on the project's default branch.
@@ -571,12 +588,13 @@ EOF
   out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
     fail "spawn must refuse when .devin/config.local.json is tracked"
   case "$out" in
-    *'.devin/config.local.json already exists or is tracked'*) ;;
-    *) fail "refusal must mention tracked .devin/config.local.json, got: $out" ;;
+    *'.devin/config.local.json is tracked by git'*) ;;
+    *) fail "refusal must report .devin/config.local.json as tracked by git, got: $out" ;;
   esac
 
   # Case 3: .devin/rules/firstmate-attribution.md already exists (excluded so the
-  # pooled worktree refreshes clean, same as case 1).
+  # pooled worktree refreshes clean, same as case 1). This is the exact shape a
+  # pool slot holds after a previous devin worker's teardown missed the file.
   fields=$(make_spawn_case collision-rule)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $fields
@@ -589,11 +607,35 @@ EOF
   out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
     fail "spawn must refuse when .devin/rules/firstmate-attribution.md already exists"
   case "$out" in
-    *'firstmate-attribution.md already exists or is tracked'*) ;;
-    *) fail "refusal must mention the attribution rule path, got: $out" ;;
+    *'firstmate-attribution.md already exists as an untracked leftover'*) ;;
+    *) fail "refusal must report the attribution rule as an untracked leftover, got: $out" ;;
+  esac
+  # The refusal is a refusal, not a cleanup: the leftover must still be there.
+  [ -f "$wt/.devin/rules/firstmate-attribution.md" ] \
+    || fail "spawn must not silently delete the untracked leftover it refuses on"
+  [ "$(cat "$wt/.devin/rules/firstmate-attribution.md")" = 'existing rule' ] \
+    || fail "the refused leftover's content must be untouched"
+
+  # Case 4: .devin/rules/firstmate-attribution.md tracked on the project's
+  # default branch - a genuinely project-owned file, refused as tracked.
+  fields=$(make_spawn_case collision-rule-tracked)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  mkdir -p "$proj/.devin/rules"
+  echo 'project rule' > "$proj/.devin/rules/firstmate-attribution.md"
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' add .devin/rules/firstmate-attribution.md
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "Track devin attribution rule"
+  git -C "$proj" push origin main >/dev/null 2>&1
+  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
+    fail "spawn must refuse when .devin/rules/firstmate-attribution.md is tracked"
+  case "$out" in
+    *'firstmate-attribution.md is tracked by git'*) ;;
+    *) fail "refusal must report the attribution rule as tracked by git, got: $out" ;;
   esac
 
-  pass "fm-spawn.sh: devin spawn refuses when .devin/config.local.json exists or is tracked"
+  pass "fm-spawn.sh: devin spawn refuses managed .devin files, distinguishing tracked from untracked leftover"
 }
 
 # --- teardown & relaunch wiring ---------------------------------------------
@@ -619,6 +661,14 @@ EOF
   [ ! -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "fm_control_harness_wiring_paths must cover .devin/rules/firstmate-attribution.md"
   [ ! -f "$home/state/$id.devin-permission.json" ] || fail "fm_control_harness_wiring_paths must cover the permission policy file"
 
+  # fm_control_harness_wiring_dirs must cover the two directories the managed
+  # files lived in, deepest first, so the relaunch clear can retire them with
+  # rmdir once the files are gone.
+  for p in $(fm_control_harness_wiring_dirs devin "$wt"); do
+    [ -n "$p" ] && rmdir "$p" 2>/dev/null
+  done
+  [ ! -e "$wt/.devin" ] || fail "fm_control_harness_wiring_dirs must cover .devin/rules and .devin"
+
   # Teardown safety: ensure teardown uncommitted changes check does NOT ignore untracked .devin/ content
   # Create an actual untracked file in .devin/
   mkdir -p "$wt/.devin/skills/foo"
@@ -631,6 +681,46 @@ EOF
   esac
 
   pass "fm-teardown / fm-control: relaunch wiring cleared and teardown protects unlanded .devin content"
+}
+
+test_devin_teardown_removes_managed_wiring_and_empty_dirs() {
+  local fields case_dir home proj wt fakebin id
+  fields=$(make_spawn_case teardown-wiring)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
+  [ -f "$wt/.devin/config.local.json" ] || fail "expected .devin/config.local.json to exist"
+  [ -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "expected .devin/rules/firstmate-attribution.md to exist"
+
+  # --force keeps the worktree (the fake treehouse return is a no-op), so the
+  # pooled slot's leftover state is directly inspectable afterwards.
+  run_devin_teardown "$home" "$fakebin" "$id" --force >/dev/null \
+    || fail "teardown of the devin task should succeed"
+  [ ! -e "$wt/.devin/config.local.json" ] || fail "teardown must remove .devin/config.local.json"
+  [ ! -e "$wt/.devin/rules/firstmate-attribution.md" ] || fail "teardown must remove .devin/rules/firstmate-attribution.md"
+  [ ! -d "$wt/.devin/rules" ] || fail "teardown must remove the emptied .devin/rules directory"
+  [ ! -d "$wt/.devin" ] || fail "teardown must remove the emptied .devin directory"
+
+  # Only-when-empty: a project's own file under .devin/rules keeps both
+  # directories in place while firstmate's managed files still go.
+  fields=$(make_spawn_case teardown-foreign)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
+  printf 'project rule\n' > "$wt/.devin/rules/project-rule.md"
+  run_devin_teardown "$home" "$fakebin" "$id" --force >/dev/null \
+    || fail "teardown of the devin task should succeed"
+  [ ! -e "$wt/.devin/config.local.json" ] || fail "teardown must remove .devin/config.local.json"
+  [ ! -e "$wt/.devin/rules/firstmate-attribution.md" ] || fail "teardown must remove .devin/rules/firstmate-attribution.md"
+  [ -f "$wt/.devin/rules/project-rule.md" ] || fail "teardown must not remove project-owned .devin content"
+  [ -d "$wt/.devin/rules" ] && [ -d "$wt/.devin" ] \
+    || fail "teardown must leave .devin dirs that still hold project content"
+
+  pass "fm-teardown: devin teardown removes managed files and only-empty .devin directories"
 }
 
 # --- raw launch -------------------------------------------------------------
@@ -758,6 +848,7 @@ test_devin_secondmate_refusal
 test_devin_hooks_generation_validation_and_execution
 test_devin_collision_refusal
 test_devin_teardown_and_relaunch
+test_devin_teardown_removes_managed_wiring_and_empty_dirs
 test_devin_raw_launch
 test_devin_bootstrap_dispatch_validation
 test_devin_composer_classification
