@@ -2,7 +2,7 @@
 # Agy native-hook transport and worker installation.
 # Usage: fm-agy-hook.sh install-worker <state> <id> <gen> <worktree>
 #        fm-agy-hook.sh retire-worker <state> <id>
-#        fm-agy-hook.sh worker <PreInvocation|Stop> <state> <id> <gen> <worktree>
+#        fm-agy-hook.sh worker <PreInvocation|PreToolUse|PostToolUse|Stop> <state> <id> <gen> <worktree>
 #        fm-agy-hook.sh primary <PreInvocation|PreToolUse|Stop>
 #
 # Hook calls consume Agy's camelCase JSON on stdin and exit 0, returning one
@@ -20,6 +20,19 @@
 # A retired generation can write only its own session binding and is refused by
 # fm-busy-event.sh before publishing state or a turn-ended wake.
 # retire-worker removes only that marked, non-symlink adapter directory.
+#
+# install-worker also registers the log-only tool observer: matcher groups on
+# the same worker command append one JSON line per tool call to
+# state/agy-permission-log.jsonl. Fields mirror devin-permission-log.jsonl
+# naming where the concept is shared - ts, task, event (pre-tool-use or
+# post-tool-use), tool, session_id (Agy conversationId), input (the command
+# line, the file path, or the url/query), plus step_idx, model, cwd, and for
+# PostToolUse error. File contents, tool output, and environment are never
+# logged. The observer ALWAYS exits 0 with empty stdout - every parse,
+# extraction, or append failure lands inert - because Agy blocks the tool on
+# any non-zero exit or any stdout. install-worker validates the merged
+# hooks.json before installing it, since one malformed entry silently
+# disables every hook in the file, including the turn-end pair.
 set -u
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -40,6 +53,18 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+bad_args() {
+  # agy pipes the payload on stdin for every hook call, so a terminal
+  # stdin means a human ran the script by hand and gets usage. A piped
+  # worker PreToolUse/PostToolUse call with a bad argument count -
+  # reachable only through a malformed installed command - still exits 0
+  # with empty stdout, because agy blocks the tool on any non-zero exit.
+  [ -t 0 ] && usage
+  case "$MODE:$event" in
+    worker:PreToolUse|worker:PostToolUse) exit 0 ;;
+    *) usage ;;
+  esac
 }
 
 case "$MODE" in
@@ -73,7 +98,26 @@ case "$MODE" in
     suffix="$(shell_quote "$state") $(shell_quote "$id") $(shell_quote "$gen") $(shell_quote "$wt")"
     tmp=$(mktemp "$dir/.agents/.hooks.XXXXXX") || exit 1
     if ! jq -n --arg open "$prefix PreInvocation $suffix" --arg close "$prefix Stop $suffix" \
-      '{"firstmate-worker":{PreInvocation:[{command:$open}],Stop:[{command:$close}]}}' > "$tmp"; then
+      --arg pre "$prefix PreToolUse $suffix" --arg post "$prefix PostToolUse $suffix" \
+      '{"firstmate-worker":{
+        PreInvocation:[{command:$open}],
+        Stop:[{command:$close}],
+        PreToolUse:[{matcher:"*",hooks:[{type:"command",command:$pre,timeout:10}]}],
+        PostToolUse:[{matcher:"*",hooks:[{type:"command",command:$post,timeout:10}]}]}}' > "$tmp"; then
+      rm -f "$tmp"; exit 1
+    fi
+    # A single malformed entry silently disables every hook in the file,
+    # including the shipped turn-end pair, so refuse to install anything that
+    # does not carry all four groups with non-empty commands.
+    if ! jq -e '
+      ."firstmate-worker" as $h
+      | ([$h | .. | objects | select(has("command")) | .command]) as $cmds
+      | ($h | has("PreInvocation") and has("Stop") and has("PreToolUse") and has("PostToolUse"))
+        and ($h.PreToolUse[0] | has("matcher") and (.hooks | type == "array" and length >= 1))
+        and ($h.PostToolUse[0] | has("matcher") and (.hooks | type == "array" and length >= 1))
+        and ($cmds | length) == 4
+        and ($cmds | all(type == "string" and length > 0))' "$tmp" >/dev/null; then
+      echo "error: refusing to install malformed agy hooks for $id" >&2
       rm -f "$tmp"; exit 1
     fi
     mv -- "$tmp" "$dir/.agents/hooks.json" || { rm -f "$tmp"; exit 1; }
@@ -85,19 +129,51 @@ case "$MODE" in
 esac
 
 event=${1:-}
-shift || usage
+shift || bad_args
+# A bad worker argument count is gated before stdin is read so a hand-run
+# call still reaches usage instead of hanging on the payload read.
+if [ "$MODE" = worker ] && [ "$#" -ne 4 ]; then bad_args; fi
 payload=$(cat 2>/dev/null || true)
 inert() {
   # Agy requires a decision when PreToolUse emits JSON; {} denies the call.
   # No output leaves the native permission policy in control.
   exit 0
 }
+observe_tool_call() {
+  # Log-only observer. One JSONL append, then abstain: any failure anywhere
+  # leaves the log incomplete but never blocks the worker's tool. Field names
+  # mirror devin-permission-log.jsonl where the concept is the same; input
+  # carries the command line, the file path, or the url/query and every
+  # field is length-capped so contents, output, and env never reach the log.
+  local line
+  line=$(printf '%s' "$payload" | jq -c \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg task "$id" --arg event "$event" '
+    def s(n): (. // "") | tostring | .[0:n];
+    (.toolCall.args // {}) as $a
+    | ([$a.CommandLine, $a.TargetFile, $a.AbsolutePath, $a.FilePath, $a.File,
+        $a.DirectoryPath, $a.Url, $a.Query, $a.SearchPath, $a.query, $a.url]
+       | map(select(type == "string" and . != "")) | .[0] // "") as $input
+    | {
+        ts: ($ts | s(32)),
+        task: ($task | s(128)),
+        event: (if $event == "PostToolUse" then "post-tool-use" else "pre-tool-use" end),
+        tool: (.toolCall.name | s(128)),
+        session_id: (.conversationId | s(128)),
+        step_idx: (.stepIdx | if type == "number" then . else null end),
+        model: (.modelName | s(128)),
+        input: ($input | s(4000)),
+        cwd: ($a.Cwd | s(512)),
+        error: (.error | s(512))
+      }' 2>>"$dir/diag.log") || line=
+  [ -z "$line" ] \
+    || printf '%s\n' "$line" >> "$state/agy-permission-log.jsonl" 2>>"$dir/diag.log" || true
+}
 command -v jq >/dev/null 2>&1 || inert
 conversation=$(printf '%s' "$payload" | jq -er '.conversationId | select(type == "string")' 2>/dev/null) || inert
 token_valid "$conversation" || inert
 
 if [ "$MODE" = worker ]; then
-  [ "$#" -eq 4 ] || usage
   state=$1 id=$2 gen=$3 wt=$4
   token_valid "$id" || inert
   token_valid "$gen" || inert
@@ -107,6 +183,12 @@ if [ "$MODE" = worker ]; then
   [ "$(cat "$state/$id.busy-gen" 2>/dev/null)" = "$gen" ] || inert
   printf '%s' "$payload" | jq -e --arg wt "$wt" \
     '.workspacePaths | type == "array" and index($wt) != null' >/dev/null 2>&1 || inert
+  case "$event" in
+    # The observer records every tool call this generation makes, including
+    # ones a subagent conversation fires; the main-conversation binding below
+    # stays reserved for the parent's lifecycle events.
+    PreToolUse|PostToolUse) observe_tool_call ;;
+  esac
   binding="$dir/$gen.session"
   [ ! -L "$binding" ] || inert
   if [ "$event" = PreInvocation ] && [ ! -e "$binding" ]; then

@@ -104,6 +104,7 @@ state/               runtime records and signals; gitignored
   <id>.gemini-settings.json  firstmate-owned per-task Gemini settings carrying the busy-state and turn-end hooks, reached through GEMINI_CLI_SYSTEM_SETTINGS_PATH so nothing is written into the project's own .gemini/; removed by teardown
   <id>.devin-permission.json <id>.devin-permission-pending/ <id>.devin-permission-cache/  firstmate-owned per-task Devin permission policy file, pending-escalation markers, and approved-verdict cache read by bin/fm-devin-permission-policy.sh's hooks; removed by teardown
   devin-permission-log.jsonl  home-wide append-only log of every Devin permission refusal, approval, judge verdict, and escalation outcome (bin/fm-devin-permission-policy.sh); safe to delete
+  agy-permission-log.jsonl  home-wide append-only log of every agy worker tool call, written by bin/fm-agy-hook.sh's log-only observer; safe to delete
   <id>.muse-session  muse busy-source binding (sessions root plus task worktree) written by fm-spawn; removed by teardown
   <id>.cursor-session  cursor busy-source binding (projects root, task worktree, prior conversations) written by fm-spawn; removed by teardown
   <id>.reconcile-nudged  epoch second of the last inventory-reconcile nudge sent to this secondmate; bin/fm-secondmate-reconcile.sh owns its per-home cooldown window

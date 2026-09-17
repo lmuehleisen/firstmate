@@ -708,6 +708,23 @@ Typing hides the shortcuts hint while the accept-edits mode cell remains; a manu
 Ordinary typed input, wrapped text, and a shell below a stale composer remain protected by the portable composer regressions.
 [Google's hook reference](https://antigravity.google/docs/hooks) owns the vendor payload and response schema.
 
+### Log-only tool observer
+
+Verified on 2026-09-17 with agy 1.2.5 on macOS 25.6.0: the worker hook file `bin/fm-agy-hook.sh install-worker` writes now carries `PreToolUse` and `PostToolUse` matcher groups that append one JSONL line per tool call to `state/agy-permission-log.jsonl` and abstain.
+A real headless run (`-p`, `gemini-3.6-flash-low`, cheapest tier) with the installed hook directory granted emitted both lines while the observed `run_command` executed unchanged - the abstain contract holds against the real emitter.
+The bypass flag below is lab-scoped so the headless tool actually runs; it is never a worker launch flag.
+
+```sh
+FM_AGY_OBSERVER_LIVE=1 bin/fm-test-run.sh tests/fm-agy-observer-live-e2e.test.sh
+```
+
+```text
+ok - agy 1.2.5: installed worker hooks emit a PreToolUse and PostToolUse line while the tool runs unchanged
+# agy observer live checks passed (agy 1.2.5)
+```
+
+The portable suite `tests/fm-agy-harness.test.sh` pins the record schema, the field caps, the never-log-contents rule, every inert failure path, concurrent appends, and the install-time refusal of a malformed merged `hooks.json`.
+
 ### Primary and secondmate supervision
 
 Verified on 2026-09-10 with Agy 1.2.0 and `gemini-3.8-flash` at low effort on macOS using a throwaway Firstmate home and private tmux socket.

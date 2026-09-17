@@ -816,7 +816,7 @@ test_agy_worker_hooks() {
   }
   [ -z "$(agy_worker_event PreInvocation main)" ] || fail 'worker start must return an inert response'
   [ "$(agy_worker_state)" = 'busy agy-hook' ] || fail 'PreInvocation did not open busy'
-  [ -z "$(agy_worker_event PreToolUse main)" ] || fail 'unsupported worker event must be inert, never request primary review'
+  [ -z "$(agy_worker_event PreToolUse main)" ] || fail 'worker PreToolUse must stay inert: the observer logs but never answers'
   [ -z "$(agy_worker_event Stop child)" ] || fail 'rejected child Stop must return an inert response'
   [ "$(agy_worker_state)" = 'busy agy-hook' ] || fail 'child Stop settled parent'
   [ -z "$(agy_worker_event Stop main false)" ] || fail 'partial worker Stop must return an inert response'
@@ -836,6 +836,162 @@ test_agy_worker_hooks() {
   if "$hook" retire-worker "$state" agy-worker 2>/dev/null; then fail 'retired an unowned directory'; fi
   : "$next"
   pass 'agy worker hooks bind generation and conversation, preserve project hooks, and retire safely'
+}
+
+# --- log-only tool observer --------------------------------------------------
+
+test_agy_worker_tool_observer() {
+  local dir="$TMP_ROOT/observer" state wt gen hook log out line lines_before
+  state="$dir/state" wt="$dir/worktree" hook="$ROOT/bin/fm-agy-hook.sh"
+  mkdir -p "$state" "$wt"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" agy-obs) || fail 'arm agy-obs'
+  "$hook" install-worker "$state" agy-obs "$gen" "$wt" || fail 'install agy-obs hooks'
+  # The installed file carries all four groups: the turn-end pair flat, and the
+  # observer pair grouped under a match-everything matcher with a timeout.
+  jq -e '."firstmate-worker" as $h
+    | ($h.PreInvocation[0].command | type == "string" and length > 0)
+      and ($h.Stop[0].command | type == "string" and length > 0)
+      and ($h.PreToolUse[0].matcher == "*")
+      and ($h.PostToolUse[0].matcher == "*")
+      and ($h.PreToolUse[0].hooks[0].command | type == "string" and length > 0)
+      and ($h.PostToolUse[0].hooks[0].command | type == "string" and length > 0)
+      and ($h.PreToolUse[0].hooks[0].timeout | type == "number" and . > 0)
+      and ($h.PostToolUse[0].hooks[0].timeout | type == "number" and . > 0)' \
+    "$state/agy-obs.agy-hooks/.agents/hooks.json" >/dev/null \
+    || fail 'installed hooks.json lacks the observer groups or their timeouts'
+  log="$state/agy-permission-log.jsonl"
+  OBS_PAYLOAD=$(jq -n --arg wt "$wt" '{
+    conversationId:"a5605811-2516-457e-a255-48159816b93a", stepIdx:2,
+    modelName:"gemini-3.6-flash-low",
+    toolCall:{name:"run_command",args:{CommandLine:"/usr/bin/touch ws/A",Cwd:"/tmp/ws",WaitMsBeforeAsync:5000,toolAction:"Running shell command",toolSummary:"Touch A"}},
+    workspacePaths:[$wt],
+    transcriptPath:"/x/brain/conv/.system_generated/logs/transcript_full.jsonl",
+    artifactDirectoryPath:"/x/brain/conv"}')
+  obs_event() {  # <event> <jq-filter>
+    printf '%s' "$OBS_PAYLOAD" | jq "$2" | "$hook" worker "$1" "$state" agy-obs "$gen" "$wt"
+  }
+  out=$(obs_event PreToolUse '.')
+  [ -z "$out" ] || fail "PreToolUse observer emitted stdout: $out"
+  out=$(obs_event PostToolUse '.error=""')
+  [ -z "$out" ] || fail "PostToolUse observer emitted stdout: $out"
+  [ "$(wc -l < "$log" | tr -d ' ')" = 2 ] || fail "expected 2 observer lines: $(cat "$log")"
+  line=$(sed -n '1p' "$log")
+  printf '%s' "$line" | jq -e '
+    .event == "pre-tool-use" and .tool == "run_command" and .task == "agy-obs"
+    and .session_id == "a5605811-2516-457e-a255-48159816b93a" and .step_idx == 2
+    and .model == "gemini-3.6-flash-low" and .input == "/usr/bin/touch ws/A"
+    and .cwd == "/tmp/ws" and .error == ""
+    and (.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T"))' >/dev/null \
+    || fail "pre-tool line wrong: $line"
+  line=$(sed -n '2p' "$log")
+  printf '%s' "$line" | jq -e '.event == "post-tool-use" and .error == ""' >/dev/null \
+    || fail "post-tool line wrong: $line"
+  # A PostToolUse error lands in the error field.
+  out=$(obs_event PostToolUse '.error="tool exploded"')
+  printf '%s' "$(tail -1 "$log")" | jq -e '.error == "tool exploded"' >/dev/null \
+    || fail "post-tool error field wrong: $(tail -1 "$log")"
+  # File and web tools land their path or url in input, never the contents.
+  out=$(obs_event PreToolUse '.toolCall={name:"write_to_file",args:{TargetFile:"/tmp/secret.go",CodeContent:"TOP-SECRET-BODY"}}')
+  [ -z "$out" ] || fail "file-tool observer emitted stdout: $out"
+  line=$(tail -1 "$log")
+  printf '%s' "$line" | jq -e '.tool == "write_to_file" and .input == "/tmp/secret.go" and .cwd == ""' >/dev/null \
+    || fail "file-tool line wrong: $line"
+  case "$line" in *TOP-SECRET*) fail 'observer logged file contents' ;; esac
+  out=$(obs_event PreToolUse '.toolCall={name:"read_url_content",args:{Url:"https://example.invalid/x"}}')
+  [ -z "$out" ] || fail "web-tool observer emitted stdout: $out"
+  printf '%s' "$(tail -1 "$log")" | jq -e '.input == "https://example.invalid/x"' >/dev/null \
+    || fail "web-tool line wrong: $(tail -1 "$log")"
+  # Only this generation's calls in this worktree reach the log.
+  lines_before=$(wc -l < "$log" | tr -d ' ')
+  out=$(obs_event PreToolUse '.workspacePaths=["/elsewhere"]')
+  [ -z "$out" ] || fail "foreign-workspace call produced stdout: $out"
+  out=$(printf '%s' "$OBS_PAYLOAD" | "$hook" worker PreToolUse "$state" agy-obs stale-gen "$wt")
+  [ -z "$out" ] || fail "stale-generation call produced stdout: $out"
+  [ "$(wc -l < "$log" | tr -d ' ')" = "$lines_before" ] || fail 'ungated calls reached the log'
+  pass 'agy worker observer logs pre/post tool calls with the mirrored schema and no contents'
+}
+
+test_agy_worker_observer_never_blocks() {
+  local dir="$TMP_ROOT/observer-fail" state wt gen hook log out payload line big i n rc
+  state="$dir/state" wt="$dir/worktree" hook="$ROOT/bin/fm-agy-hook.sh"
+  mkdir -p "$state" "$wt"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" agy-obsf) || fail 'arm agy-obsf'
+  "$hook" install-worker "$state" agy-obsf "$gen" "$wt" || fail 'install agy-obsf hooks'
+  log="$state/agy-permission-log.jsonl"
+  payload=$(jq -n --arg wt "$wt" '{conversationId:"conv-f",stepIdx:1,modelName:"m",toolCall:{name:"run_command",args:{CommandLine:"date",Cwd:"/tmp"}},workspacePaths:[$wt]}')
+  # Every failure path must exit 0 with empty stdout: either blocks the tool.
+  out=$(printf 'not json at all' | "$hook" worker PreToolUse "$state" agy-obsf "$gen" "$wt")
+  [ -z "$out" ] || fail "malformed payload produced stdout: $out"
+  local sans
+  sans=$(fm_test_base_path_sans "$PATH" jq) || fail 'could not build a jq-less PATH'
+  out=$(printf '%s' "$payload" | PATH="$sans" "$hook" worker PreToolUse "$state" agy-obsf "$gen" "$wt")
+  [ -z "$out" ] || fail "missing jq produced stdout: $out"
+  [ ! -e "$log" ] || fail 'a refused observer path still wrote a log line'
+  # A malformed installed command (bad argument count) stays inert for the
+  # two tool events; other bad calls keep usage's loud failure.
+  out=$(printf '%s' "$payload" | "$hook" worker PreToolUse "$state" agy-obsf 2>/dev/null); rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "bad-arg PreToolUse blocked: rc=$rc out=$out"
+  out=$(printf '%s' "$payload" | "$hook" worker PostToolUse "$state" 2>/dev/null); rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "bad-arg PostToolUse blocked: rc=$rc out=$out"
+  printf '%s' "$payload" | "$hook" worker Stop "$state" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail 'bad-arg Stop lost its loud failure'
+  printf '%s' "$payload" | "$hook" worker >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail 'event-less worker call lost its loud failure'
+  # An unwritable log path (a directory here) must not block either.
+  mkdir "$log"
+  out=$(printf '%s' "$payload" | "$hook" worker PreToolUse "$state" agy-obsf "$gen" "$wt")
+  [ -z "$out" ] || fail "unwritable log produced stdout: $out"
+  rmdir "$log"
+  # An oversized payload still logs, with the field capped rather than copied.
+  big=$(head -c 50000 /dev/zero | tr '\0' 'x')
+  out=$(printf '%s' "$payload" | jq --arg big "$big" '.toolCall.args.CommandLine=$big' \
+    | "$hook" worker PreToolUse "$state" agy-obsf "$gen" "$wt")
+  [ -z "$out" ] || fail "oversized payload produced stdout: $out"
+  line=$(tail -1 "$log")
+  [ "$(printf '%s' "$line" | jq -r '.input | length')" -le 4000 ] \
+    || fail 'observer input field was not capped'
+  # Parallel appends from concurrent workers all land as valid JSONL.
+  for i in 1 2 3 4 5 6 7 8; do
+    printf '%s' "$payload" | jq --argjson i "$i" '.stepIdx=$i' \
+      | "$hook" worker PostToolUse "$state" agy-obsf "$gen" "$wt" &
+  done
+  wait
+  n=$(wc -l < "$log" | tr -d ' ')
+  [ "$n" = 9 ] || fail "concurrent appends lost lines: expected 9, got $n"
+  jq -c . "$log" >/dev/null || fail 'a concurrent append corrupted the JSONL'
+  pass 'agy observer never blocks: malformed, missing-jq, bad-arg, unwritable, oversized, and concurrent paths stay inert'
+}
+
+test_agy_install_worker_refuses_malformed_merge() {
+  local dir="$TMP_ROOT/bad-merge" state wt gen hook fakebin real_jq out
+  state="$dir/state" wt="$dir/worktree" hook="$ROOT/bin/fm-agy-hook.sh"
+  mkdir -p "$state" "$wt"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" agy-bad) || fail 'arm agy-bad'
+  fakebin=$(fm_fakebin "$dir")
+  real_jq=$(command -v jq) || fail 'real jq required for the corruption shim'
+  # Corrupt only the `jq -n` generation step: empty every handler command. The
+  # file stays parseable JSON, so only install-worker's own validation of the
+  # merged result can catch it - the failure mode this guard exists for.
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = -n ]; then
+    "$real_jq" "\$@" | sed 's/"command": *"[^"]*"/"command":""/g'
+    exit
+  fi
+done
+exec "$real_jq" "\$@"
+SH
+  chmod +x "$fakebin/jq"
+  out=$(PATH="$fakebin:$PATH" "$hook" install-worker "$state" agy-bad "$gen" "$wt" 2>&1) \
+    && fail 'install-worker accepted a malformed merged hooks.json'
+  case "$out" in
+    *refusing*) ;;
+    *) fail "refusal was not loud: $out" ;;
+  esac
+  [ ! -e "$state/agy-bad.agy-hooks/.agents/hooks.json" ] \
+    || fail 'a malformed merged hooks.json was installed'
+  pass 'install-worker refuses a malformed merged hooks.json loudly and installs nothing'
 }
 
 test_agy_primary_hooks() {
@@ -949,5 +1105,8 @@ test_agy_control_mechanics_are_the_verified_ones
 test_agy_supports_all_task_kinds
 test_agy_wiring_has_a_cleanup_owner
 test_agy_worker_hooks
+test_agy_worker_tool_observer
+test_agy_worker_observer_never_blocks
+test_agy_install_worker_refuses_malformed_merge
 test_agy_primary_hooks
 test_agy_session_identity
