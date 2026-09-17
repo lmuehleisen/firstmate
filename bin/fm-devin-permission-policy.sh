@@ -116,9 +116,14 @@
 # shape that resolves review threads), git merge, git push naming a default
 # branch or deleting/mirroring/pushing --all, history rewrites (rebase,
 # filter-branch, filter-repo, reset --hard/--merge/--keep, commit --amend,
-# branch -D/-M/-f, reflog expire/delete, update-ref -d), and curl or wget of
-# any host but loopback - the guessed third-party download. Force pushes,
-# gh repo, and the rest of the hard-refusal list never get this far.
+# branch -D/-M/-f, reflog expire/delete, update-ref -d), and curl or wget of a
+# host the task's own instructions do not name - the guessed third-party
+# download. A curl or wget whose every host is loopback, or appears as a whole
+# host in the captain's intent, firstmate's spec, or the grants block, is
+# ordinary residue for the judge instead, because a research task calling the
+# API its brief names is routine work. A URL-shaped word whose host cannot be
+# read (an expansion, for instance) counts as unnamed. Force pushes, gh repo,
+# and the rest of the hard-refusal list never get this far.
 #
 # Recursive rm: the hard refusal now measures against three roots - the
 # worktree, the task data directory, and the task temp root - so deleting a
@@ -402,13 +407,20 @@ physical_target() {  # <word> <cwd> <follow-final>
 # only from the first fenced ```firstmate-grants JSON block. Tool input never
 # reaches this: a worker cannot grant itself anything mid-session.
 GRANTS_LOADED=0 GRANT_ENV_FILES='' GRANT_WRITE_DIRS='' GRANT_REMOTE_WRITES=0
+
+# The declared grants block's raw text, parsed in exactly one place.
+grants_block() {
+  [ -n "$BRIEF" ] && [ -r "$BRIEF" ] || return 0
+  awk '/^```firstmate-grants[[:space:]]*$/{on=1; next} on && /^```/{exit} on{print}' \
+    "$BRIEF" 2>/dev/null | head -c 8000
+}
+
 load_grants() {
   [ "$GRANTS_LOADED" -eq 0 ] || return 0
   GRANTS_LOADED=1
   [ -n "$BRIEF" ] && [ -r "$BRIEF" ] || return 0
   local block files dirs remote
-  block=$(awk '/^```firstmate-grants[[:space:]]*$/{on=1; next} on && /^```/{exit} on{print}' \
-    "$BRIEF" 2>/dev/null | head -c 8000)
+  block=$(grants_block)
   [ -n "$block" ] || return 0
   {
     IFS= read -r -d '' files
@@ -489,6 +501,91 @@ inside_grant_write_dirs() {  # <abs>
   while IFS= read -r d; do
     [ -n "$d" ] && strictly_inside "$1" "$d" && return 0
   done <<<"$GRANT_WRITE_DIRS"
+  return 1
+}
+
+# The host a URL-shaped word names, lowercased; 1 when the word names no host.
+# Only a scheme, a leading www., or a dotted name followed by a path counts as
+# URL-shaped, so an option value such as `-o out.txt` is never read as a host.
+url_host() {  # <word>
+  local w=$1
+  case "$w" in
+    *://*) w=${w#*://} ;;
+    www.*|*.*/*) ;;
+    *) return 1 ;;
+  esac
+  w=${w##*@}
+  w=${w%%[/?#]*}
+  case "$w" in
+    \[*\]*) w="${w%%\]*}]" ;;
+    *) w=${w%%:*} ;;
+  esac
+  case "$w" in
+    ''|*[!A-Za-z0-9.:_\[\]-]*) return 1 ;;
+  esac
+  printf '%s' "$w" | tr '[:upper:]' '[:lower:]'
+}
+
+host_is_loopback() {  # <host>
+  case "$1" in
+    localhost|127.0.0.1|'[::1]'|::1|0.0.0.0) return 0 ;;
+  esac
+  return 1
+}
+
+# The host a word from the BRIEF names. Prose names a host bare and often ends
+# the sentence on it, so this side is permissive where url_host - reading a
+# command, where an option value must never be mistaken for a host - is strict.
+brief_host_token() {  # <token>
+  local w=$1
+  case "$w" in *://*) w=${w#*://} ;; esac
+  w=${w##*@}
+  w=${w%%[/?#]*}
+  case "$w" in
+    \[*\]*) w="${w%%\]*}]" ;;
+    *) w=${w%%:*} ;;
+  esac
+  while :; do
+    case "$w" in
+      *[.,\;\!\?-]) w=${w%?} ;;
+      *) break ;;
+    esac
+  done
+  case "$w" in
+    localhost) ;;
+    \[*\]) ;;
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  case "$w" in
+    ''|.*|*[!A-Za-z0-9.:_\[\]-]*) return 1 ;;
+  esac
+  printf '%s' "$w" | tr '[:upper:]' '[:lower:]'
+}
+
+# The hosts the task's own instructions name: read once from the captain's
+# intent, firstmate's spec, and the grants block - the same text the judge is
+# shown - and compared as whole hosts, never as substrings, so a brief naming
+# api.example.com sanctions neither evil-api.example.com nor
+# api.example.com.attacker.test.
+BRIEF_HOSTS_LOADED=0 BRIEF_HOSTS=''
+load_brief_hosts() {
+  [ "$BRIEF_HOSTS_LOADED" -eq 0 ] || return 0
+  BRIEF_HOSTS_LOADED=1
+  [ -n "$BRIEF" ] && [ -r "$BRIEF" ] || return 0
+  local token host
+  while IFS= read -r token; do
+    [ -n "$token" ] || continue
+    host=$(brief_host_token "$token") || continue
+    case "$BRIEF_HOSTS" in *"|$host|"*) continue ;; esac
+    BRIEF_HOSTS="$BRIEF_HOSTS|$host|"
+  done < <({ brief_intent; printf '\n'; brief_spec; printf '\n'; grants_block; } 2>/dev/null \
+    | tr -cs 'A-Za-z0-9.:@/_[]-' '\n')
+}
+
+brief_names_host() {  # <host>
+  load_brief_hosts
+  case "$BRIEF_HOSTS" in *"|$1|"*) return 0 ;; esac
   return 1
 }
 
@@ -1464,13 +1561,27 @@ approve_plain() {  # <base>
     cat|head|tail|wc|grep|egrep|fgrep|rg|ls|pwd|echo|printf|which|type|file|stat|du|df|diff|cmp|cut|tr|jq|basename|dirname|realpath|readlink|date|true|false|test|'['|nl|od|hexdump|shasum|sha1sum|sha256sum|md5|md5sum|column|comm|paste|fold|rev|strings|whoami|uname|id|sleep|seq|ps|pgrep|shellcheck|actionlint)
       return 0 ;;
     curl|wget)
-      # A download from a guessed third-party host is one of the escalations
-      # this policy exists to keep. Only loopback stays ordinary residue.
+      # A download from a GUESSED host is one of the escalations this policy
+      # exists to keep, so a host the task's own instructions name goes down
+      # the ordinary judge path instead - a research task calling the API its
+      # brief names is routine work, not an outward action. A host that cannot
+      # be read from the word at all is treated as unnamed.
+      local host
       for ((k = 1; k < ${#E[@]}; k++)); do
-        case "${E[k]}" in
-          http://localhost*|https://localhost*|http://127.0.0.1*|https://127.0.0.1*|http://\[::1\]*|https://\[::1\]*) ;;
-          *://*|*.*/*|www.*) never_approve "$base fetches a remote host"; return 0 ;;
-        esac
+        w=${E[k]}
+        case "$w" in *://*|www.*|*.*/*) ;; *) continue ;; esac
+        if [ "${EV[k]}" = 1 ]; then
+          never_approve "$base fetches a host this policy cannot read from the command"
+          return 0
+        fi
+        host=$(url_host "$w") || {
+          never_approve "$base fetches a host this policy cannot read from the command"
+          return 0
+        }
+        host_is_loopback "$host" && continue
+        brief_names_host "$host" && continue
+        never_approve "$base fetches $host, a host the task instructions do not name"
+        return 0
       done
       no_approve "$base"
       return 0 ;;

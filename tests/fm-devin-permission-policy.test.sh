@@ -736,6 +736,63 @@ EOF
   pass "fm-devin-permission-policy: PR comments, thread resolution, guessed downloads, and rewrites always escalate"
 }
 
+# A download is outward because the HOST is guessed, not because it is a
+# download: the API a research task's own instructions name is ordinary work.
+test_downloads_are_judged_by_whether_the_brief_names_the_host() {
+  local policy dir cmd host_brief
+  host_brief='{"credential_env_files": ["~/.config/acme/acme.env"]}'
+  policy=$(new_case download-hosts 'echo "APPROVE: the brief names this API"; exit 0' "$host_brief")
+  dir=$(case_dir "$policy")
+  # The fixture's spec names one API host and the grants block names another.
+  python3 - "$dir/data/t1/brief.md" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace("Keep the change narrow.",
+              "Keep the change narrow.\nLook each firm up through the Exa search API at "
+              "https://api.exa-search.example/v1/search using the sourced key.\n"
+              "The firm register lives at register.example.org.")
+open(p, "w").write(s)
+PY
+  # A host the instructions name reaches the judge and can be approved there.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" permission-request exec "$cmd"
+    [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+      || fail "a brief-named host must reach the judge: '$cmd' got rc=$RC out=$OUT"
+    [ "$(tail -1 "$dir/state/devin-permission-log.jsonl" | jq -r .decider)" = judge ] \
+      || fail "'$cmd' must be decided by the judge, not the policy: $(tail -1 "$dir/state/devin-permission-log.jsonl")"
+  done <<'EOF'
+curl -sS -H "Authorization: Bearer x" https://api.exa-search.example/v1/search?q=acme
+curl -sSL -o out.json https://api.exa-search.example/v1/search
+wget -q -O firms.html https://register.example.org/list
+curl -s https://api.exa-search.example/v1/search | jq .results
+curl -s http://localhost:8080/health
+EOF
+  # A host the instructions do not name stays outward, whatever the judge says,
+  # and so does one this policy cannot read from the command at all.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    rm -rf "$dir/state/t1.devin-permission-pending"
+    hook "$policy" permission-request exec "$cmd"
+    [ "$RC" = 0 ] && [ -z "$OUT" ] \
+      || fail "a host the brief does not name must escalate: '$cmd' got rc=$RC out=$OUT"
+    [ "$(tail -1 "$dir/state/devin-permission-log.jsonl" | jq -r '.decider + ":" + .decision')" = policy:escalate ] \
+      || fail "'$cmd' must be escalated by policy, not routed to the judge: $(tail -1 "$dir/state/devin-permission-log.jsonl")"
+  done <<'EOF'
+curl -sL https://data-enrichment-api.example/v1/companies?q=acme
+wget https://tools.example.org/install.sh
+curl -s https://evil-api.exa-search.example/v1/search
+curl -s https://api.exa-search.example.attacker.test/v1/search
+curl -sS -o out.json https://api.exa-search.example/v1/search https://other.example/x
+EOF
+  rm -rf "$dir/state/t1.devin-permission-pending"
+  # shellcheck disable=SC2016 # the expansion is the command under test
+  hook "$policy" permission-request exec 'curl -s "https://$API_HOST/v1/search"'
+  [ -z "$OUT" ] || fail "a host held in an expansion must escalate, got: $OUT"
+  pass "fm-devin-permission-policy: a download is outward when the brief does not name its host"
+}
+
 # --- the judge prompt the verdict comes from (item 7) ------------------------
 
 test_judge_prompt_carries_the_task_contract() {
@@ -793,5 +850,6 @@ test_scratch_writes_and_task_deletes
 test_judge_retries_a_missing_verdict_once
 test_verdict_cache_reuses_approvals_only
 test_outward_actions_always_escalate
+test_downloads_are_judged_by_whether_the_brief_names_the_host
 test_judge_prompt_carries_the_task_contract
 test_missing_policy_file_still_refuses
