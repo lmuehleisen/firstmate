@@ -93,19 +93,23 @@ Two consequences worth planning around, both observed in a real spawn:
 - The model chooses its own tool.
   `gemini-3.8-flash` frequently writes files with a shell heredoc rather than the edit tool, and those writes prompt even under `accept-edits`.
 
-There is no per-session or per-project allow-list Firstmate can set to soften this.
+There is no per-session or per-project allow-list Firstmate can set to soften this, and no hook can substitute for one.
 `permissions.allow` (entries like `command(ls)`) is read only from the operator's global `settings.json`, with per-project overrides under `~/.gemini/config/projects/`; a workspace-local `.agents/settings.json` is NOT loaded, verified with the workspace trusted.
 Both usable locations are the operator's own machine state, so Firstmate does not write them.
+Verified on agy 1.2.4 and 1.2.5: a `PreToolUse` hook fires for every tool class and can `deny` with a reason the model reads, `force_ask` a prompt past the allowlist, or rewrite arguments through `overwrite`, but it cannot approve - `decision:"allow"` still shows the ordinary prompt and `permissionOverrides` grants nothing.
 An operator who wants a quieter agy worker can add their own allow rules there deliberately.
 
 Headless `-p` runs behave differently and are not the worker path: a tool needing approval is auto-denied with a stderr notice naming the missing rule, and the run still exits 0.
 
 ## Native hooks and primary integration
 
-The working hook schema is a named definition in `.agents/hooks.json`, with direct handlers for PreInvocation and Stop and matcher groups for PreToolUse.
+The working hook schema is a named definition in `.agents/hooks.json`, with direct handlers for PreInvocation and Stop and matcher groups for PreToolUse and PostToolUse.
 Hooks run from the customization directory containing that file, so the tracked primary registration addresses its executable relative to `.agents/`.
 Local hooks in a separately granted directory also execute; `../../../../../bin/fm-agy-hook.sh` uses that capability to keep worker hooks in owned state without modifying project or global configuration.
 The earlier no-hook conclusion is superseded by the positive live guards.
+agy bundles the authoritative hook spec inside the binary itself: `strings -n 4 "$(command -v agy)"` from the `# Lifecycle Hooks` line yields the full `hooks.json` reference, byte-identical across 1.2.4 and 1.2.5 - but matcher names are the observed function names (`write_to_file`, `list_dir`), not the spec's documented step-type derivation.
+One malformed entry anywhere in a `hooks.json` silently disables every hook in that file, so `fm-agy-hook.sh install-worker` validates the merged file it writes; a project-supplied `.agents/hooks.json` can still take the worker hooks down with it.
+Worker hooks additionally carry a log-only observer: every tool call appends one line to `state/agy-permission-log.jsonl`, the request record agy workers otherwise lack for permission-posture review, and `../../../../../bin/fm-agy-hook.sh` owns the schema.
 
 Primary support composes the existing startup nudge, shared pre-tool policies, and turn-end predicate through the native transport.
 `../../../../../docs/sessionstart-nudge.md` owns the nudge tier and unverified compaction boundary.
