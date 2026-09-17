@@ -347,7 +347,7 @@ family_for_basename() {
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|\
-    fm-agy-primary-live-e2e.test.sh|\
+    fm-agy-primary-live-e2e.test.sh|fm-agy-observer-live-e2e.test.sh|\
     fm-devin-signals-live-e2e.test.sh|fm-devin-permission-policy-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
@@ -660,6 +660,7 @@ list_portable_serial() {
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-agy-harness.test.sh 11000
+tests/fm-agy-observer-live-e2e.test.sh 23
 tests/fm-agy-signals-live-e2e.test.sh 23
 tests/fm-afk-contract.test.sh 3000
 tests/fm-afk-inject-e2e.test.sh 35792
@@ -1455,6 +1456,7 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-agy-harness.test.sh
       printf '%s\n' __script__:fm-agy-signals-live-e2e.test.sh
       printf '%s\n' __script__:fm-agy-primary-live-e2e.test.sh
+      printf '%s\n' __script__:fm-agy-observer-live-e2e.test.sh
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

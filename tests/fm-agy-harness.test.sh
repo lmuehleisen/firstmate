@@ -912,7 +912,7 @@ test_agy_worker_tool_observer() {
 }
 
 test_agy_worker_observer_never_blocks() {
-  local dir="$TMP_ROOT/observer-fail" state wt gen hook log out payload line big i n
+  local dir="$TMP_ROOT/observer-fail" state wt gen hook log out payload line big i n rc
   state="$dir/state" wt="$dir/worktree" hook="$ROOT/bin/fm-agy-hook.sh"
   mkdir -p "$state" "$wt"
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" agy-obsf) || fail 'arm agy-obsf'
@@ -927,6 +927,16 @@ test_agy_worker_observer_never_blocks() {
   out=$(printf '%s' "$payload" | PATH="$sans" "$hook" worker PreToolUse "$state" agy-obsf "$gen" "$wt")
   [ -z "$out" ] || fail "missing jq produced stdout: $out"
   [ ! -e "$log" ] || fail 'a refused observer path still wrote a log line'
+  # A malformed installed command (bad argument count) stays inert for the
+  # two tool events; other bad calls keep usage's loud failure.
+  out=$(printf '%s' "$payload" | "$hook" worker PreToolUse "$state" agy-obsf 2>/dev/null); rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "bad-arg PreToolUse blocked: rc=$rc out=$out"
+  out=$(printf '%s' "$payload" | "$hook" worker PostToolUse "$state" 2>/dev/null); rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "bad-arg PostToolUse blocked: rc=$rc out=$out"
+  printf '%s' "$payload" | "$hook" worker Stop "$state" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail 'bad-arg Stop lost its loud failure'
+  printf '%s' "$payload" | "$hook" worker >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail 'event-less worker call lost its loud failure'
   # An unwritable log path (a directory here) must not block either.
   mkdir "$log"
   out=$(printf '%s' "$payload" | "$hook" worker PreToolUse "$state" agy-obsf "$gen" "$wt")
@@ -949,7 +959,7 @@ test_agy_worker_observer_never_blocks() {
   n=$(wc -l < "$log" | tr -d ' ')
   [ "$n" = 9 ] || fail "concurrent appends lost lines: expected 9, got $n"
   jq -c . "$log" >/dev/null || fail 'a concurrent append corrupted the JSONL'
-  pass 'agy observer never blocks: malformed, missing-jq, unwritable, oversized, and concurrent paths stay inert'
+  pass 'agy observer never blocks: malformed, missing-jq, bad-arg, unwritable, oversized, and concurrent paths stay inert'
 }
 
 test_agy_install_worker_refuses_malformed_merge() {

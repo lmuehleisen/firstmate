@@ -54,6 +54,18 @@ shell_quote() {
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
 }
+bad_args() {
+  # agy pipes the payload on stdin for every hook call, so a terminal
+  # stdin means a human ran the script by hand and gets usage. A piped
+  # worker PreToolUse/PostToolUse call with a bad argument count -
+  # reachable only through a malformed installed command - still exits 0
+  # with empty stdout, because agy blocks the tool on any non-zero exit.
+  [ -t 0 ] && usage
+  case "$MODE:$event" in
+    worker:PreToolUse|worker:PostToolUse) exit 0 ;;
+    *) usage ;;
+  esac
+}
 
 case "$MODE" in
   install-worker|retire-worker)
@@ -117,7 +129,10 @@ case "$MODE" in
 esac
 
 event=${1:-}
-shift || usage
+shift || bad_args
+# A bad worker argument count is gated before stdin is read so a hand-run
+# call still reaches usage instead of hanging on the payload read.
+if [ "$MODE" = worker ] && [ "$#" -ne 4 ]; then bad_args; fi
 payload=$(cat 2>/dev/null || true)
 inert() {
   # Agy requires a decision when PreToolUse emits JSON; {} denies the call.
@@ -159,7 +174,6 @@ conversation=$(printf '%s' "$payload" | jq -er '.conversationId | select(type ==
 token_valid "$conversation" || inert
 
 if [ "$MODE" = worker ]; then
-  [ "$#" -eq 4 ] || usage
   state=$1 id=$2 gen=$3 wt=$4
   token_valid "$id" || inert
   token_valid "$gen" || inert
