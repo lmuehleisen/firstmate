@@ -434,11 +434,16 @@ EOF
     "Exec(bin/fm-test-run.sh)" "Exec(./bin/fm-test-run.sh)" "Exec(bash bin/fm-test-run.sh)" \
     "Exec(bin/fm-install-shellcheck.sh)" "Exec(./bin/fm-install-shellcheck.sh)" "Exec(bash bin/fm-install-shellcheck.sh)" \
     "Exec(bin/fm-install-actionlint.sh)" "Exec(./bin/fm-install-actionlint.sh)" "Exec(bash bin/fm-install-actionlint.sh)" \
-    "Write($home/data/$id)" "Write($home/state/$id.status)" \
+    "Write($home/state/$id.status)" \
     "Write($home/state/$id.inbox)" "Write(/tmp/fm-$id)"; do
     jq -e --arg e "$entry" '.permissions.allow | index($e)' "$hook_file" >/dev/null \
       || fail "permissions.allow must contain $entry"
   done
+  # The task data directory holds the brief, so it gets NO blanket Write allow:
+  # a write there must reach PermissionRequest, where the policy hook refuses
+  # the brief and approves everything else.
+  jq -e --arg e "Write($home/data/$id)" '.permissions.allow | index($e) | not' "$hook_file" >/dev/null \
+    || fail "permissions.allow must NOT blanket-allow writes to the task data directory"
 
   # Force-push spellings are denied back out of the allowed Exec(git push)
   # prefix; rm, gh repo, and blanket bypass stay unallowed.
@@ -477,6 +482,10 @@ EOF
   [ "$(jq -r .worktree "$policy")" = "$(cd "$wt" && pwd -P)" ] || fail "policy worktree must be the task worktree"
   [ "$(jq -r .status "$policy")" = "$home/state/$id.status" ] || fail "policy status must be the task status file"
   [ -x "$(jq -r .devin "$policy")" ] || fail "policy judge executable must be the resolved devin binary"
+  # The digest pin must be present even for a brief that declares no grants,
+  # because an absent digest is what makes a block the worker adds inert.
+  jq -e 'has("grants_sha")' "$policy" >/dev/null \
+    || fail "policy file must record the brief's grants digest: $(cat "$policy")"
   [ "$(jq -r '.hooks.PreToolUse[0].matcher' "$hook_file")" = '^exec$' ] || fail "PreToolUse guard must match exec"
   [ "$(jq -r '.hooks.PermissionRequest[0].matcher' "$hook_file")" = '' ] || fail "PermissionRequest must match every tool"
   cmd_pre=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$hook_file")
