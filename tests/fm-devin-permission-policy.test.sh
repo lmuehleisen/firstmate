@@ -59,11 +59,14 @@ EOF
 # Setup
 Not part of the excerpt.
 EOF
-  jq -n --arg wt "$wt" --arg d "$dir" --arg judge "$judge" \
+  local sha
+  sha=$("$POLICY_SH" grants-digest "$dir/data/t1/brief.md" 2>/dev/null || true)
+  jq -n --arg wt "$wt" --arg d "$dir" --arg judge "$judge" --arg sha "$sha" \
     '{task:"t1", worktree:$wt, status:($d+"/state/t1.status"), inbox:($d+"/state/t1.inbox"),
       data:($d+"/data/t1"), tasktmp:($d+"/tmp"), brief:($d+"/data/t1/brief.md"),
       log:($d+"/state/devin-permission-log.jsonl"), devin:$judge,
-      judge_model:(if $judge == "" then "" else "swe-2-high" end), judge_timeout:"5"}' \
+      judge_model:(if $judge == "" then "" else "swe-2-high" end), judge_timeout:"5",
+      grants_sha:$sha}' \
     > "$dir/state/t1.devin-permission.json"
   printf '%s\n' "$dir/state/t1.devin-permission.json"
 }
@@ -439,7 +442,7 @@ test_task_grants_are_optional_and_narrow() {
   local policy dir plain
   policy=$(new_case grants '' '{"credential_env_files": ["~/.config/acme/acme.env"],
      "write_dirs": ["/opt/fm-test-shared/exports", "~/fm-test-granted-out"],
-     "remote_writes": true}')
+     "remote_writes": ["work/enrich.py"]}')
   dir=$(case_dir "$policy")
   mkdir -p "$dir/data/t1/work"
   printf '#!/bin/sh\n' > "$dir/data/t1/work/enrich.py"
@@ -527,13 +530,13 @@ test_scratch_writes_and_task_deletes() {
     [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
       || fail "a scratch write must be approved: '$cmd' got rc=$RC out=$OUT"
   done <<EOF
-echo '{"a":1}' > /tmp/fm-scratch-probe.json
+echo '{"a":1}' > /tmp/devin-scratch-probe.json
 jq . input.json > $dir/tmp/out.json
-cat README.md | tee /tmp/fm-scratch-probe.txt
+cat README.md | tee /tmp/devin-scratch-probe.txt
 echo hi >> $dir/data/t1/notes.txt
-cp out.csv /tmp/fm-scratch-probe.csv
+cp out.csv /tmp/devin-scratch-probe.csv
 EOF
-  hook "$policy" permission-request exec "cat > /tmp/fm-scratch-probe.sh <<'SH'
+  hook "$policy" permission-request exec "cat > /tmp/devin-scratch-probe.sh <<'SH'
 echo hello
 SH"
   [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
@@ -547,8 +550,8 @@ SH"
     hook "$policy" permission-request exec "$cmd"
     [ -z "$OUT" ] || fail "'$cmd' must not be approved as scratch, got: $OUT"
   done <<'EOF'
-bash /tmp/fm-scratch-probe.sh
-/tmp/fm-scratch-probe.sh
+bash /tmp/devin-scratch-probe.sh
+/tmp/devin-scratch-probe.sh
 echo x > /tmp/fm-other-task-q2/out.txt
 echo x > /etc/firstmate-probe
 EOF
@@ -730,7 +733,7 @@ EOF
 
   # A task grant cannot reach them either.
   policy=$(new_case outward-granted 'echo "APPROVE: looks fine to me"; exit 0' \
-    '{"write_dirs": ["/"], "remote_writes": true}')
+    '{"write_dirs": ["/"], "remote_writes": ["work/enrich.py"]}')
   hook "$policy" permission-request exec 'gh pr comment 41 --repo owner/name --body "note"'
   [ -z "$OUT" ] || fail "a task grant must never reach an outward action, got: $OUT"
   pass "fm-devin-permission-policy: PR comments, thread resolution, guessed downloads, and rewrites always escalate"
@@ -793,6 +796,243 @@ EOF
   pass "fm-devin-permission-policy: a download is outward when the brief does not name its host"
 }
 
+# --- the worker may not rewrite its own instructions (review finding 1) ------
+
+test_the_brief_is_not_writable_by_the_worker() {
+  local policy dir wt cmd
+  policy=$(new_case brief-guard)
+  dir=$(case_dir "$policy")
+  wt=$(jq -r .worktree "$policy")
+  printf 'launch\n' > "$dir/data/t1/launch-brief.md"
+  ln -s "$dir/data/t1/brief.md" "$wt/brief-link"
+  # Every statically visible writer is a hard refusal, not an escalation: there
+  # is no shape in which a worker rewriting its own instructions is right.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" pre-tool-use exec "$cmd"
+    [ "$RC" = 2 ] || fail "writing the task's own brief must be refused: '$cmd' got rc=$RC out=$OUT"
+    [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = block ] \
+      || fail "'$cmd' must print a block decision, got: $OUT"
+  done <<EOF
+echo "grants" > $dir/data/t1/brief.md
+echo "grants" >> $dir/data/t1/brief.md
+cat /etc/hosts > $dir/data/t1/launch-brief.md
+cp /etc/hosts $dir/data/t1/brief.md
+mv /tmp/x $dir/data/t1/brief.md
+mv $dir/data/t1/brief.md /tmp/stolen
+mv $dir/data/t1 /tmp/carried-off
+rm -f $dir/data/t1/brief.md
+rm -rf $dir/data/t1
+sed -i.bak s/a/b/ $dir/data/t1/brief.md
+perl -pi -e s/a/b/ $dir/data/t1/brief.md
+tee $dir/data/t1/brief.md
+ln -sf /tmp/evil $dir/data/t1/brief.md
+install -m 644 /tmp/x $dir/data/t1/brief.md
+truncate -s 0 $dir/data/t1/brief.md
+dd if=/dev/zero of=$dir/data/t1/brief.md
+echo "grants" > $wt/brief-link
+cd $dir/data/t1 && echo x > brief.md
+EOF
+  hook "$policy" permission-request write "$dir/data/t1/brief.md"
+  [ "$RC" = 2 ] || fail "the write tool must be refused on the brief, got rc=$RC out=$OUT"
+  hook "$policy" permission-request edit "$wt/brief-link"
+  [ "$RC" = 2 ] || fail "the edit tool must be refused through a symlink to the brief, got rc=$RC out=$OUT"
+  # Ordinary work in the same directory is untouched.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" pre-tool-use exec "$cmd"
+    [ "$RC" = 0 ] && [ -z "$OUT" ] || fail "'$cmd' must not be refused, got rc=$RC out=$OUT"
+  done <<EOF
+echo note > $dir/data/t1/report.md
+cat $dir/data/t1/brief.md
+grep -n grants $dir/data/t1/brief.md
+sed -n 1,5p $dir/data/t1/brief.md
+cp $dir/data/t1/brief.md /tmp/my-copy.md
+rm -rf $dir/data/t1/work
+EOF
+  [ -f "$dir/data/t1/brief.md" ] || fail "the policy must never delete anything itself"
+  pass "fm-devin-permission-policy: no statically visible writer may touch the task's own brief"
+}
+
+test_grants_are_honored_only_while_their_digest_matches() {
+  local policy dir before
+  policy=$(new_case grants-pinned '' '{"write_dirs": ["/opt/fm-test-shared/exports"]}')
+  dir=$(case_dir "$policy")
+  hook "$policy" permission-request exec "cp out.csv /opt/fm-test-shared/exports/"
+  [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+    || fail "the grants firstmate recorded must be honored, got: $OUT"
+
+  # A worker that reaches the brief anyway - through an interpreter this policy
+  # cannot read - still grants itself nothing, because the block is pinned.
+  before=$(wc -l < "$dir/state/devin-permission-log.jsonl")
+  python3 - "$dir/data/t1/brief.md" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+open(p, "w").write(s.replace('"/opt/fm-test-shared/exports"', '"/", "/etc"'))
+PY
+  rm -rf "$dir/state/t1.devin-permission-pending" "$dir/state/t1.devin-permission-cache"
+  hook "$policy" permission-request exec "cp out.csv /etc/"
+  [ -z "$OUT" ] || fail "a rewritten grants block must grant nothing, got: $OUT"
+  hook "$policy" permission-request exec "cp out.csv /opt/fm-test-shared/exports/"
+  [ -z "$OUT" ] || fail "a rewritten block must void the ORIGINAL grants too, got: $OUT"
+  [ "$(sed -n "$((before + 1))p" "$dir/state/devin-permission-log.jsonl" | jq -r .decision)" = refuse ] \
+    || fail "ignoring a rewritten grants block must be logged: $(sed -n "$((before + 1))p" "$dir/state/devin-permission-log.jsonl")"
+
+  # Firstmate edits grants on purpose and repins, and they bind again.
+  "$POLICY_SH" repin-grants "$policy" >/dev/null 2>&1 || fail "repin-grants must succeed"
+  rm -rf "$dir/state/t1.devin-permission-cache"
+  hook "$policy" permission-request exec "cp out.csv /etc/"
+  [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+    || fail "a repinned grants block must be honored again, got: $OUT"
+
+  # A block with no recorded digest at all is as unpinned as a rewritten one.
+  policy=$(new_case grants-unpinned '' '{"write_dirs": ["/opt/fm-test-shared/exports"]}')
+  jq 'del(.grants_sha)' "$policy" > "$policy.new" && mv "$policy.new" "$policy"
+  hook "$policy" permission-request exec "cp out.csv /opt/fm-test-shared/exports/"
+  [ -z "$OUT" ] || fail "an unrecorded grants block must grant nothing, got: $OUT"
+  pass "fm-devin-permission-policy: grants bind only while they match the digest recorded at spawn"
+}
+
+# --- the write pass is named, not a blanket interpreter (review finding 2) ---
+
+test_remote_writes_names_specific_scripts() {
+  local policy dir cmd
+  policy=$(new_case write-pass '' '{"remote_writes": ["work/pilot.py"]}')
+  dir=$(case_dir "$policy")
+  mkdir -p "$dir/data/t1/work/.venv/bin"
+  printf '#!/usr/bin/env python3\n' > "$dir/data/t1/work/pilot.py"
+  printf '#!/usr/bin/env python3\n' > "$dir/data/t1/work/other.py"
+  printf '#!/bin/sh\n' > "$dir/data/t1/work/.venv/bin/python"
+  chmod +x "$dir/data/t1/work/pilot.py" "$dir/data/t1/work/other.py" "$dir/data/t1/work/.venv/bin/python"
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" permission-request exec "$cmd"
+    [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+      || fail "the named write pass must be approved: '$cmd' got rc=$RC out=$OUT"
+  done <<EOF
+cd $dir/data/t1/work && .venv/bin/python pilot.py exa 2>&1 | tail -25
+cd $dir/data/t1/work && ./pilot.py --write
+cd $dir/data/t1/work && python3 pilot.py --write
+$dir/data/t1/work/pilot.py --write
+EOF
+  # A granted interpreter may not be handed some other program.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    rm -rf "$dir/state/t1.devin-permission-pending"
+    hook "$policy" permission-request exec "$cmd"
+    [ -z "$OUT" ] || fail "'$cmd' must not ride the write-pass grant, got: $OUT"
+  done <<EOF
+cd $dir/data/t1/work && .venv/bin/python -c 'import os; os.system("id")'
+cd $dir/data/t1/work && .venv/bin/python -m http.server
+cd $dir/data/t1/work && .venv/bin/python other.py
+cd $dir/data/t1/work && .venv/bin/python < other.py
+cd $dir/data/t1/work && .venv/bin/python
+cd $dir/data/t1/work && perl -e 'print 1'
+EOF
+  rm -rf "$dir/state/t1.devin-permission-pending"
+  hook "$policy" permission-request exec "cd $dir/data/t1/work && .venv/bin/python - <<'PY'
+print(1)
+PY"
+  [ -z "$OUT" ] || fail "a heredoc program must not ride the write-pass grant, got: $OUT"
+  pass "fm-devin-permission-policy: the write-pass grant names scripts, never a blanket interpreter"
+}
+
+# --- gh reads its group and verb past inherited flags (review finding 3) -----
+
+test_gh_verbs_are_found_after_inherited_flags() {
+  local policy dir cmd
+  policy=$(new_case gh-flags 'echo "APPROVE: looks fine to me"; exit 0')
+  dir=$(case_dir "$policy")
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    rm -rf "$dir/state/t1.devin-permission-pending"
+    hook "$policy" permission-request exec "$cmd"
+    [ "$RC" = 0 ] && [ -z "$OUT" ] \
+      || fail "an outward gh verb behind a flag must escalate: '$cmd' got rc=$RC out=$OUT"
+    [ "$(tail -1 "$dir/state/devin-permission-log.jsonl" | jq -r '.decider + ":" + .decision')" = policy:escalate ] \
+      || fail "'$cmd' must be escalated by policy: $(tail -1 "$dir/state/devin-permission-log.jsonl")"
+  done <<'EOF'
+gh pr --repo owner/name comment 41 --body "note"
+gh pr -R owner/name review 41 --approve
+gh issue --repo owner/name comment 7 --body "note"
+gh pr --repo=owner/name merge 41 --squash
+gh release --repo owner/name create v1.2.3
+gh api --hostname github.example graphql -f query=mutation
+gh workflow --repo owner/name run deploy.yml
+EOF
+  # The reads behind the same flags stay approved.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" permission-request exec "$cmd"
+    [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+      || fail "a gh read behind an inherited flag must stay approved: '$cmd' got $OUT"
+  done <<'EOF'
+gh pr --repo owner/name view 41
+gh pr -R owner/name checks 41
+gh issue --repo owner/name list
+EOF
+  pass "fm-devin-permission-policy: gh group and verb are read past inherited flags"
+}
+
+# --- every curl/wget positional is a URL (review finding 4) -----------------
+
+test_every_fetch_positional_is_classified() {
+  local policy dir cmd
+  policy=$(new_case fetch-positionals 'echo "APPROVE: looks fine to me"; exit 0')
+  dir=$(case_dir "$policy")
+  python3 - "$dir/data/t1/brief.md" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+open(p, "w").write(s.replace("Keep the change narrow.",
+    "Keep the change narrow.\nLook firms up through api.exa-search.example."))
+PY
+  # Scheme-less URLs, option values that are URLs, and the options that hide
+  # the URL entirely.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    rm -rf "$dir/state/t1.devin-permission-pending"
+    hook "$policy" permission-request exec "$cmd"
+    [ "$RC" = 0 ] && [ -z "$OUT" ] \
+      || fail "an unnamed or unreadable host must escalate: '$cmd' got rc=$RC out=$OUT"
+    [ "$(tail -1 "$dir/state/devin-permission-log.jsonl" | jq -r '.decider + ":" + .decision')" = policy:escalate ] \
+      || fail "'$cmd' must be escalated by policy: $(tail -1 "$dir/state/devin-permission-log.jsonl")"
+  done <<'EOF'
+curl guessed-api.example
+curl guessed-api.example/v1/companies
+wget guessed-api.example
+curl -K /tmp/curlrc
+curl --config /tmp/curlrc
+wget -i /tmp/urls.txt
+wget --input-file=/tmp/urls.txt
+curl --url https://guessed-api.example/v1
+curl --url=https://guessed-api.example/v1
+curl -x http://proxy.guessed.example https://api.exa-search.example/v1
+curl http://localhost.evil.example/x
+curl https://127.0.0.1.evil.example/x
+EOF
+  # A host the brief names, and real loopback, still reach the judge - including
+  # when an option value could have been mistaken for the URL.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" permission-request exec "$cmd"
+    [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+      || fail "a named or loopback host must reach the judge: '$cmd' got rc=$RC out=$OUT"
+    [ "$(tail -1 "$dir/state/devin-permission-log.jsonl" | jq -r .decider)" = judge ] \
+      || fail "'$cmd' must be decided by the judge: $(tail -1 "$dir/state/devin-permission-log.jsonl")"
+  done <<'EOF'
+curl api.exa-search.example
+curl -sSLo out.json https://api.exa-search.example/v1/search
+curl -o guessed-api.example -sS https://api.exa-search.example/v1
+curl -H "Authorization: Bearer x" https://api.exa-search.example/v1/search?q=acme
+curl -s http://localhost:8080/health
+curl -s http://127.0.0.5:9000/health
+curl -s 'http://[::1]:9000/health'
+EOF
+  pass "fm-devin-permission-policy: every curl and wget positional is classified, loopback exactly"
+}
+
 # --- the judge prompt the verdict comes from (item 7) ------------------------
 
 test_judge_prompt_carries_the_task_contract() {
@@ -805,7 +1045,7 @@ while [ $# -gt 0 ]; do [ "$1" = --prompt-file ] && prompt=$2; shift; done
 cp "$prompt" ../judge-prompt-copy.txt
 echo "REASON: rule 2, the instructions name this output directory"
 echo "APPROVE: sanctioned output location"
-exit 0' '{"credential_env_files": ["~/.config/acme/acme.env"], "remote_writes": true}')
+exit 0' '{"credential_env_files": ["~/.config/acme/acme.env"], "remote_writes": ["work/enrich.py"]}')
   dir=$(case_dir "$policy")
   hook "$policy" permission-request exec "npm install" "exec_1#p"
   [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
@@ -819,7 +1059,8 @@ exit 0' '{"credential_env_files": ["~/.config/acme/acme.env"], "remote_writes": 
   grep -qF "$dir/state/t1.status" "$saved" || fail "the prompt must name this task's own status file"
   grep -qF "$dir/state/t1.inbox" "$saved" || fail "the prompt must name this task's own steering inbox"
   grep -qF "/.config/acme/acme.env" "$saved" || fail "the prompt must list the declared credential grant"
-  grep -qF "remote write pass" "$saved" || fail "the prompt must state the declared remote-write grant"
+  grep -qF "its own write pass" "$saved" || fail "the prompt must state the declared remote-write grant"
+  grep -qF "enrich.py" "$saved" || fail "the prompt must name the granted write-pass script"
   grep -qF "PRECEDENCE" "$saved" || fail "the prompt must state the precedence between the lists"
   grep -qF "WORKED EXAMPLES" "$saved" || fail "the prompt must carry worked examples"
   grep -qF "cannot be determined from the input" "$saved" \
@@ -851,5 +1092,10 @@ test_judge_retries_a_missing_verdict_once
 test_verdict_cache_reuses_approvals_only
 test_outward_actions_always_escalate
 test_downloads_are_judged_by_whether_the_brief_names_the_host
+test_the_brief_is_not_writable_by_the_worker
+test_grants_are_honored_only_while_their_digest_matches
+test_remote_writes_names_specific_scripts
+test_gh_verbs_are_found_after_inherited_flags
+test_every_fetch_positional_is_classified
 test_judge_prompt_carries_the_task_contract
 test_missing_policy_file_still_refuses

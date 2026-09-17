@@ -7,8 +7,10 @@
 # rewrite the policy mid-session.
 #
 # Usage: fm-devin-permission-policy.sh <event> <policy-file>
-#   events: pre-tool-use | permission-request | post-tool-use | stop | retire
-# The Devin hook payload arrives as JSON on stdin (retire reads none).
+#   events: pre-tool-use | permission-request | post-tool-use | stop | retire |
+#           repin-grants
+#        fm-devin-permission-policy.sh grants-digest <brief-file>
+# The Devin hook payload arrives as JSON on stdin (the last three read none).
 #
 #   pre-tool-use (matcher ^exec$)
 #       Refuses the hard-line list for the whole command string, including
@@ -49,6 +51,14 @@
 #       Any escalation still pending when the turn or session ends, or when a
 #       new prompt arrives, was not run (declined at the prompt, or cancelled by
 #       an interrupt, which fires no Stop): each is logged and closed.
+#
+#   repin-grants / grants-digest (not Devin hooks)
+#       Both belong to the digest pin described under Task grants below.
+#       grants-digest prints the digest of a brief's grants block, which
+#       bin/fm-spawn.sh records in the policy file at launch. repin-grants
+#       rewrites that recorded digest from the brief's current block, which is
+#       how FIRSTMATE re-pins grants after editing them on purpose; nothing a
+#       worker can reach runs it. Each exits 1 when it cannot do its job.
 #
 #   retire (not a Devin hook)
 #       bin/fm-spawn.sh runs this when a relaunch retires the Devin wiring, so
@@ -101,6 +111,19 @@
 #   - task-owned writes: mkdir -p / touch strictly inside the worktree, the
 #     task data directory, or the task temp root, and mv between paths inside
 #     the task steering inbox (the inbox acknowledgement)
+# The worker's own instructions. brief.md and launch-brief.md in the task data
+# directory are refused outright to every statically visible writer, because
+# the declared grants live in them and firstmate writes them, not the worker:
+# output redirections; tee, dd, truncate, patch, split and ln naming one; cp,
+# install and rsync whose DESTINATION is one (naming it as a source merely
+# reads it); mv, rm and shred naming one or a directory holding one; sed, perl
+# or ruby with an in-place flag; and the write / edit / notebook_edit tools,
+# including through a symlink, since a write through a symlink writes its
+# target. Reads are untouched. bin/fm-spawn.sh also gives the task data
+# directory no blanket Devin Write allow, so a tool write there reaches this
+# hook at all; and because an interpreter one-liner can still write the file
+# invisibly, the grants block carries its own digest pin below.
+#
 # Non-exec tools: read / grep / glob / notebook_read are approved unless an
 # argument names credential material; write / edit / notebook_edit are
 # approved for a file strictly inside the worktree (outside .git/, .devin/,
@@ -118,12 +141,21 @@
 # filter-branch, filter-repo, reset --hard/--merge/--keep, commit --amend,
 # branch -D/-M/-f, reflog expire/delete, update-ref -d), and curl or wget of a
 # host the task's own instructions do not name - the guessed third-party
-# download. A curl or wget whose every host is loopback, or appears as a whole
-# host in the captain's intent, firstmate's spec, or the grants block, is
-# ordinary residue for the judge instead, because a research task calling the
-# API its brief names is routine work. A URL-shaped word whose host cannot be
-# read (an expansion, for instance) counts as unnamed. Force pushes, gh repo,
-# and the rest of the hard-refusal list never get this far.
+# download. gh reads its group and verb past inherited flags and their values
+# (`gh pr --repo o/n comment`), so an outward verb cannot hide behind one.
+#
+# curl and wget accept scheme-less URLs, so EVERY non-option positional is
+# classified as a URL, which makes the option tables that decide what is a
+# value rather than a positional load-bearing; a short cluster is judged by its
+# last character, and an option missing from those tables is read as a bare
+# switch, which can only turn its value into a positional and escalate. A call
+# is ordinary residue for the judge only when every host it names is loopback -
+# matched exactly, so localhost.evil.example is remote - or appears as a whole
+# host in the captain's intent, firstmate's spec, or the grants block, because
+# a research task calling the API its brief names is routine work. A host the
+# policy cannot read, and -K / --config / -i / --input-file, which move the URL
+# out of the command entirely, count as unnamed. Force pushes, gh repo, and the
+# rest of the hard-refusal list never get this far.
 #
 # Recursive rm: the hard refusal now measures against three roots - the
 # worktree, the task data directory, and the task temp root - so deleting a
@@ -150,10 +182,26 @@
 #   write_dirs            extra directories that join the task write roots for
 #                         redirections, mkdir/touch, tee, cp, and the write /
 #                         edit tools. They never widen the recursive-rm roots.
-#   remote_writes         true lets a script the task itself owns - a literal
-#                         path inside its worktree or data directory - run its
-#                         write pass. Shared /tmp is deliberately excluded.
+#   remote_writes         the specific scripts the task's own write pass runs,
+#                         as paths resolved against the worktree and the task
+#                         data directory. A declared script is approved when it
+#                         runs directly, or through a plain interpreter word
+#                         whose first non-option argument physically resolves
+#                         to it; -c, -m, -e, a bare -, and any stdin
+#                         redirection disqualify the call, so a granted
+#                         interpreter can never be handed another program.
+#                         Shared /tmp is excluded, as is any path that does not
+#                         land inside those two roots.
 # At most 32 entries per list are read.
+#
+# The block is DIGEST-PINNED. The brief sits in the task data directory, so a
+# worker that reaches it anyway could otherwise grant itself anything: the
+# policy file records the digest of the block firstmate wrote, and a block that
+# does not match it - including one with no digest recorded at all - grants
+# nothing and logs one line. Only the block is pinned, not the whole brief,
+# because firstmate legitimately appends captain additions to a live brief.
+# After editing grants on purpose, firstmate re-pins with
+# `fm-devin-permission-policy.sh repin-grants <policy-file>`.
 #
 # Log: every refusal, approval, judge retry, escalation, and escalation outcome
 # appends one JSON line to the home-wide state/devin-permission-log.jsonl ({ts,
@@ -169,7 +217,8 @@
 # judge executable), judge_model (a `devin models list` id, which encodes the
 # effort level, e.g. swe-2-high or swe-2-medium; read on every call, so
 # editing it retargets a running worker's judge; empty disables the judge), and
-# judge_timeout (seconds, the bound on ONE judge attempt). Pending escalation
+# judge_timeout (seconds, the bound on ONE judge attempt), and grants_sha (the
+# digest pin described under Task grants). Pending escalation
 # markers live in the sibling directory <policy-file minus .json>-pending/, and
 # the per-task verdict cache in <policy-file minus .json>-cache/ (one file per
 # tool-plus-exact-input digest, holding the reason that approved it).
@@ -190,12 +239,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 EVENT=${1-}
 POLICY=${2-}
 case "$EVENT" in
-  pre-tool-use|permission-request|post-tool-use|stop|retire) ;;
+  pre-tool-use|permission-request|post-tool-use|stop|retire|repin-grants|grants-digest) ;;
   *)
     sed -n '9,11s/^# *//p' "${BASH_SOURCE[0]}" >&2
     exit 0
     ;;
 esac
+if [ "$EVENT" = grants-digest ]; then
+  # fm-spawn asks for the digest of a brief's grants block at launch.
+  command -v jq >/dev/null 2>&1 || exit 0
+  fm_grants_digest_of_file() {
+    local block h cmd=''
+    [ -n "${1-}" ] && [ -r "${1-}" ] || return 0
+    block=$(awk '/^```firstmate-grants[[:space:]]*$/{on=1; next} on && /^```/{exit} on{print}' \
+      "$1" 2>/dev/null | head -c 8000)
+    [ -n "$block" ] || return 0
+    if command -v shasum >/dev/null 2>&1; then cmd='shasum -a 256'
+    elif command -v sha256sum >/dev/null 2>&1; then cmd='sha256sum'
+    else return 0; fi
+    h=$(printf '%s' "$block" | $cmd 2>/dev/null) || return 0
+    h=${h%% *}
+    case "$h" in ''|*[!0-9a-f]*) return 0 ;; esac
+    printf '%s\n' "${h:0:64}"
+  }
+  fm_grants_digest_of_file "$POLICY"
+  exit 0
+fi
+
 PENDING_DIR='' CACHE_DIR=''
 case "$POLICY" in
   *.json) PENDING_DIR="${POLICY%.json}-pending" CACHE_DIR="${POLICY%.json}-cache" ;;
@@ -220,9 +290,9 @@ if [ "$EVENT" = retire ]; then
 fi
 
 PAYLOAD=
-[ "$EVENT" = retire ] || PAYLOAD=$(cat)
+case "$EVENT" in retire|repin-grants) ;; *) PAYLOAD=$(cat) ;; esac
 
-TASK='' WORKTREE='' STATUS='' INBOX='' DATA_DIR='' TASKTMP='' BRIEF='' LOG='' DEVIN='' JUDGE_MODEL='' JUDGE_TIMEOUT=''
+TASK='' WORKTREE='' STATUS='' INBOX='' DATA_DIR='' TASKTMP='' BRIEF='' LOG='' DEVIN='' JUDGE_MODEL='' JUDGE_TIMEOUT='' GRANTS_SHA=''
 if [ -n "$POLICY" ] && [ -r "$POLICY" ]; then
   {
     IFS= read -r -d '' TASK
@@ -236,7 +306,8 @@ if [ -n "$POLICY" ] && [ -r "$POLICY" ]; then
     IFS= read -r -d '' DEVIN
     IFS= read -r -d '' JUDGE_MODEL
     IFS= read -r -d '' JUDGE_TIMEOUT
-  } < <(jq -j '[.task, .worktree, .status, .inbox, .data, .tasktmp, .brief, .log, .devin, .judge_model, .judge_timeout]
+    IFS= read -r -d '' GRANTS_SHA
+  } < <(jq -j '[.task, .worktree, .status, .inbox, .data, .tasktmp, .brief, .log, .devin, .judge_model, .judge_timeout, .grants_sha]
     | map((. // "") | tostring | gsub("\u0000"; "")) | join("\u0000") + "\u0000"' "$POLICY" 2>/dev/null)
 fi
 
@@ -406,7 +477,7 @@ physical_target() {  # <word> <cwd> <follow-final>
 # Grants are read once, only from the brief path the policy file records, and
 # only from the first fenced ```firstmate-grants JSON block. Tool input never
 # reaches this: a worker cannot grant itself anything mid-session.
-GRANTS_LOADED=0 GRANT_ENV_FILES='' GRANT_WRITE_DIRS='' GRANT_REMOTE_WRITES=0
+GRANTS_LOADED=0 GRANT_ENV_FILES='' GRANT_WRITE_DIRS='' GRANT_REMOTE_SCRIPTS=
 
 # The declared grants block's raw text, parsed in exactly one place.
 grants_block() {
@@ -415,21 +486,44 @@ grants_block() {
     "$BRIEF" 2>/dev/null | head -c 8000
 }
 
+# The digest of the declared grants block, as recorded in the firstmate-owned
+# policy file under state/. The brief itself sits in the task data directory,
+# which the worker can write, so a block whose digest no longer matches the
+# recorded one grants nothing at all.
+grants_digest() {  # <block-text>
+  local h
+  [ -n "$HASH_CMD" ] || return 1
+  h=$(printf '%s' "$1" | $HASH_CMD 2>/dev/null) || return 1
+  h=${h%% *}
+  case "$h" in ''|*[!0-9a-f]*) return 1 ;; esac
+  printf '%s' "${h:0:64}"
+}
+
+GRANTS_TAMPERED=0
 load_grants() {
   [ "$GRANTS_LOADED" -eq 0 ] || return 0
   GRANTS_LOADED=1
   [ -n "$BRIEF" ] && [ -r "$BRIEF" ] || return 0
-  local block files dirs remote
+  local block files dirs remote live
   block=$(grants_block)
   [ -n "$block" ] || return 0
+  # A block with no recorded digest is as unpinned as a rewritten one: both
+  # mean firstmate never sanctioned this text, so neither grants anything.
+  live=$(grants_digest "$block") || live=''
+  if [ -z "$GRANTS_SHA" ] || [ -z "$live" ] || [ "$live" != "$GRANTS_SHA" ]; then
+    GRANTS_TAMPERED=1
+    log_record refuse policy \
+      "declared task grants ignored: the brief's grants block does not match the digest recorded at spawn" \
+      "$(one_line "$block" 300)"
+    return 0
+  fi
   {
     IFS= read -r -d '' files
     IFS= read -r -d '' dirs
     IFS= read -r -d '' remote
   } < <(printf '%s' "$block" | jq -j '
     def l(f): ((f // []) | if type == "array" then (.[0:32] | map(tostring)) else [] end | join("\n"));
-    [ l(.credential_env_files), l(.write_dirs),
-      (if (.remote_writes // false) == true then "1" else "0" end) ]
+    [ l(.credential_env_files), l(.write_dirs), l(.remote_writes) ]
     | map(gsub("\u0000"; "")) | join("\u0000") + "\u0000"' 2>/dev/null)
   local line abs
   while IFS= read -r line; do
@@ -442,7 +536,27 @@ load_grants() {
     abs=$(grant_abs "$line") || continue
     GRANT_WRITE_DIRS="$GRANT_WRITE_DIRS$abs"$'\n'
   done <<<"${dirs-}"
-  [ "${remote-0}" = 1 ] && GRANT_REMOTE_WRITES=1
+  # remote_writes names the specific scripts the task's own write pass runs, so
+  # a granted interpreter cannot be handed an arbitrary program. Each is
+  # resolved physically, and one that does not land inside the worktree or the
+  # task data directory is dropped rather than honored.
+  local root
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    # A relative script path is resolved against the worktree and the task data
+    # directory alike, because a task's write pass lives in whichever of the two
+    # holds its working material.
+    for root in '' "$WORKTREE" "$DATA_DIR"; do
+      case "$line" in /*|'~'*) [ -z "$root" ] || continue ;; *) [ -n "$root" ] || continue ;; esac
+      if [ -n "$root" ]; then abs=$(resolve_path "$line" "$root") || continue
+      else abs=$(grant_abs "$line") || continue; fi
+      abs=$(physical_target "$abs" '' 0) || continue
+      strictly_inside "$abs" "$WORKTREE" || strictly_inside "$abs" "$DATA_DIR" || continue
+      [ -e "$abs" ] || continue
+      case $'\n'"$GRANT_REMOTE_SCRIPTS" in *$'\n'"$abs"$'\n'*) continue ;; esac
+      GRANT_REMOTE_SCRIPTS="$GRANT_REMOTE_SCRIPTS$abs"$'\n'
+    done
+  done <<<"${remote-}"
   return 0
 }
 
@@ -483,15 +597,56 @@ granted_env_file() {  # <abs>
   return 1
 }
 
-# 0 when the task brief grants remote writes and <word> is a literal path to a
-# script the task itself owns (inside its worktree or data directory).
+# 0 when <word> physically resolves to a script the grants block names.
 granted_task_script() {  # <word> <expansion-flag>
-  local abs
+  local abs g
   load_grants
-  [ "$GRANT_REMOTE_WRITES" = 1 ] || return 1
+  [ -n "$GRANT_REMOTE_SCRIPTS" ] || return 1
   [ "$2" != 1 ] || return 1
-  abs=$(resolve_path "$1" "$CWD") || return 1
-  strictly_inside "$abs" "$WORKTREE" || strictly_inside "$abs" "$DATA_DIR"
+  abs=$(resolve_maybe_tilde "$1" "$2" "$CWD" 2>/dev/null) || return 1
+  abs=$(physical_target "$abs" "$CWD" 0) || return 1
+  while IFS= read -r g; do
+    [ -n "$g" ] && [ "$g" = "$abs" ] && return 0
+  done <<<"$GRANT_REMOTE_SCRIPTS"
+  return 1
+}
+
+# A plain interpreter word: one that runs the script named as its first
+# non-option argument. Anything that can carry a program inline is excluded by
+# the caller.
+plain_interpreter() {  # <base>
+  case "$1" in
+    python|python3|python2|node|ruby|perl|php|bash|sh|zsh|ksh|dash|Rscript|deno|bun) return 0 ;;
+  esac
+  return 1
+}
+
+# 0 when this segment runs one of the granted scripts: the script directly, or
+# a plain interpreter whose first non-option argument is that script. A flag
+# that can carry a program inline (-c, -m, -e, -E, a bare -), and any stdin
+# redirection that could BE the program, disqualify the whole segment.
+granted_script_invocation() {
+  local k w base0
+  load_grants
+  [ -n "$GRANT_REMOTE_SCRIPTS" ] || return 1
+  # stdin could be the program the interpreter runs.
+  for ((k = 0; k < ${#SRO[@]}; k++)); do
+    case "${SRO[k]}" in '<'|'<<'|'<<<') return 1 ;; esac
+  done
+  granted_task_script "${E[0]}" "${EV[0]}" && return 0
+  base0=${E[0]##*/}
+  plain_interpreter "$base0" || return 1
+  for ((k = 1; k < ${#E[@]}; k++)); do
+    w=${E[k]}
+    case "$w" in
+      -c|-m|-e|-E|-|--command|--eval|--module|-c*|-e*|-m*) return 1 ;;
+      --) k=$((k + 1)); break ;;
+      -*) continue ;;
+      *) break ;;
+    esac
+  done
+  [ "$k" -lt "${#E[@]}" ] || return 1
+  granted_task_script "${E[k]}" "${EV[k]}"
 }
 
 inside_grant_write_dirs() {  # <abs>
@@ -504,16 +659,14 @@ inside_grant_write_dirs() {  # <abs>
   return 1
 }
 
-# The host a URL-shaped word names, lowercased; 1 when the word names no host.
-# Only a scheme, a leading www., or a dotted name followed by a path counts as
-# URL-shaped, so an option value such as `-o out.txt` is never read as a host.
-url_host() {  # <word>
+# The host a curl or wget POSITIONAL names, lowercased; 1 when no host can be
+# read from it. Both tools accept scheme-less URLs (`curl example.com/x`, and
+# even `curl example.com`), so a positional is classified as a URL whatever its
+# shape - which is why the option tables below must be right about which words
+# are option VALUES rather than positionals.
+cmd_url_host() {  # <word>
   local w=$1
-  case "$w" in
-    *://*) w=${w#*://} ;;
-    www.*|*.*/*) ;;
-    *) return 1 ;;
-  esac
+  case "$w" in *://*) w=${w#*://} ;; esac
   w=${w##*@}
   w=${w%%[/?#]*}
   case "$w" in
@@ -521,14 +674,80 @@ url_host() {  # <word>
     *) w=${w%%:*} ;;
   esac
   case "$w" in
-    ''|*[!A-Za-z0-9.:_\[\]-]*) return 1 ;;
+    ''|*[!A-Za-z0-9.:_-]*)
+      # An IPv6 literal is the one bracketed form that is still readable.
+      case "$w" in
+        \[*\]) case "${w%\]}" in *[!A-Za-z0-9.:\[-]*) return 1 ;; esac ;;
+        *) return 1 ;;
+      esac
+      ;;
   esac
   printf '%s' "$w" | tr '[:upper:]' '[:lower:]'
 }
 
+# Loopback is matched exactly - the whole of 127.0.0.0/8, ::1, and the literal
+# name localhost - so a remote host that merely starts with one of them, such
+# as localhost.evil.example, is remote.
 host_is_loopback() {  # <host>
+  local p
+  local -a o=()
   case "$1" in
-    localhost|127.0.0.1|'[::1]'|::1|0.0.0.0) return 0 ;;
+    localhost|::1|'[::1]') return 0 ;;
+    127.*) ;;
+    *) return 1 ;;
+  esac
+  IFS=. read -r -a o <<<"$1"
+  [ "${#o[@]}" = 4 ] || return 1
+  for p in "${o[@]}"; do
+    case "$p" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$p" -le 255 ] || return 1
+  done
+  [ "${o[0]}" = 127 ]
+}
+
+# Option words whose VALUE is a separate word. A short cluster is judged by its
+# last character, so -sSLo consumes the next word the way curl does. An option
+# missing from these tables is read as a bare switch, which can only turn its
+# value into a positional and escalate - never approve something.
+fetch_opt_takes_value() {  # <base> <word>
+  local w=$2
+  case "$1" in
+    curl)
+      case "$w" in
+        --output|--data|--data-ascii|--data-binary|--data-raw|--data-urlencode|--json|--header|--request|--user|--user-agent|--referer|--cookie|--cookie-jar|--continue-at|--dump-header|--cert|--cert-type|--key|--key-type|--cacert|--capath|--form|--form-string|--max-time|--connect-timeout|--proxy-user|--speed-limit|--speed-time|--time-cond|--upload-file|--write-out|--range|--retry|--retry-delay|--retry-max-time|--limit-rate|--interface|--resolve|--connect-to|--unix-socket|--oauth2-bearer|--aws-sigv4|--trace|--trace-ascii|--stderr|--netrc-file|--pubkey|--local-port|--max-filesize|--max-redirs|--output-dir|--create-file-mode|--proto|--proto-default|--proto-redir|--quote|--noproxy|--proxy-cacert|--proxy-capath|--proxy-cert|--proxy-key|--proxy-header|--service-name|--tls13-ciphers|--ciphers|--mail-from|--mail-rcpt|--login-options|--engine|--dns-servers|--dns-interface|--hostpubmd5|--krb|--delegation|--telnet-option|--tftp-blksize|--expect100-timeout|--happy-eyeballs-timeout-ms)
+          return 0 ;;
+        --*) return 1 ;;
+      esac
+      case "${w#"${w%?}"}" in
+        o|d|H|X|u|A|e|b|c|C|D|E|F|m|y|Y|z|T|U|w|r|t|Q|P|R) return 0 ;;
+      esac
+      return 1 ;;
+    wget)
+      case "$w" in
+        --output-document|--output-file|--directory-prefix|--user-agent|--timeout|--dns-timeout|--connect-timeout|--read-timeout|--tries|--wait|--waitretry|--quota|--header|--post-data|--post-file|--body-data|--body-file|--method|--load-cookies|--save-cookies|--ca-certificate|--ca-directory|--certificate|--certificate-type|--private-key|--private-key-type|--limit-rate|--user|--password|--http-user|--http-password|--proxy-user|--proxy-password|--referer|--bind-address|--domains|--exclude-domains|--accept|--reject|--accept-regex|--reject-regex|--base|--execute|--max-redirect|--cut-dirs|--level|--report-speed|--progress|--regex-type|--local-encoding|--remote-encoding|--warc-file|--secure-protocol)
+          return 0 ;;
+        --*) return 1 ;;
+      esac
+      case "${w#"${w%?}"}" in
+        O|o|P|U|T|t|w|Q|A|R|D|I|X|e|B|l|n) return 0 ;;
+      esac
+      return 1 ;;
+  esac
+  return 1
+}
+
+# Option words whose value is itself a URL, so its host is classified too.
+fetch_opt_url_value() {  # <word>
+  case "$1" in
+    --url|--proxy|-x|--preproxy|--doh-url|--socks4|--socks4a|--socks5|--socks5-hostname) return 0 ;;
+  esac
+  return 1
+}
+
+# Option words that move the URL somewhere this policy cannot read.
+fetch_opt_hides_url() {  # <word>
+  case "$1" in
+    -K|--config|-i|--input-file) return 0 ;;
   esac
   return 1
 }
@@ -589,16 +808,111 @@ brief_names_host() {  # <host>
   return 1
 }
 
-# 0 when the path lies INSIDE some other task's temp root (fm-spawn lays these
-# out as /tmp/fm-<task-id>), which stays out of scope however wide /tmp is. A
-# scratch file named /tmp/fm-something is just a scratch file: only a path with
-# a component below an fm-<id> entry is another task's tree.
+# --- the worker's own instructions ---------------------------------------------
+
+# brief.md and launch-brief.md in the task data directory are firstmate's
+# instructions to this worker, and the declared grants live inside them, so no
+# statically visible writer may touch them. This is a hard refusal rather than
+# an escalation: there is no shape in which a worker rewriting its own brief is
+# the right call. It cannot see an interpreter one-liner, which is why the
+# grants block is digest-pinned independently.
+PROTECTED_BRIEFS_LOADED=0 PROTECTED_BRIEFS=''
+load_protected_briefs() {
+  [ "$PROTECTED_BRIEFS_LOADED" -eq 0 ] || return 0
+  PROTECTED_BRIEFS_LOADED=1
+  local cand abs
+  for cand in "$BRIEF" "${DATA_DIR:+$DATA_DIR/brief.md}" "${DATA_DIR:+$DATA_DIR/launch-brief.md}"; do
+    [ -n "$cand" ] || continue
+    abs=$(physical_target "$cand" '' 0) || abs=$(norm_abs "$cand")
+    case $'\n'"$PROTECTED_BRIEFS" in *$'\n'"$abs"$'\n'*) continue ;; esac
+    PROTECTED_BRIEFS="$PROTECTED_BRIEFS$abs"$'\n'
+  done
+}
+
+# Resolve a write target: directory components physically, then the final
+# component through its symlink chain, because writing through a symlink writes
+# what it points at.
+write_target_path() {  # <word> <expansion-flag>
+  local w abs link hops=0
+  w=$(resolve_maybe_tilde "$1" "$2" "$CWD" 2>/dev/null) || return 1
+  abs=$(physical_target "$w" "$CWD" 0) || abs=$(norm_abs "$w")
+  while [ -L "$abs" ] && [ "$hops" -lt 8 ]; do
+    link=$(readlink "$abs" 2>/dev/null) || break
+    case "$link" in
+      /*) abs=$(norm_abs "$link") ;;
+      *) abs=$(norm_abs "${abs%/*}/$link") ;;
+    esac
+    abs=$(physical_target "$abs" '' 0) || break
+    hops=$((hops + 1))
+  done
+  printf '%s' "$abs"
+}
+
+brief_protected() {  # <abs>
+  local b
+  load_protected_briefs
+  while IFS= read -r b; do
+    [ -n "$b" ] && [ "$b" = "$1" ] && return 0
+  done <<<"$PROTECTED_BRIEFS"
+  return 1
+}
+
+# 0 when <abs> is a protected brief, or a directory a move or delete would
+# carry one away with.
+brief_protected_or_parent() {  # <abs>
+  local b
+  brief_protected "$1" && return 0
+  load_protected_briefs
+  while IFS= read -r b; do
+    [ -n "$b" ] && strictly_inside "$b" "$1" && return 0
+  done <<<"$PROTECTED_BRIEFS"
+  return 1
+}
+
+# Refuse when a writer command's operands name a protected brief.
+#   <scope>           all = every operand, last = only the destination, because
+#                     `cp brief.md /tmp/copy` merely READS the brief.
+#   <include-parents> 1 also refuses a directory that contains one, which a
+#                     move or delete of the parent would carry off.
+refuse_brief_operands() {  # <scope> <include-parents>
+  local k w abs last=-1
+  local -a idx=()
+  for ((k = 1; k < ${#E[@]}; k++)); do
+    w=${E[k]}
+    case "$w" in
+      --) continue ;;
+      [io]f=*) ;;
+      -*) continue ;;
+    esac
+    idx[${#idx[@]}]=$k
+  done
+  [ "${#idx[@]}" -gt 0 ] || return 0
+  last=${idx[$((${#idx[@]} - 1))]}
+  for k in "${idx[@]}"; do
+    [ "$1" = all ] || [ "$k" = "$last" ] || continue
+    w=${E[k]}
+    case "$w" in [io]f=*) w=${w#??=} ;; esac
+    [ -n "$w" ] || continue
+    abs=$(write_target_path "$w" "${EV[k]}") || continue
+    if [ "$2" = 1 ]; then
+      brief_protected_or_parent "$abs" || continue
+    else
+      brief_protected "$abs" || continue
+    fi
+    refuse "writing this task's own instructions ($w) is refused by firstmate policy"
+    return 0
+  done
+}
+
+# 0 when the path is, or lies inside, some other task's temp root. fm-spawn
+# lays these out as /tmp/fm-<task-id>, so the whole /tmp/fm-* namespace belongs
+# to firstmate: the entry itself is foreign too, and only this task's own root
+# is in scope. A worker's scratch file goes somewhere else under /tmp.
 foreign_task_tmp() {  # <abs>
   local head mine=''
   case "$1" in /tmp/fm-*) ;; *) return 1 ;; esac
   head=${1#/tmp/}
   head=/tmp/${head%%/*}
-  [ "$1" != "$head" ] || return 1
   [ -n "$TASKTMP" ] && mine=$(norm_abs "$TASKTMP")
   [ -n "$mine" ] && { [ "$head" = "$mine" ] || strictly_inside "$head" "$mine"; } && return 1
   return 0
@@ -978,8 +1292,13 @@ analyze_segment() {
       '<'|'<<<') sensitive_text "$tgt" && no_approve "input from credential material" ;;
       '<<') ;;
       *)
-        local rabs=''
+        local rabs='' rwt=''
         rabs=$(resolve_maybe_tilde "$tgt" "$tv" "$CWD" 2>/dev/null) || rabs=''
+        rwt=$(write_target_path "$tgt" "$tv" 2>/dev/null) || rwt=''
+        if [ -n "$rwt" ] && brief_protected "$rwt"; then
+          refuse "writing this task's own instructions ($tgt) is refused by firstmate policy"
+          return 0
+        fi
         if [ "$tgt" = /dev/null ] && [ "$tv" = 0 ]; then
           :
         elif [ "$op" = '>>' ] && [ -n "$rabs" ] && [ -n "$STATUS" ] \
@@ -1151,6 +1470,31 @@ analyze_segment() {
     [ "$body_start" -ge 0 ] && [ "${#body[@]}" -gt 0 ] && queue_nested "$(shell_join "${body[@]}")" "$CWD"
     return 0
   fi
+
+  # No statically visible writer may touch this worker's own instructions.
+  case "$base" in
+    cp|install|rsync) refuse_brief_operands last 0 ;;
+    mv|rm|shred) refuse_brief_operands all 1 ;;
+    ln|dd|truncate|patch|tee|split) refuse_brief_operands all 0 ;;
+  esac
+  [ -n "$REFUSE_REASON" ] && return 0
+  case "$base" in
+    sed|perl|ruby|gsed)
+      local ii
+      for ((ii = 1; ii < count; ii++)); do
+        case "${E[ii]}" in
+          --in-place|--in-place=*) refuse_brief_operands all 0; break ;;
+          --*) ;;
+          -*i*) refuse_brief_operands all 0; break ;;
+        esac
+      done
+      [ -n "$REFUSE_REASON" ] && return 0
+      ;;
+  esac
+
+  # The task's own declared write pass, whether run directly or through a
+  # plain interpreter word.
+  granted_script_invocation && return 0
 
   case "$base" in
     git) analyze_git; return 0 ;;
@@ -1392,8 +1736,32 @@ analyze_git() {
   esac
 }
 
+# gh accepts inherited flags before and between its group and verb
+# (`gh pr --repo o/n comment`), so neither can be read off a fixed position.
+# A flag this parser does not know is treated as a bare switch, which at worst
+# shifts the verb to a word no group recognizes - an escalation, never a
+# silent approval.
+gh_words() {  # fills GH_SUB and GH_VERB
+  local k=1 w n=0
+  GH_SUB='' GH_VERB=''
+  while [ "$k" -lt "${#E[@]}" ] && [ "$n" -lt 2 ]; do
+    w=${E[k]}
+    case "$w" in
+      --) k=$((k + 1)); continue ;;
+      --repo|--hostname|-R) k=$((k + 2)); continue ;;
+      -*=*|--*) k=$((k + 1)); continue ;;
+      -*) k=$((k + 1)); continue ;;
+    esac
+    n=$((n + 1))
+    if [ "$n" = 1 ]; then GH_SUB=$w; else GH_VERB=$w; fi
+    k=$((k + 1))
+  done
+}
+
 analyze_gh() {
-  local sub=${E[1]-} verb=${E[2]-} w has_repo=0
+  local w has_repo=0
+  gh_words
+  local sub=$GH_SUB verb=$GH_VERB
   for w in "${E[@]}"; do
     case "$w" in --repo|--repo=*|-R|-R?*) has_repo=1 ;; esac
   done
@@ -1431,7 +1799,7 @@ analyze_gh() {
     auth) [ "$verb" = status ] || no_approve "gh auth $verb" ;;
     api)
       local k
-      for ((k = 2; k < ${#E[@]}; k++)); do
+      for ((k = 1; k < ${#E[@]}; k++)); do
         w=${E[k]}
         case "$w" in
           -X|--method) [ "${E[k+1]-}" = GET ] || never_approve "gh api with the ${E[k+1]-} method writes to the forge" ;;
@@ -1548,10 +1916,6 @@ approve_plain() {  # <base>
       /bin|/usr/bin|/usr/local/bin|/opt/homebrew/bin|/usr/sbin|/sbin) ;;
       *)
         if runner_path "${E[0]}" "${EV[0]}"; then return 0; fi
-        # With the task's remote-write grant, a script the task itself owns -
-        # under its worktree or data directory - may run its write pass. Shared
-        # /tmp is deliberately excluded: anything there is not the task's own.
-        if granted_task_script "${E[0]}" "${EV[0]}"; then return 0; fi
         no_approve "unrecognized executable ${E[0]}"
         return 0
         ;;
@@ -1564,17 +1928,42 @@ approve_plain() {  # <base>
       # A download from a GUESSED host is one of the escalations this policy
       # exists to keep, so a host the task's own instructions name goes down
       # the ordinary judge path instead - a research task calling the API its
-      # brief names is routine work, not an outward action. A host that cannot
-      # be read from the word at all is treated as unnamed.
-      local host
+      # brief names is routine work. Every positional is a URL, and a host this
+      # policy cannot read is treated as unnamed.
+      local host classify opts_done=0
       for ((k = 1; k < ${#E[@]}; k++)); do
-        w=${E[k]}
-        case "$w" in *://*|www.*|*.*/*) ;; *) continue ;; esac
-        if [ "${EV[k]}" = 1 ]; then
-          never_approve "$base fetches a host this policy cannot read from the command"
-          return 0
+        w=${E[k]} classify=0
+        if [ "$opts_done" = 0 ]; then
+          case "$w" in
+            --) opts_done=1; continue ;;
+            -*)
+              if fetch_opt_hides_url "$w" || fetch_opt_hides_url "${w%%=*}"; then
+                never_approve "$base is given its URL by $w, which this policy cannot read"
+                return 0
+              fi
+              case "$w" in
+                *=*)
+                  fetch_opt_url_value "${w%%=*}" && { w=${w#*=}; classify=1; }
+                  ;;
+                *)
+                  if fetch_opt_url_value "$w"; then
+                    k=$((k + 1))
+                    [ "$k" -lt "${#E[@]}" ] || break
+                    w=${E[k]} classify=1
+                  elif fetch_opt_takes_value "$base" "$w"; then
+                    k=$((k + 1)); continue
+                  fi
+                  ;;
+              esac
+              [ "$classify" = 1 ] || continue
+              ;;
+            *) classify=1 ;;
+          esac
+        else
+          classify=1
         fi
-        host=$(url_host "$w") || {
+        [ "$classify" = 1 ] || continue
+        host=$(cmd_url_host "$w") || {
           never_approve "$base fetches a host this policy cannot read from the command"
           return 0
         }
@@ -1799,8 +2188,13 @@ evaluate_tool() {  # non-exec tools: sets NOT_APPROVABLE
         && no_approve "$TOOL of a credential file this task may only source"
       ;;
     write|edit|notebook_edit)
-      local abs rel
+      local abs rel wt_abs
       [ -n "$FILE_PATH" ] || { no_approve "$TOOL without a file path"; return 0; }
+      wt_abs=$(CWD=$WORKTREE write_target_path "$FILE_PATH" 0 2>/dev/null) || wt_abs=''
+      if [ -n "$wt_abs" ] && brief_protected "$wt_abs"; then
+        refuse "writing this task's own instructions ($FILE_PATH) is refused by firstmate policy"
+        return 0
+      fi
       sensitive_text "$FILE_PATH" && { no_approve "$TOOL of credential material"; return 0; }
       granted_env_file_text "$FILE_PATH" \
         && { no_approve "$TOOL of a credential file this task may only source"; return 0; }
@@ -1840,9 +2234,15 @@ grants_excerpt() {
     && out="${out}credential env files this task may source (never print): $(printf '%s' "$GRANT_ENV_FILES" | tr '\n' ' ')"$'\n'
   [ -n "$GRANT_WRITE_DIRS" ] \
     && out="${out}extra write directories this task is granted: $(printf '%s' "$GRANT_WRITE_DIRS" | tr '\n' ' ')"$'\n'
-  [ "$GRANT_REMOTE_WRITES" = 1 ] \
-    && out="${out}this task is granted its own remote write pass (its own scripts may write to the service it exists to update)"$'\n'
-  [ -n "$out" ] || out='none declared'$'\n'
+  [ -n "$GRANT_REMOTE_SCRIPTS" ] \
+    && out="${out}scripts this task may run as its own write pass against the service it exists to update: $(printf '%s' "$GRANT_REMOTE_SCRIPTS" | tr '\n' ' ')"$'\n'
+  if [ -z "$out" ]; then
+    if [ "$GRANTS_TAMPERED" = 1 ]; then
+      out='none in force: the brief carries a grants block that does not match the one recorded for this task, so it was ignored'$'\n'
+    else
+      out='none declared'$'\n'
+    fi
+  fi
   printf '%s' "$out"
 }
 
@@ -2087,6 +2487,23 @@ case "$EVENT" in
       [ -f "$marker" ] || continue
       close_pending "$marker" not-run "the escalated call did not run (declined or cancelled at the prompt)"
     done
+    exit 0
+    ;;
+  repin-grants)
+    # Firstmate edits a live brief's grants on purpose; this records the new
+    # digest so the block is honored again. Nothing a worker can reach runs it.
+    [ -n "$POLICY" ] && [ -r "$POLICY" ] && [ -w "$POLICY" ] || {
+      echo "fm-devin-permission-policy: cannot repin grants: $POLICY is not writable" >&2
+      exit 1
+    }
+    new_sha=$(grants_digest "$(grants_block)" 2>/dev/null || true)
+    if ! jq --arg sha "$new_sha" '.grants_sha = $sha' "$POLICY" > "$POLICY.repin" 2>/dev/null \
+      || ! mv "$POLICY.repin" "$POLICY"; then
+      rm -f "$POLICY.repin"
+      echo "fm-devin-permission-policy: cannot repin grants: $POLICY could not be rewritten" >&2
+      exit 1
+    fi
+    echo "repinned grants digest for ${TASK:-this task}: ${new_sha:-(no grants block)}"
     exit 0
     ;;
   retire)
