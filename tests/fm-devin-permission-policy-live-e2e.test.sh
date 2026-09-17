@@ -11,7 +11,8 @@
 #   3. A silent PermissionRequest falls through to Devin's approval menu while
 #      the escalation names the command in the status file, and approving at
 #      the prompt fires PostToolUse for the same tool_use_id, closing it.
-#   4. A headless `devin -p` first judge returns a parseable one-line verdict.
+#   4. A headless `devin -p` first judge returns a parseable verdict line, which
+#      the prompt asks it to precede with a REASON line.
 set -u
 
 # shellcheck source=tests/lib.sh

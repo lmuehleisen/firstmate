@@ -102,7 +102,7 @@ state/               runtime records and signals; gitignored
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.gemini-settings.json  firstmate-owned per-task Gemini settings carrying the busy-state and turn-end hooks, reached through GEMINI_CLI_SYSTEM_SETTINGS_PATH so nothing is written into the project's own .gemini/; removed by teardown
-  <id>.devin-permission.json <id>.devin-permission-pending/  firstmate-owned per-task Devin permission policy file and pending-escalation markers read by bin/fm-devin-permission-policy.sh's hooks; removed by teardown
+  <id>.devin-permission.json <id>.devin-permission-pending/ <id>.devin-permission-cache/  firstmate-owned per-task Devin permission policy file, pending-escalation markers, and approved-verdict cache read by bin/fm-devin-permission-policy.sh's hooks; removed by teardown
   devin-permission-log.jsonl  home-wide append-only log of every Devin permission refusal, approval, judge verdict, and escalation outcome (bin/fm-devin-permission-policy.sh); safe to delete
   <id>.muse-session  muse busy-source binding (sessions root plus task worktree) written by fm-spawn; removed by teardown
   <id>.cursor-session  cursor busy-source binding (projects root, task worktree, prior conversations) written by fm-spawn; removed by teardown

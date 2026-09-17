@@ -7,7 +7,11 @@
 # own ask plus the context needed to read it, including the substance of any
 # report, decision, or PR the ask refers to) and `{FIRSTMATE_SPEC}`
 # under `## Firstmate spec` (build instructions, which are never the captain's
-# intent). bin/fm-dod-lib.sh owns the delivery and verification contract;
+# intent). A Firstmate spec may also carry one optional fenced
+# ```firstmate-grants JSON block declaring the task's own credential env files,
+# extra write directories, and remote-write flag; only Devin workers read it
+# and bin/fm-devin-permission-policy.sh's header owns its schema.
+# bin/fm-dod-lib.sh owns the delivery and verification contract;
 # bin/fm-spawn.sh refuses leftover placeholders. Secondmate
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external

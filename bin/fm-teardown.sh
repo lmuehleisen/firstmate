@@ -3523,8 +3523,9 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" "$STATE/$ID.treehouse-lease"
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.devin-permission.json" "$STATE/.$ID.branch-outcome-index"
-# Devin permission-policy escalation markers (bin/fm-devin-permission-policy.sh).
-rm -rf "$STATE/$ID.devin-permission-pending"
+# Devin permission-policy escalation markers and per-task verdict cache
+# (bin/fm-devin-permission-policy.sh).
+rm -rf "$STATE/$ID.devin-permission-pending" "$STATE/$ID.devin-permission-cache"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
