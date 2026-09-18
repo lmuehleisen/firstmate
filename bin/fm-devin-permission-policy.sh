@@ -154,10 +154,15 @@
 # wget --post-* / --body-*), no non-GET/HEAD method (-X / --request / wget
 # --method), no option that hides the request in a file this policy cannot
 # read (curl -K / --config, wget -i / --input-file / -e / --execute), no netrc
-# credentials (-n / --netrc*), and no expansion or glob in its arguments. The
-# write roots for a download are the worktree except under bin/, .git/,
-# .devin/, or .claude/, the task data directory, the task temp root, a granted
-# write directory, or /tmp scratch.
+# credentials (-n / --netrc*), no option that reads a local file into the
+# request (an @file value such as -H @file or f=@file, a cookie file as
+# -b/--cookie without name=value, certificate and key material as --cacert /
+# --cert / --key / --load-cookies and friends), and no expansion or glob in
+# its arguments. The write roots for a download are the worktree except under
+# bin/, .git/, .devin/, or .claude/, the task data directory, the task temp
+# root, a granted write directory, or /tmp scratch, measured where an existing
+# destination or its ancestors physically resolve - a symlink inside the roots
+# can still land the write outside them.
 #
 # Everything else a fetch can do is the never-approve class - the download
 # that does something: output piped into sh, bash, zsh, python, perl, ruby,
@@ -166,12 +171,13 @@
 # written outside the write roots or into an agent or git configuration path;
 # a fetched file run, sourced, or given an executable bit later in the same
 # command; an explicit file mode (--create-file-mode); a body or non-GET
-# method; a hidden request file; or a URL outside http(s). Both tools accept
-# scheme-less URLs, so every non-option positional is classified as a URL,
-# which makes the option tables that decide what is a value rather than a
-# positional load-bearing; an option missing from those tables is read as a
-# bare switch. Force pushes, gh repo, and the rest of the hard-refusal list
-# never get this far.
+# method; a hidden request file or a local file read into the request; or a
+# URL outside http(s). Both tools accept scheme-less URLs, so every non-option
+# positional is classified as a URL, which makes the option tables that decide
+# what is a value rather than a positional load-bearing; an option missing
+# from those tables fails closed to the captain rather than guessing at its
+# value. Force pushes, gh repo, and the rest of the hard-refusal list never
+# get this far.
 #
 # Recursive rm: the hard refusal now measures against three roots - the
 # worktree, the task data directory, and the task temp root - so deleting a
@@ -695,12 +701,34 @@ FETCH_OPT_KIND=switch
 
 # 0 when <abs> may receive fetched bytes: inside the task write roots and not
 # under bin/, .git/, .devin/, .claude/, or an agent or git configuration path.
+# A lexical path inside the roots is not enough: existing ancestors resolve
+# through symlinks, and a write through a symlink at the final component
+# lands on its target, so the physical destination is checked the same way.
 fetch_dest_ok() {  # <abs>
   write_dest_ok "$1" || return 1
   case "$1" in
     */bin|*/bin/*|*/.git|*/.git/*|*/.devin|*/.devin/*|*/.claude|*/.claude/*|*/.gitconfig|*/.git-credentials)
       return 1 ;;
   esac
+  local phys='' tgt='' resolved='' hops=0
+  phys=$(physical_target "$1" '' 0 2>/dev/null) || phys=$1
+  while [ -L "$phys" ] && [ "$hops" -lt 10 ]; do
+    tgt=$(readlink "$phys" 2>/dev/null) || break
+    case "$tgt" in
+      /*) phys=$tgt ;;
+      *) phys="${phys%/*}/$tgt" ;;
+    esac
+    phys=$(norm_abs "$phys")
+    resolved=$(physical_target "$phys" '' 0 2>/dev/null) && phys=$resolved
+    hops=$((hops + 1))
+  done
+  if [ "$phys" != "$1" ]; then
+    write_dest_ok "$phys" || return 1
+    case "$phys" in
+      */bin|*/bin/*|*/.git|*/.git/*|*/.devin|*/.devin/*|*/.claude|*/.claude/*|*/.gitconfig|*/.git-credentials)
+        return 1 ;;
+    esac
+  fi
   return 0
 }
 
@@ -754,7 +782,7 @@ string_emits_fetch() {  # <string>
         read -r -a words <<<"$stage"
         for w in ${words[@]+"${words[@]}"}; do
           case "$w" in
-            *'>'*|-o*|-O*|--output*|--remote-name*|--remote-header*|--dump-header*|--save-cookies*|--warc-file*|--trace*|--stderr*|--cookie-jar*|--directory-prefix*)
+            *'>'*|-o*|-O*|--output*|--remote-name*|--remote-header*|--dump-header*|--save-cookies*|--warc-file*|--trace*|--stderr*|--cookie-jar*|--directory-prefix*|--libcurl*|--etag-save*|--alt-svc*|--hsts*|--append-output*)
               has_out=1 ;;
           esac
         done
@@ -801,12 +829,14 @@ fetch_url() {  # <word>
 # value to consume), url (the fetched URL), method (must read GET or HEAD),
 # body, hide (the request moved into a file this policy cannot read), outfile
 # / outdir (output destinations), cwdout (writes into the output directory),
-# mode (sets the fetched file's mode), or netrc (ambient credentials to the
-# host). An option missing from these tables reads as a bare switch, which
-# can only turn its value into a positional and escalate - never approve
-# something.
+# infile (a local file read into the request - cookie, certificate, or key
+# material is not a read-only lookup), cookie (-b/--cookie, where only a
+# name=value pair is inline), mode (sets the fetched file's mode), netrc
+# (ambient credentials to the host), or unknown. An option missing from these
+# tables fails closed to the captain: an unknown option's value is never
+# guessed at, since it could name a file, a method, or a body.
 fetch_long_kind() {  # <base> <option>
-  FETCH_OPT_KIND=switch
+  FETCH_OPT_KIND=unknown
   case "$1" in
     curl)
       case "$2" in
@@ -816,11 +846,16 @@ fetch_long_kind() {  # <base> <option>
         --data|--data-*|--json|--form|--form-*|--upload-file|--request-body) FETCH_OPT_KIND=body ;;
         --create-file-mode) FETCH_OPT_KIND=mode ;;
         --netrc|--netrc-optional|--netrc-file) FETCH_OPT_KIND=netrc ;;
-        --output) FETCH_OPT_KIND=outfile ;;
+        --output|--dump-header|--cookie-jar|--trace|--trace-ascii|--stderr|--libcurl|--etag-save|--alt-svc|--hsts) FETCH_OPT_KIND=outfile ;;
         --output-dir) FETCH_OPT_KIND=outdir ;;
-        --dump-header|--cookie-jar|--trace|--trace-ascii|--stderr) FETCH_OPT_KIND=outfile ;;
         --remote-name|--remote-header-name|--remote-name-all) FETCH_OPT_KIND=cwdout ;;
-        --*) fetch_opt_takes_value "$1" "$2" && FETCH_OPT_KIND=value ;;
+        --cacert|--capath|--cert|--key|--pubkey|--crlfile|--random-file|--egd-file|--unix-socket|--abstract-unix-socket|--proxy-cacert|--proxy-capath|--proxy-cert|--proxy-key|--proxy-crlfile|--etag-load) FETCH_OPT_KIND=infile ;;
+        --cookie) FETCH_OPT_KIND=cookie ;;
+        --*) if fetch_opt_takes_value "$1" "$2"; then
+               FETCH_OPT_KIND=value
+             elif fetch_opt_is_switch "$1" "$2"; then
+               FETCH_OPT_KIND=switch
+             fi ;;
       esac ;;
     wget)
       case "$2" in
@@ -828,15 +863,20 @@ fetch_long_kind() {  # <base> <option>
         --method) FETCH_OPT_KIND=method ;;
         --post-data|--post-file|--body-data|--body-file) FETCH_OPT_KIND=body ;;
         --netrc) FETCH_OPT_KIND=netrc ;;
-        --output-document|--output-file|--save-cookies|--warc-file) FETCH_OPT_KIND=outfile ;;
-        --directory-prefix) FETCH_OPT_KIND=outdir ;;
-        --*) fetch_opt_takes_value "$1" "$2" && FETCH_OPT_KIND=value ;;
+        --output-document|--output-file|--save-cookies|--warc-file|--append-output) FETCH_OPT_KIND=outfile ;;
+        --directory-prefix|--warc-tempdir) FETCH_OPT_KIND=outdir ;;
+        --load-cookies|--ca-certificate|--ca-directory|--certificate|--private-key|--random-file|--egd-file|--crl-file) FETCH_OPT_KIND=infile ;;
+        --*) if fetch_opt_takes_value "$1" "$2"; then
+               FETCH_OPT_KIND=value
+             elif fetch_opt_is_switch "$1" "$2"; then
+               FETCH_OPT_KIND=switch
+             fi ;;
       esac ;;
   esac
 }
 
 fetch_short_kind() {  # <base> <char>
-  FETCH_OPT_KIND=switch
+  FETCH_OPT_KIND=unknown
   case "$1" in
     curl)
       case "$2" in
@@ -846,14 +886,19 @@ fetch_short_kind() {  # <base> <char>
         n) FETCH_OPT_KIND=netrc ;;
         o|D|c) FETCH_OPT_KIND=outfile ;;
         O|J) FETCH_OPT_KIND=cwdout ;;
-        H|u|A|e|b|C|E|m|y|Y|z|U|w|r|t|Q|P|R|x) FETCH_OPT_KIND=value ;;
+        E) FETCH_OPT_KIND=infile ;;
+        b) FETCH_OPT_KIND=cookie ;;
+        A|C|e|H|m|P|Q|r|u|U|w|x|y|Y|z) FETCH_OPT_KIND=value ;;
+        '#'|0|1|2|3|4|6|:|a|B|f|g|G|h|i|I|j|k|l|L|M|N|p|q|R|s|S|v|V|Z) FETCH_OPT_KIND=switch ;;
       esac ;;
     wget)
       case "$2" in
         i|e) FETCH_OPT_KIND=hide ;;
-        o|O) FETCH_OPT_KIND=outfile ;;
+        a|o|O) FETCH_OPT_KIND=outfile ;;
         P) FETCH_OPT_KIND=outdir ;;
-        U|T|t|w|Q|A|R|D|I|X|B|l|n) FETCH_OPT_KIND=value ;;
+        U|T|t|w|Q|A|R|D|I|X|B|l) FETCH_OPT_KIND=value ;;
+        b|c|d|E|F|h|k|K|m|N|p|q|r|s|S|v|x) FETCH_OPT_KIND=switch ;;
+        n) FETCH_OPT_KIND=nfamily ;;
       esac ;;
   esac
 }
@@ -865,13 +910,34 @@ fetch_opt_takes_value() {  # <base> <word>
   case "$1" in
     curl)
       case "$w" in
-        --header|--user|--user-agent|--referer|--cookie|--continue-at|--cert|--cert-type|--key|--key-type|--cacert|--capath|--max-time|--connect-timeout|--proxy|--proxy-user|--speed-limit|--speed-time|--time-cond|--write-out|--range|--retry|--retry-delay|--retry-max-time|--limit-rate|--interface|--resolve|--connect-to|--unix-socket|--oauth2-bearer|--aws-sigv4|--pubkey|--local-port|--max-filesize|--max-redirs|--proto|--proto-default|--proto-redir|--quote|--noproxy|--proxy-cacert|--proxy-capath|--proxy-cert|--proxy-key|--proxy-header|--preproxy|--doh-url|--socks4|--socks4a|--socks5|--socks5-hostname|--service-name|--tls13-ciphers|--ciphers|--mail-from|--mail-rcpt|--login-options|--engine|--dns-servers|--dns-interface|--hostpubmd5|--krb|--delegation|--telnet-option|--tftp-blksize|--expect100-timeout|--happy-eyeballs-timeout-ms|--request-target)
+        --header|--user|--user-agent|--referer|--continue-at|--cert-type|--key-type|--max-time|--connect-timeout|--proxy|--proxy-user|--proxy-password|--speed-limit|--speed-time|--time-cond|--write-out|--range|--retry|--retry-delay|--retry-max-time|--limit-rate|--interface|--resolve|--connect-to|--oauth2-bearer|--aws-sigv4|--local-port|--max-filesize|--max-redirs|--proto|--proto-default|--proto-redir|--quote|--noproxy|--proxy-header|--preproxy|--doh-url|--socks4|--socks4a|--socks5|--socks5-hostname|--service-name|--tls13-ciphers|--ciphers|--mail-from|--mail-rcpt|--login-options|--engine|--dns-servers|--dns-interface|--krb|--delegation|--telnet-option|--tftp-blksize|--expect100-timeout|--happy-eyeballs-timeout-ms|--request-target|--keepalive-time|--keepalive-cnt|--ip-tos|--vlan-priority|--ftp-account|--ftp-method|--ftp-alternative-to-user|--gssapi-delegation|--proxy-doh-url|--proxy-tls13-ciphers|--proxy-ciphers|--proxy-tlspassword|--proxy-tlsauthtype|--tlsauthtype|--tlspassword|--proxy-service-name|--curves|--sigalg|--ech|--signature-algorithms|--hostpubmd5|--proxy-tls-max|--tls-max)
           return 0 ;;
       esac
       return 1 ;;
     wget)
       case "$w" in
-        --user-agent|--timeout|--dns-timeout|--connect-timeout|--read-timeout|--tries|--wait|--waitretry|--quota|--header|--load-cookies|--ca-certificate|--ca-directory|--certificate|--certificate-type|--private-key|--private-key-type|--limit-rate|--user|--password|--http-user|--http-password|--proxy-user|--proxy-password|--referer|--bind-address|--domains|--exclude-domains|--accept|--reject|--accept-regex|--reject-regex|--base|--max-redirect|--cut-dirs|--level|--report-speed|--progress|--regex-type|--local-encoding|--remote-encoding|--secure-protocol)
+        --user-agent|--timeout|--dns-timeout|--connect-timeout|--read-timeout|--tries|--wait|--waitretry|--quota|--header|--limit-rate|--user|--password|--http-user|--http-password|--ftp-user|--ftp-password|--proxy-user|--proxy-password|--referer|--bind-address|--domains|--exclude-domains|--accept|--reject|--accept-regex|--reject-regex|--base|--max-redirect|--cut-dirs|--level|--report-speed|--progress|--regex-type|--local-encoding|--remote-encoding|--secure-protocol|--prefer-family|--include-directories|--exclude-directories|--follow-tags|--ignore-tags|--restrict-file-names|--retry-on-http-error|--default-page|--dot-style|--warc-header|--compression|--private-key-type|--certificate-type|--proxy)
+          return 0 ;;
+      esac
+      return 1 ;;
+  esac
+  return 1
+}
+
+# Long-option words that take NO value, used by fetch_long_kind so anything
+# outside both lists falls closed instead of reading as a bare switch.
+fetch_opt_is_switch() {  # <base> <word>
+  local w=$2
+  case "$1" in
+    curl)
+      case "$w" in
+        --silent|--show-error|--verbose|--version|--help|--manual|--location|--location-trusted|--fail|--fail-early|--fail-with-body|--include|--head|--insecure|--proxy-insecure|--globoff|--get|--junk-session-cookies|--no-buffer|--no-progress-meter|--progress-bar|--progress-meter|--ipv4|--ipv6|--http1.0|--http1.1|--http2|--http2-prior-knowledge|--http3|--http3-only|--compressed|--proxytunnel|--remote-time|--disable|--list-only|--append|--use-ascii|--ssl|--sslv2|--sslv3|--tlsv1|--tlsv1.0|--tlsv1.1|--tlsv1.2|--tlsv1.3|--ssl-reqd|--raw|--path-as-is|--create-dirs|--remove-on-error|--no-clobber|--clobber|--retry-connrefused|--retry-all-errors|--parallel|--parallel-immediate|--ignore-content-length|--ftp-skip-pasv-ip|--ftp-create-dirs|--keepalive|--no-keepalive|--haproxy-protocol|--tcp-nodelay|--tcp-fastopen|--styled-output|--no-styled-output|--suppress-connect-headers|--xattr|--no-sessionid|--sessionid|--basic|--digest|--ntlm|--ntlm-wb|--negotiate|--anyauth|--no-alpn|--no-npn|--cert-status|--ssl-auto-client-cert|--proxy-ssl-auto-client-cert|--doh-insecure|--doh-cert-status|--next|--tr-encoding|--disable-epsv|--disable-eprt|--ftp-ssl-ccc|--ftp-ssl-control|--ftp-ssl-reqd|--ftp-pasv|--ssl-revoke-best-effort|--skip-existing|--no-ssl|--proxy-negotiate|--proxy-basic|--proxy-digest|--proxy-ntlm|--proxy-anyauth|--socks5-basic|--socks5-gssapi|--no-socks5-gssapi-nec|--no-dividend|--same-port|--no-ssl-revoke)
+          return 0 ;;
+      esac
+      return 1 ;;
+    wget)
+      case "$w" in
+        --quiet|--verbose|--no-verbose|--debug|--timestamping|--no-clobber|--continue|--no-directories|--no-parent|--no-host-directories|--recursive|--page-requisites|--convert-links|--backup-converted|--mirror|--adjust-extension|--force-directories|--force-html|--background|--server-response|--save-headers|--help|--version|--no-check-certificate|--check-certificate|--https-only|--no-hsts|--no-http-keep-alive|--no-cache|--no-cookies|--no-dns-cache|--no-iri|--ignore-length|--ignore-case|--random-wait|--no-remove-listing|--preserve-permissions|--retr-symlinks|--spider|--delete-after|--content-disposition|--no-content-disposition|--content-on-error|--trust-server-names|--auth-no-challenge|--follow-ftp|--span-hosts|--relative|--inet4-only|--inet6-only|--retry-connrefused|--retry-on-host-error|--keep-badhash|--keep-session-cookies|--unlink|--no-glob|--strict-comments|--no-warc-keep-log|--no-warc-compression|--no-warc-dedup|--warc-cdx|--ask-password|--use-askpass|--show-progress|--no-proxy|--no-dns-ipv4|--no-dns-ipv6|--no-ftps|--no-use-sqlite|--convert-file-only)
           return 0 ;;
       esac
       return 1 ;;
@@ -889,6 +955,9 @@ fetch_opt_value() {  # <kind> <value> <expansion-or-glob flag>
   case "$kind" in
     switch|cwdout) return 0 ;;
     value)
+      case "$v" in
+        @*|*=@*) never_approve "$base reads a local file into the request ($v)"; return 1 ;;
+      esac
       if [ "$vev" = 1 ]; then
         case "$v" in
           "$TILDE"/*) ;;
@@ -896,6 +965,11 @@ fetch_opt_value() {  # <kind> <value> <expansion-or-glob flag>
         esac
       fi
       return 0 ;;
+    infile) never_approve "$base reads a local file into the request (${v:-a file})"; return 1 ;;
+    cookie)
+      [ "$vev" = 1 ] && { never_approve "$base option value is an expansion this policy cannot read"; return 1; }
+      case "$v" in *=*) return 0 ;; esac
+      never_approve "$base reads a cookie file into the request"; return 1 ;;
     url)
       [ "$vev" = 1 ] && { never_approve "$base takes its URL from an expansion this policy cannot read"; return 1; }
       fetch_url "$v" ;;
@@ -2185,12 +2259,16 @@ approve_plain() {  # <base>
             --) opts_done=1; continue ;;
             --*=*)
               fetch_long_kind "$base" "${w%%=*}"
+              if [ "$FETCH_OPT_KIND" = unknown ]; then
+                never_approve "$base option ${w%%=*} is unknown to this policy"; return 0
+              fi
               fetch_opt_value "$FETCH_OPT_KIND" "${w#*=}" 0 || return 0 ;;
             --*)
               fetch_long_kind "$base" "$w"
               case "$FETCH_OPT_KIND" in
                 switch) ;;
                 cwdout) fetch_cwd_out=1 ;;
+                unknown) never_approve "$base option $w is unknown to this policy"; return 0 ;;
                 *)
                   k=$((k + 1))
                   local fv='' fev=0
@@ -2209,6 +2287,13 @@ approve_plain() {  # <base>
                 case "$FETCH_OPT_KIND" in
                   switch) ci=$((ci + 1)) ;;
                   cwdout) fetch_cwd_out=1; ci=$((ci + 1)) ;;
+                  unknown) never_approve "$base option -${w:ci:1} is unknown to this policy"; return 0 ;;
+                  nfamily)
+                    # wget's -n* options are two characters: -nv -nc -nd -np -nH
+                    case "${w:ci:2}" in
+                      nv|nc|nd|np|nH) ci=$((ci + 2)) ;;
+                      *) never_approve "$base option -${w:ci:2} is unknown to this policy"; return 0 ;;
+                    esac ;;
                   *)
                     local fv='' fev=0
                     if [ $((ci + 1)) -lt "$clen" ]; then
