@@ -342,15 +342,27 @@ case "${1:-}" in
       prev=$arg
     done
     # Stand-in for agy starting its brief: the Enter that submits the launch
-    # line runs the installed worker PreInvocation hook with the payload agy
-    # sends, unless the case models a launch that never reaches the model.
+    # line runs every installed worker PreInvocation hook in array order with
+    # the payload agy sends, unless the case models a launch that never
+    # reaches the model. The bypass layer's armed heartbeat rides the same
+    # array behind the busy hook.
     if [ "${*: -1}" = Enter ] && [ "${FM_FAKE_AGY_START:-1}" = 1 ] \
        && [ -s "$FM_FAKE_LAUNCH_LOG.agy-hooks" ]; then
       hooks="$(cat "$FM_FAKE_LAUNCH_LOG.agy-hooks")/.agents/hooks.json"
-      cmd=$(jq -r '."firstmate-worker".PreInvocation[0].command' "$hooks" 2>/dev/null) || exit 0
       wt=$(cd "$FM_FAKE_PANE_PATH" 2>/dev/null && pwd -P) || exit 0
-      jq -n --arg wt "$wt" '{conversationId:"fake-conversation",workspacePaths:[$wt]}' \
-        | bash -c "$cmd"
+      jq -r '."firstmate-worker".PreInvocation[]?.command // empty' "$hooks" 2>/dev/null \
+        | while IFS= read -r cmd; do
+            [ -n "$cmd" ] || continue
+            # FM_FAKE_AGY_SKIP_ADAPTER models a permission-adapter entry agy
+            # silently dropped: the busy hook still reports, but the armed
+            # line never reaches the observer log.
+            case "$cmd" in
+              *fm-agy-permission-policy*)
+                [ "${FM_FAKE_AGY_SKIP_ADAPTER:-0}" = 1 ] && continue ;;
+            esac
+            jq -n --arg wt "$wt" '{conversationId:"fake-conversation",workspacePaths:[$wt]}' \
+              | bash -c "$cmd"
+          done
     fi
     exit 0
     ;;
@@ -759,6 +771,184 @@ EOF
   pass "fm-spawn.sh: an agy spawn whose endpoint cannot be confirmed closed keeps its record for teardown"
 }
 
+# --- agy bypass posture (--agy-bypass) ----------------------------------------
+
+# A bypass-viable fakebin: agy answers --version with the live-verified
+# release so the spawn's version gate passes.
+make_bypass_fakebin() {  # <dir> -> fakebin with a version-printing agy
+  local fakebin
+  fakebin=$(make_spawn_fakebin "$1")
+  cat > "$fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in --version) printf 'agy 1.2.5\n' ;; esac
+exit 0
+SH
+  chmod +x "$fakebin/agy"
+  printf '%s\n' "$fakebin"
+}
+
+test_agy_bypass_launch_installs_the_adapter_and_skips_permissions() {
+  local fields case_dir home proj wt fakebin id out
+  fields=$(make_spawn_case bypass-armed)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass) \
+    || fail "an armed agy bypass spawn failed: $out"
+  grep -Fq -- '--dangerously-skip-permissions' "$home/launch.log" \
+    || fail "the bypass launch must carry --dangerously-skip-permissions: $(cat "$home/launch.log")"
+  [ -f "$home/state/$id.agy-permission.json" ] \
+    || fail "the bypass spawn must write the per-task policy file"
+  [ "$(jq -r '[."firstmate-worker" | .. | objects | select(has("command")) | .command] | length' \
+      "$home/state/$id.agy-hooks/.agents/hooks.json")" = 8 ] \
+    || fail "the merged hooks must carry the adapter beside the observer: $(cat "$home/state/$id.agy-hooks/.agents/hooks.json")"
+  jq -e 'select(.event == "armed") | .task' "$home/state/agy-permission-log.jsonl" >/dev/null 2>&1 \
+    || fail "the adapter's armed line must reach the observer log: $(cat "$home/state/agy-permission-log.jsonl" 2>/dev/null)"
+  grep -q '^agy_bypass=on$' "$home/state/$id.meta" \
+    || fail "the bypass posture must be recorded in task metadata: $(cat "$home/state/$id.meta")"
+  pass "fm-spawn.sh: --agy-bypass launches a policed bypass once the adapter is armed"
+}
+
+test_agy_bypass_refuses_an_unverified_version() {
+  local fields case_dir home proj wt fakebin id out status
+  fields=$(make_spawn_case bypass-version)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  cat > "$fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in --version) printf 'agy 9.9.9\n' ;; esac
+exit 0
+SH
+  chmod +x "$fakebin/agy"
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a bypass launch on an unverified agy must refuse: $out"
+  case "$out" in
+    *'outside the live-verified set'*) ;;
+    *) fail "the refusal must name the unverified version, got: $out" ;;
+  esac
+  ! grep -Fq -- '--dangerously-skip-permissions' "$home/launch.log" 2>/dev/null \
+    || fail "a refused bypass must never reach the launch: $(cat "$home/launch.log")"
+  [ ! -e "$home/state/$id.agy-permission.json" ] \
+    || fail "a refused bypass must not leave a policy file"
+  pass "fm-spawn.sh: --agy-bypass refuses an agy version outside the live-verified set"
+}
+
+test_agy_bypass_refuses_a_project_hooks_file() {
+  local fields case_dir home proj wt fakebin id out status
+  fields=$(make_spawn_case bypass-hooks)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  # A real project hooks file is tracked upstream, so land it on the project's
+  # default branch where the worktree's base refresh keeps it.
+  mkdir -p "$proj/.agents"
+  printf '{"firstmate-worker":{}}\n' > "$proj/.agents/hooks.json"
+  git -C "$proj" add .agents/hooks.json >/dev/null 2>&1
+  git -C "$proj" -c user.email=t@t -c user.name=t commit -qm hooks >/dev/null 2>&1 \
+    || fail "the fixture's project hook file did not commit"
+  git -C "$proj" push -q origin HEAD:main >/dev/null 2>&1 \
+    || fail "the fixture's project hook file did not reach origin"
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a bypass launch with a project hooks.json must refuse: $out"
+  case "$out" in
+    *'can silently disarm the permission layer'*) ;;
+    *) fail "the refusal must name the project hook file, got: $out" ;;
+  esac
+  ! grep -Fq -- '--dangerously-skip-permissions' "$home/launch.log" 2>/dev/null \
+    || fail "a refused bypass must never reach the launch"
+  pass "fm-spawn.sh: --agy-bypass refuses a worktree that carries its own .agents/hooks.json"
+}
+
+test_agy_bypass_refuses_the_wrong_posture() {
+  local fields case_dir home proj wt fakebin id out status
+  # manual review is itself an explicit prompt posture; bypass cannot ride it.
+  fields=$(make_spawn_case bypass-posture)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  printf 'manual\n' > "$home/config/crew-permissions"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--agy-bypass under manual review must refuse: $out"
+  case "$out" in
+    *'conflicts with config/crew-permissions=manual'*) ;;
+    *) fail "the manual refusal must name the conflict, got: $out" ;;
+  esac
+  # A secondmate spawn is never a bypass candidate.
+  fields=$(make_spawn_case bypass-secondmate)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --secondmate --agy-bypass)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--agy-bypass on a secondmate must refuse: $out"
+  case "$out" in
+    *'not secondmate'*) ;;
+    *) fail "the secondmate refusal must name the kind, got: $out" ;;
+  esac
+  # A raw launch command installs no hooks, so bypass cannot ride it.
+  fields=$(make_spawn_case bypass-raw)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$home/launch.log" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" 'agy --raw-thing' --mode local-only --yolo off --agy-bypass 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--agy-bypass on a raw launch must refuse: $out"
+  case "$out" in
+    *'cannot ride a raw launch'*) ;;
+    *) fail "the raw-launch refusal must name the constraint, got: $out" ;;
+  esac
+  pass "fm-spawn.sh: --agy-bypass refuses manual review, secondmates, and raw launches"
+}
+
+test_agy_bypass_canary_refuses_a_dead_adapter() {
+  local fields case_dir home proj wt fakebin id out status
+  fields=$(make_spawn_case bypass-canary)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  # The session starts - the busy hook reports - but the adapter's armed line
+  # never reaches the log, so the bypassed session's denies cannot be trusted.
+  out=$(FM_FAKE_AGY_SKIP_ADAPTER=1 FM_AGY_ARMED_POLLS=4 FM_AGY_POLL_INTERVAL=0.1 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a bypass spawn whose adapter never arms must refuse: $out"
+  case "$out" in
+    *'bypass canary failed'*) ;;
+    *) fail "the refusal must name the canary, got: $out" ;;
+  esac
+  # Hooks can only fire after launch, so the flag legitimately reaches the
+  # launch line; the safety is the refusal closing the endpoint.
+  grep -Fq "fm-$id" "$home/launch.log.kills" 2>/dev/null \
+    || fail "a dead-adapter bypass spawn left its endpoint running"
+  [ ! -e "$home/state/$id.agy-permission.json" ] \
+    || fail "a canary-failed spawn must not leave its policy file behind"
+  pass "fm-spawn.sh: the armed canary refuses a bypass session whose adapter never logs"
+}
+
 # --- control mechanics ------------------------------------------------------
 
 test_agy_control_mechanics_are_the_verified_ones() {
@@ -790,7 +980,8 @@ test_agy_wiring_has_a_cleanup_owner() {
   local out
   # Flat wiring cleanup and owned-directory retirement share this adapter path.
   out=$(fm_control_harness_wiring_paths agy /wt /state task-1)
-  [ "$out" = /state/task-1.agy-hooks/.agents/hooks.json ] || fail "wrong agy wiring path: $out"
+  [ "$out" = "$(printf '%s\n%s\n' /state/task-1.agy-hooks/.agents/hooks.json /state/task-1.agy-permission.json)" ] \
+    || fail "wrong agy wiring paths: $out"
   out=$(fm_control_harness_turnend_token_path agy /state task-1)
   [ -z "$out" ] || fail "agy mints no turn-end registry token, got '$out'"
   pass "fm-control-lib.sh: agy hook file has a cleanup path and no global token"
@@ -1101,6 +1292,11 @@ test_agy_secondmate_launch_is_supported
 test_agy_spawn_confirms_the_brief_started
 test_agy_spawn_fails_and_closes_when_the_brief_never_starts
 test_agy_spawn_keeps_its_record_when_the_endpoint_will_not_close
+test_agy_bypass_launch_installs_the_adapter_and_skips_permissions
+test_agy_bypass_refuses_an_unverified_version
+test_agy_bypass_refuses_a_project_hooks_file
+test_agy_bypass_refuses_the_wrong_posture
+test_agy_bypass_canary_refuses_a_dead_adapter
 test_agy_control_mechanics_are_the_verified_ones
 test_agy_supports_all_task_kinds
 test_agy_wiring_has_a_cleanup_owner
