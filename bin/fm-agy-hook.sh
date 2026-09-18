@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Agy native-hook transport and worker installation.
-# Usage: fm-agy-hook.sh install-worker <state> <id> <gen> <worktree>
+# Usage: fm-agy-hook.sh install-worker <state> <id> <gen> <worktree> [<policy-file>]
 #        fm-agy-hook.sh retire-worker <state> <id>
 #        fm-agy-hook.sh worker <PreInvocation|PreToolUse|PostToolUse|Stop> <state> <id> <gen> <worktree>
 #        fm-agy-hook.sh primary <PreInvocation|PreToolUse|Stop>
@@ -33,6 +33,13 @@
 # any non-zero exit or any stdout. install-worker validates the merged
 # hooks.json before installing it, since one malformed entry silently
 # disables every hook in the file, including the turn-end pair.
+#
+# With a <policy-file> argument install-worker also wires the bypass-mode
+# permission adapter bin/fm-agy-permission-policy.sh beside the observer: an
+# armed heartbeat on PreInvocation and Stop, and the decision as a second
+# PreToolUse hook (after the observer, with a timeout above the judge
+# budget). The merge is validated the same way, so a malformed adapter entry
+# can never silently disarm the busy-state groups either.
 set -u
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -86,10 +93,17 @@ case "$MODE" in
       rm -rf -- "$dir"
       exit
     fi
-    [ "$#" -eq 4 ] || usage
-    gen=$3 wt=$4
+    [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || usage
+    gen=$3 wt=$4 policy=${5-}
     token_valid "$gen" && [ -d "$wt" ] || usage
     command -v jq >/dev/null 2>&1 || { echo 'error: agy hooks require jq' >&2; exit 1; }
+    if [ -n "$policy" ]; then
+      [ -f "$policy" ] && [ ! -L "$policy" ] || {
+        echo "error: agy permission policy file missing or a link: $policy" >&2
+        exit 1
+      }
+      policy=$(cd "$(dirname "$policy")" && pwd -P)/$(basename "$policy") || exit 1
+    fi
     wt=$(cd "$wt" && pwd -P) || exit 1
     [ ! -L "$dir/.agents" ] && [ ! -L "$dir/.agents/hooks.json" ] || exit 1
     mkdir -p "$dir/.agents" || exit 1
@@ -97,25 +111,51 @@ case "$MODE" in
     prefix="$(shell_quote "$SCRIPT_DIR/fm-agy-hook.sh") worker"
     suffix="$(shell_quote "$state") $(shell_quote "$id") $(shell_quote "$gen") $(shell_quote "$wt")"
     tmp=$(mktemp "$dir/.agents/.hooks.XXXXXX") || exit 1
-    if ! jq -n --arg open "$prefix PreInvocation $suffix" --arg close "$prefix Stop $suffix" \
-      --arg pre "$prefix PreToolUse $suffix" --arg post "$prefix PostToolUse $suffix" \
-      '{"firstmate-worker":{
-        PreInvocation:[{command:$open}],
-        Stop:[{command:$close}],
-        PreToolUse:[{matcher:"*",hooks:[{type:"command",command:$pre,timeout:10}]}],
-        PostToolUse:[{matcher:"*",hooks:[{type:"command",command:$post,timeout:10}]}]}}' > "$tmp"; then
-      rm -f "$tmp"; exit 1
+    if [ -n "$policy" ]; then
+      # The permission layer rides beside the observer: its armed heartbeat
+      # joins PreInvocation, its decision runs second on PreToolUse after the
+      # observer has logged the call, and its pending closure joins Stop.
+      # The decision hook's timeout must sit above the library's JUDGE_BUDGET
+      # (100s) or agy kills the hook mid-judge and blocks the tool anyway.
+      polprefix="$(shell_quote "$SCRIPT_DIR/fm-agy-permission-policy.sh")"
+      polpath="$(shell_quote "$policy")"
+      if ! jq -n --arg open "$prefix PreInvocation $suffix" --arg close "$prefix Stop $suffix" \
+        --arg pre "$prefix PreToolUse $suffix" --arg post "$prefix PostToolUse $suffix" \
+        --arg armed "$polprefix armed $polpath" --arg decide "$polprefix pre-tool-use $polpath" \
+        --arg pstop "$polprefix stop $polpath" --arg ppost "$polprefix post-tool-use $polpath" \
+        '{"firstmate-worker":{
+          PreInvocation:[{command:$open},{command:$armed}],
+          Stop:[{command:$close},{command:$pstop}],
+          PreToolUse:[{matcher:"*",hooks:[{type:"command",command:$pre,timeout:10},
+                                        {type:"command",command:$decide,timeout:130}]}],
+          PostToolUse:[{matcher:"*",hooks:[{type:"command",command:$post,timeout:10},
+                                         {type:"command",command:$ppost,timeout:10}]}]}}' > "$tmp"; then
+        rm -f "$tmp"; exit 1
+      fi
+      want_cmds=8
+    else
+      if ! jq -n --arg open "$prefix PreInvocation $suffix" --arg close "$prefix Stop $suffix" \
+        --arg pre "$prefix PreToolUse $suffix" --arg post "$prefix PostToolUse $suffix" \
+        '{"firstmate-worker":{
+          PreInvocation:[{command:$open}],
+          Stop:[{command:$close}],
+          PreToolUse:[{matcher:"*",hooks:[{type:"command",command:$pre,timeout:10}]}],
+          PostToolUse:[{matcher:"*",hooks:[{type:"command",command:$post,timeout:10}]}]}}' > "$tmp"; then
+        rm -f "$tmp"; exit 1
+      fi
+      want_cmds=4
     fi
     # A single malformed entry silently disables every hook in the file,
     # including the shipped turn-end pair, so refuse to install anything that
-    # does not carry all four groups with non-empty commands.
-    if ! jq -e '
+    # does not carry all four groups with non-empty commands - and, for a
+    # policy install, the adapter's own entries beside them.
+    if ! jq -e --argjson want "$want_cmds" '
       ."firstmate-worker" as $h
       | ([$h | .. | objects | select(has("command")) | .command]) as $cmds
       | ($h | has("PreInvocation") and has("Stop") and has("PreToolUse") and has("PostToolUse"))
         and ($h.PreToolUse[0] | has("matcher") and (.hooks | type == "array" and length >= 1))
         and ($h.PostToolUse[0] | has("matcher") and (.hooks | type == "array" and length >= 1))
-        and ($cmds | length) == 4
+        and ($cmds | length) == $want
         and ($cmds | all(type == "string" and length > 0))' "$tmp" >/dev/null; then
       echo "error: refusing to install malformed agy hooks for $id" >&2
       rm -f "$tmp"; exit 1
