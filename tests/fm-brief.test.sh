@@ -377,6 +377,10 @@ test_no_mistakes_pipeline_opt_in() {
   assert_grep "$on/data/$id/nm-<run>-findings.txt" "$brief" "pipeline brief lost the ask-user escalation format"
   assert_grep 'append `done: PR {url} checks green`' "$brief" "pipeline brief lost the pipeline ready signal"
   assert_grep 'NEVER pass `--yes`' "$brief" "pipeline brief lost the --yes ban"
+  for spelling in 'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:" 'Captain,'; do
+    assert_no_grep "$spelling" "$brief" "rendered intent contract still teaches operator-address labels"
+  done
+  assert_grep '[captain]' "$brief" "rendered intent contract must explain the neutral legacy provenance marker"
   assert_no_grep 'Do NOT run /no-mistakes' "$brief" "pipeline brief still forbids the pipeline"
   assert_no_grep 'This home does not run the no-mistakes pipeline' "$brief" "pipeline brief kept the direct-PR remap"
   assert_no_grep 'Delivery pipeline:' "$off/data/plain-no-mistakes/brief.md" "flag-absent brief recorded a pipeline contract"
@@ -770,6 +774,25 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_ship_and_scout_teach_validation_round_pause() {
+  local home kind id brief
+  home="$TMP_ROOT/validation-round-pause-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-validation-round-pause-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "your own validation round" "$brief" \
+      "$kind brief did not teach workers to declare their validation-round wait"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -862,5 +885,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

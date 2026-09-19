@@ -830,6 +830,18 @@ EOF
 test_devin_bootstrap_dispatch_validation() {
   local dir="$TMP_ROOT/bootstrap-dispatch" config_dir="$TMP_ROOT/bootstrap-dispatch/config" out
   mkdir -p "$config_dir"
+  # crew_dispatch_validate reads bootstrap globals and helper libraries since
+  # upstream's typed dispatch resolution (#4692); supply them untyped.
+  # shellcheck source=bin/fm-env-lib.sh
+  . "$ROOT/bin/fm-env-lib.sh"
+  # shellcheck source=bin/fm-quota-axi-lib.sh
+  . "$ROOT/bin/fm-quota-axi-lib.sh"
+  # shellcheck source=bin/fm-control-lib.sh
+  . "$ROOT/bin/fm-control-lib.sh"
+  # shellcheck disable=SC2034  # read by the eval'd crew_dispatch_validate
+  TYPESAFE_API_KEY_PRIVATE=
+  # shellcheck disable=SC2034  # read by the eval'd crew_dispatch_validate
+  FM_HOME=$dir
   eval "$(sed -n '/^crew_dispatch_validate() {/,/^}/p' "$ROOT/bin/fm-bootstrap.sh")"
 
   cat > "$config_dir/crew-dispatch.json" <<'EOF'
