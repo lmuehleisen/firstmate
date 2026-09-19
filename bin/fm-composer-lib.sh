@@ -533,7 +533,11 @@ FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:
 #     furniture; it never counts as wrapped typed content and it bounds a bare
 #     composer's wrap region exactly as the status rows above do;
 #   - braille cells behind the glyph row's content are stripped before that
-#     row's emptiness decision when NOTHING else follows the glyph;
+#     row's emptiness decision only when NOTHING else follows the glyph AND
+#     the capture is styled AND every one of those cells carries its own
+#     truecolor foreground (fm_composer_strip_painted_braille below) - the
+#     animation's positive signature, because typed input renders in the
+#     default foreground, so a braille-only draft such as `❯ ⠁⠂` stays input;
 #   - a row that mixes braille with any other non-whitespace text stays typed
 #     content, because a human can type a braille character.
 # fm_composer_strip_braille is the ONE byte-exact remover: under LC_ALL=C awk
@@ -548,6 +552,48 @@ fm_composer_strip_braille() {
       while (i <= n) {
         c = substr(line, i, 1)
         if (c == "\342" && i + 2 <= n) {
+          c2 = substr(line, i + 1, 1); c3 = substr(line, i + 2, 1)
+          if (c2 >= "\240" && c2 <= "\243" && c3 >= "\200" && c3 <= "\277") {
+            i += 3; continue
+          }
+        }
+        out = out c; i++
+      }
+      print out
+    }
+  '
+}
+
+# fm_composer_strip_painted_braille: drop only the braille cells painted with a
+# truecolor foreground (SGR 38;2;R;G;B still active when the cell is drawn),
+# keeping every other byte, escapes included. A braille cell in the default or
+# a palette foreground survives, so feeding the result through
+# fm_composer_strip_ansi and fm_composer_strip_braille distinguishes animation
+# cells from typed ones. Reads stdin, prints each line.
+fm_composer_strip_painted_braille() {
+  LC_ALL=C awk '
+    {
+      line = $0; out = ""; n = length(line); i = 1; painted = 0
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == "\033" && substr(line, i + 1, 1) == "[") {
+          j = i + 2
+          while (j <= n && substr(line, j, 1) ~ /[0-9;:?]/) j++
+          if (j <= n && substr(line, j, 1) == "m") {
+            np = split(substr(line, i + 2, j - i - 2), p, /[;:]/)
+            if (np == 0) painted = 0
+            for (k = 1; k <= np; k++) {
+              if (p[k] == "" || p[k] + 0 == 0 || p[k] + 0 == 39) painted = 0
+              else if (p[k] + 0 == 38 && p[k + 1] + 0 == 2) { painted = 1; k += 4 }
+              else if (p[k] + 0 == 38 && p[k + 1] + 0 == 5) { painted = 0; k += 2 }
+              else if ((p[k] + 0 >= 30 && p[k] + 0 <= 37) || (p[k] + 0 >= 90 && p[k] + 0 <= 97)) painted = 0
+              else if (p[k] + 0 == 48 && p[k + 1] + 0 == 2) k += 4
+              else if (p[k] + 0 == 48 && p[k + 1] + 0 == 5) k += 2
+            }
+          }
+          out = out substr(line, i, j - i + 1); i = j + 1; continue
+        }
+        if (painted && c == "\342" && i + 2 <= n) {
           c2 = substr(line, i + 1, 1); c3 = substr(line, i + 2, 1)
           if (c2 >= "\240" && c2 <= "\243" && c3 >= "\200" && c3 <= "\277") {
             i += 3; continue
@@ -1134,8 +1180,8 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   raw=$(_fm_composer_screen_row "$row" "$screen")
   content=$(_fm_composer_row_content "$raw" "$styled")
   plain=$(_fm_composer_row_content "$raw" 0)
-  _fm_composer_bare_row_strip_furniture_var content
-  _fm_composer_bare_row_strip_furniture_var plain
+  _fm_composer_bare_row_strip_furniture_var content "$raw" "$styled"
+  _fm_composer_bare_row_strip_furniture_var plain "$raw" "$styled"
   state=$(fm_composer_classify_content 0 "$content" \
     "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled")
   if [ "$styled" != 1 ] && [ "$state" = pending ]; then
@@ -1171,15 +1217,20 @@ _fm_composer_row_is_braille_furniture() {  # <row>
 # in place through the named variable; a row whose tail carries anything else,
 # and a row with no agent glyph, are left untouched. This is the glyph-row half
 # of the braille rule: codex 0.154's starfield cells behind its (stripped)
-# placeholder must not stand in for typed input.
-_fm_composer_bare_row_strip_furniture_var() {  # <varname>
-  local __fmbf_name=$1 __fmbf_text=${!1} __fmbf_glyph='' __fmbf_body
+# placeholder must not stand in for typed input. Furniture needs positive
+# animation evidence from the raw row: a styled capture whose every braille
+# cell is truecolor-painted. An unstyled capture, or any default-foreground
+# braille, keeps the tail as a possible braille-only draft.
+_fm_composer_bare_row_strip_furniture_var() {  # <varname> <raw-row> <styled>
+  local __fmbf_name=$1 __fmbf_text=${!1} __fmbf_raw=$2 __fmbf_glyph='' __fmbf_body __fmbf_rest
   [ "$FM_COMPOSER_CODEX_ANIMATION_NORMALIZED" != 1 ] || return 0
+  [ "$3" = 1 ] || return 0
   fm_composer_leading_agent_glyph_var __fmbf_glyph "$__fmbf_text" || return 0
   __fmbf_body=${__fmbf_text#*"$__fmbf_glyph"}
-  if _fm_composer_row_is_braille_furniture "$__fmbf_body"; then
-    printf -v "$__fmbf_name" '%s' "$__fmbf_glyph"
-  fi
+  _fm_composer_row_is_braille_furniture "$__fmbf_body" || return 0
+  __fmbf_rest=$(printf '%s\n' "$__fmbf_raw" | fm_composer_strip_painted_braille | fm_composer_strip_ansi)
+  [ "$__fmbf_rest" = "$(printf '%s\n' "$__fmbf_rest" | fm_composer_strip_braille)" ] || return 0
+  printf -v "$__fmbf_name" '%s' "$__fmbf_glyph"
 }
 
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
@@ -1216,7 +1267,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     if [ "$row" -eq "$g" ]; then
-      _fm_composer_bare_row_strip_furniture_var content
+      _fm_composer_bare_row_strip_furniture_var content "$raw" "$styled"
       if fm_composer_leading_agent_glyph_var glyph "$content"; then
         content=${content#*"$glyph"}
       fi
