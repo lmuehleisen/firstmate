@@ -277,6 +277,28 @@ test_project_root_false_with_warning_shown_registers_trust() {
   assert_unapproved_import_flags_register_trust_untouched true warned
 }
 
+# Claude Code's own default project entry carries BOTH external-imports flags as
+# false before the dialog was ever shown; answering the dialog either way sets
+# hasClaudeMdExternalIncludesWarningShown to true. So false/false is "never
+# asked", not "No, disable": it must be treated like an absent flag - trust
+# registered, no import consent manufactured - rather than refused.
+test_project_root_entry_default_import_flags_are_not_a_decline() {
+  local rec store out
+  rec=$(make_case project-default-flags)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  cat > "$store" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"allowedTools":[],"mcpContextUris":[],"mcpServers":{},"enabledMcpjsonServers":[],"disabledMcpjsonServers":[],"hasTrustDialogAccepted":false,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false}}}
+JSON
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ")
+  expect_code 0 $? "a never-asked default entry must not be refused as a decline: $out"
+  assert_trust_only_no_import_consent "$store" "$WT" \
+    "the worktree entry either lost trust or gained unearned import consent"
+  assert_trust_only_no_import_consent "$store" "$PROJ" \
+    "the project-root entry either lost trust or gained import consent it was never asked for"
+  pass "fm-claude-trust.sh: a never-asked default external-imports pair is not treated as a decline"
+}
+
 test_registration_is_idempotent() {
   local rec out count
   rec=$(make_case idempotent)
@@ -814,6 +836,7 @@ test_registration_carries_forward_existing_import_consent
 test_project_root_entry_preserves_other_keys
 test_project_root_default_false_without_warning_registers_trust
 test_project_root_false_with_warning_shown_registers_trust
+test_project_root_entry_default_import_flags_are_not_a_decline
 test_registration_is_idempotent
 test_primary_checkout_is_refused
 test_cdpath_cannot_defeat_the_primary_checkout_refusal

@@ -389,7 +389,7 @@ fi
 # The two external-imports flags (worktree mode only) are gated separately
 # from the trust flag, because they are a CONSENT grant, not a pre-approval
 # this script is allowed to manufacture. Claude Code only ever writes
-# hasClaudeMdExternalIncludesApproved itself, on an explicit interactive
+# hasClaudeMdExternalIncludesApproved===true itself, on an explicit interactive
 # answer; this script's own job is to keep a worker from wedging on a dialog,
 # never to answer that dialog on the human's behalf. So the import flags land
 # on the project entry - the only place the imports check ever reads (see the
