@@ -1358,7 +1358,7 @@ families_for_unmapped_bin() {
 # Conservative path → family map. Over-selects rather than under-selects.
 # Never expands to the complete suite.
 families_for_changed_path() {
-  local path=$1 fixture_ref
+  local path=$1 fixture_ref fixture_rest
   case "$path" in
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
@@ -1636,19 +1636,22 @@ families_for_changed_path() {
       families_for_test_reference git-config-helpers.sh lib.sh herdr-test-safety.sh \
         || printf '%s\n' "__unmapped__:$path"
       ;;
-    tests/fixtures/*/*)
-      # A fixture belongs to whichever suite reads its directory, found by the
-      # same reference scan used for shared helpers. Keyed on the directory
-      # rather than the file so adding a fixture selects the same suite.
-      # A removed fixture directory has no consuming suite left to select.
-      fixture_ref=${path#tests/fixtures/}
-      fixture_ref=${fixture_ref%%/*}
-      if [ -d "tests/fixtures/$fixture_ref" ]; then
-        families_for_test_reference "fixtures/$fixture_ref" \
+    tests/fixtures/*/*|tests/captures/*/*)
+      # A fixture or recorded capture belongs to whichever suite reads its
+      # directory, found by the same reference scan used for shared helpers.
+      # Keyed on the directory rather than the file so adding a fixture
+      # selects the same suite. A removed directory has no consuming suite
+      # left to select.
+      fixture_ref=${path#tests/}
+      fixture_rest=${fixture_ref#*/}
+      fixture_ref=${fixture_ref%%/*}/${fixture_rest%%/*}
+      if [ -d "tests/$fixture_ref" ]; then
+        families_for_test_reference "$fixture_ref" \
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;
-    tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh|tests/*-fixture.sh)
+    tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh|tests/*-fixture.sh|\
+    tests/*-repro.py|tests/*-probe.py)
       # Shared top-level test files, selected by the suites that name them.
       # Must stay below the tests/fixtures/*/* arm: a case glob's * spans /, so
       # tests/*-fixture.sh would otherwise swallow a nested
@@ -1669,7 +1672,8 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore)
+    README.md|GROK_BOT.md|LICENSE|assets/*|docs/*|.gitignore)
+      # Documentation only: no script or suite reads these, so they select nothing.
       ;;
     *)
       if [ -e "$path" ]; then
