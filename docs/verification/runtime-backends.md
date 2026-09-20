@@ -747,6 +747,9 @@ ok - agy 1.2.6: a bypass session whose hook never logs leaves no armed line for 
 What this proves: `{"decision":"deny","reason":...}` holds under `--dangerously-skip-permissions` and the model echoes the reason; abstention runs the call (the layer's only approval surface); a dead judge still denies; a malformed merge is caught before launch; and a session that never loads the adapter produces no armed line for `fm-spawn`'s canary to trust.
 What it also shows: `force_ask` is inert under bypass - there is no prompt left to force - so deny plus abstain are the only effective decisions the layer can emit, and every "ask the human" path must go through the pending-marker escalation instead.
 
+`--sandbox` composition probe, 2026-09-19, agy 1.2.7 (the installed CLI self-updated past the live-verified set between review rounds, so this run is evidence about composition, not a member of the verified set): `agy -p --model gemini-3.6-flash-low --dangerously-skip-permissions --sandbox` parses and runs in headless mode, and the model completed file-tool and `run_command` writes to the workspace, to a sibling state directory, and to `$HOME` - no file-write surface the probes reached was restricted.
+The launch therefore stays on `--dangerously-skip-permissions` alone: `--sandbox` is not omitted because it fails to compose but because no containment was observable in this mode, and its interactive-session behaviour under a spawned pane is unverified.
+
 ### Primary and secondmate supervision
 
 Verified on 2026-09-10 with Agy 1.2.0 and `gemini-3.8-flash` at low effort on macOS using a throwaway Firstmate home and private tmux socket.

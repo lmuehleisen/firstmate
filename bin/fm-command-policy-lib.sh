@@ -10,8 +10,9 @@
 #       segment, $(...) and backtick bodies, bash -c / sh -c / eval strings,
 #       find -exec commands, and env / xargs / nohup / timeout wrappers.
 #       start-cwd defaults to WORKTREE. Sets REFUSE_REASON (hard refusal),
-#       NOT_APPROVABLE (why the call is not in the read-and-build set), and
-#       NEVER_APPROVE (outward action that always escalates).
+#       NOT_APPROVABLE (why the call is not in the read-and-build set),
+#       NEVER_APPROVE (outward action that always escalates), and SENSITIVE_HIT
+#       (the call reached the credential-material checks).
 #
 #   run_judge
 #       Asks the judge model about the residue call, retrying once when an
@@ -44,6 +45,17 @@
 #   CACHE_INPUT PENDING_DIR CACHE_DIR JUDGE_MODEL JUDGE_TIMEOUT
 #   FM_POLICY_EXEC_TOOL (tool name whose CMD input_summary prints; the
 #       adapter sets it, default exec)
+#   POLICY_PROTECTED (optional newline list of the adapter's own firstmate-owned
+#       wiring paths; a file matches itself, a directory covers its contents,
+#       and any statically visible write or removal of one is refused. Empty
+#       for the Devin adapter)
+#   FM_POLICY_BYPASS (1 when the adapter's launch runs under the harness's own
+#       full-bypass flag, so a statically visible write or removal outside the
+#       task write roots is refused outright instead of judged - under bypass
+#       there is no native prompt behind the judge to correct a bad verdict.
+#       The bound is a lexical one: a refused command reached through an
+#       interpreter, encoded pipe, alias, or expansion still reaches the judge,
+#       because no lexical policy can see it)
 #
 # Read-and-build set (full-command inspection, not prefix matching). A
 # command is approved only when it has no unquoted-delimiter heredoc, no
@@ -886,7 +898,14 @@ fetch_opt_value() {  # <kind> <value> <expansion-or-glob flag>
 # an escalation: there is no shape in which a worker rewriting its own brief is
 # the right call. It cannot see an interpreter one-liner, which is why the
 # grants block is digest-pinned independently.
-PROTECTED_BRIEFS_LOADED=0 PROTECTED_BRIEFS=''
+# An adapter may also declare POLICY_PROTECTED: a newline list of its own
+# firstmate-owned wiring (the policy file, pending and cache stores, hook
+# directory, decision log) whose contents a worker must never write, remove,
+# or overwrite through a statically visible command. The Devin adapter leaves
+# it empty because its worker cannot reach the Devin policy file mid-session;
+# the agy bypass adapter fills it because under --dangerously-skip-permissions
+# a worker writing its own policy stores would disarm the only check left.
+PROTECTED_BRIEFS_LOADED=0 PROTECTED_BRIEFS='' PROTECTED_DIRS=''
 load_protected_briefs() {
   [ "$PROTECTED_BRIEFS_LOADED" -eq 0 ] || return 0
   PROTECTED_BRIEFS_LOADED=1
@@ -897,6 +916,12 @@ load_protected_briefs() {
     case $'\n'"$PROTECTED_BRIEFS" in *$'\n'"$abs"$'\n'*) continue ;; esac
     PROTECTED_BRIEFS="$PROTECTED_BRIEFS$abs"$'\n'
   done
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    abs=$(physical_target "$cand" '' 0) || abs=$(norm_abs "$cand")
+    case $'\n'"$PROTECTED_DIRS" in *$'\n'"$abs"$'\n'*) continue ;; esac
+    PROTECTED_DIRS="$PROTECTED_DIRS$abs"$'\n'
+  done <<<"${POLICY_PROTECTED:-}"
 }
 
 # Resolve a write target: directory components physically, then the final
@@ -939,7 +964,35 @@ brief_protected_or_parent() {  # <abs>
   return 1
 }
 
-# Refuse when a writer command's operands name a protected brief.
+# 0 when <abs> is a protected path: a protected brief itself, or a path the
+# adapter declared in POLICY_PROTECTED - a file matches itself and a directory
+# covers everything inside it.
+protected_target() {  # <abs>
+  local b
+  load_protected_briefs
+  brief_protected "$1" && return 0
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    [ "$b" = "$1" ] && return 0
+    strictly_inside "$1" "$b" && return 0
+  done <<<"$PROTECTED_DIRS"
+  return 1
+}
+
+# 0 when <abs> is a protected target, or a directory a move or delete would
+# carry one away with.
+protected_target_or_parent() {  # <abs>
+  local b
+  protected_target "$1" && return 0
+  brief_protected_or_parent "$1" && return 0
+  while IFS= read -r b; do
+    [ -n "$b" ] && strictly_inside "$b" "$1" && return 0
+  done <<<"$PROTECTED_DIRS"
+  return 1
+}
+
+# Refuse when a writer command's operands name a protected brief or a
+# POLICY_PROTECTED path.
 #   <scope>           all = every operand, last = only the destination, because
 #                     `cp brief.md /tmp/copy` merely READS the brief.
 #   <include-parents> 1 also refuses a directory that contains one, which a
@@ -965,12 +1018,52 @@ refuse_brief_operands() {  # <scope> <include-parents>
     [ -n "$w" ] || continue
     abs=$(write_target_path "$w" "${EV[k]}") || continue
     if [ "$2" = 1 ]; then
-      brief_protected_or_parent "$abs" || continue
+      protected_target_or_parent "$abs" || continue
     else
-      brief_protected "$abs" || continue
+      protected_target "$abs" || continue
     fi
-    refuse "writing this task's own instructions ($w) is refused by firstmate policy"
+    if brief_protected "$abs" || brief_protected_or_parent "$abs"; then
+      refuse "writing this task's own instructions ($w) is refused by firstmate policy"
+    else
+      refuse "writing firstmate's own permission wiring ($w) is refused by firstmate policy"
+    fi
     return 0
+  done
+}
+
+# Under a bypassed launch (FM_POLICY_BYPASS=1) there is no native prompt
+# behind the judge, so a statically visible write or removal outside every
+# write root is refused outright instead of judged. A writer command's operand
+# is such a target when it is neither inside a write root nor unresolvable;
+# scope mirrors refuse_brief_operands.
+refuse_bypass_outroot_operands() {  # <scope>
+  [ "${FM_POLICY_BYPASS:-0}" = 1 ] || return 0
+  local k w abs last=-1
+  local -a idx=()
+  for ((k = 1; k < ${#E[@]}; k++)); do
+    w=${E[k]}
+    case "$w" in
+      --) continue ;;
+      -*) continue ;;
+    esac
+    if [ "$base" = dd ]; then
+      case "$w" in if=*) continue ;; esac   # dd's input operand is a read
+    fi
+    idx[${#idx[@]}]=$k
+  done
+  [ "${#idx[@]}" -gt 0 ] || return 0
+  last=${idx[$((${#idx[@]} - 1))]}
+  for k in "${idx[@]}"; do
+    [ "$1" = all ] || [ "$k" = "$last" ] || continue
+    w=${E[k]}
+    if [ "$base" = dd ]; then
+      case "$w" in of=*) w=${w#of=} ;; esac
+    fi
+    [ -n "$w" ] || continue
+    abs=$(write_target_path "$w" "${EV[k]}") \
+      || { refuse "$base operand $w cannot be resolved; refused under bypass"; return 0; }
+    write_dest_ok "$abs" \
+      || { refuse "$base writes outside the task write roots ($w) is refused under bypass"; return 0; }
   done
 }
 
@@ -1045,7 +1138,8 @@ sensitive_text() {  # <text>
     *.ssh*|*.aws/*|*.aws|*.gnupg*|*.netrc*|*.git-credentials*|*hosts.yml*|\
     *id_rsa*|*id_ed25519*|*id_ecdsa*|*.pem|*.pem\ *|*.p12*|*.key|*credentials*|\
     *.config/gh*|*.config/devin*|*.devin/config*|*.docker/config.json*|\
-    *.npmrc*|*.pypirc*|*keychain*|*Keychains*)
+    *.npmrc*|*.pypirc*|*keychain*|*Keychains*|\
+    *antigravity-oauth-token*|*.gemini/oauth_creds*|*.config/gcloud/*)
       return 0 ;;
   esac
   case "/$1" in
@@ -1315,6 +1409,11 @@ tokenize() {
 REFUSE_REASON=
 NOT_APPROVABLE=
 NEVER_APPROVE=
+# SENSITIVE_HIT is set by the credential-material checks, which a refusal or a
+# judge-escalation reason alone cannot distinguish from an ordinary
+# not-approvable call. An adapter that holds credential reads for firstmate
+# without asking the judge reads it after evaluate_exec.
+SENSITIVE_HIT=
 NESTED=()
 NESTED_CWD=()
 
@@ -1444,10 +1543,25 @@ analyze_segment() {
     case "$op" in
       '>&'|'<&')
         case "$tgt" in
-          ''|*[!0-9-]*) no_approve "redirection to $tgt" ;;
+          ''|*[!0-9-]*)
+            if [ "${FM_POLICY_BYPASS:-0}" = 1 ] && [ "$op" = '>&' ]; then
+              local fabs=''
+              fabs=$(write_target_path "$tgt" "$tv" 2>/dev/null) || fabs=''
+              if [ -n "$fabs" ] && ! write_dest_ok "$fabs"; then
+                refuse "output redirection outside the task write roots ($tgt) is refused under bypass"
+              elif [ -z "$fabs" ]; then
+                refuse "output redirection to $tgt cannot be resolved; refused under bypass"
+              else
+                no_approve "redirection to $tgt"
+              fi
+            else
+              no_approve "redirection to $tgt"
+            fi ;;
         esac
         ;;
-      '<'|'<<<') sensitive_text "$tgt" && no_approve "input from credential material" ;;
+      '<'|'<<<')
+        sensitive_text "$tgt" && { SENSITIVE_HIT=1; no_approve "input from credential material"; }
+        ;;
       '<<') ;;
       *)
         local rabs='' rwt=''
@@ -1459,6 +1573,10 @@ analyze_segment() {
         fi
         if [ -n "$rwt" ] && brief_protected "$rwt"; then
           refuse "writing this task's own instructions ($tgt) is refused by firstmate policy"
+          return 0
+        fi
+        if [ -n "$rwt" ] && ! brief_protected "$rwt" && protected_target "$rwt"; then
+          refuse "writing firstmate's own permission wiring ($tgt) is refused by firstmate policy"
           return 0
         fi
         if [ "$tgt" = /dev/null ] && [ "$tv" = 0 ]; then
@@ -1475,6 +1593,14 @@ analyze_segment() {
         elif [ "$PIPE_FROM_FETCH" = 1 ]; then
           if [ -z "$rabs" ] || ! fetch_dest_ok "$rabs"; then
             never_approve "fetched output redirected outside the task write roots ($tgt)"
+          fi
+        elif [ "${FM_POLICY_BYPASS:-0}" = 1 ]; then
+          if [ -n "$rwt" ] && ! write_dest_ok "$rwt"; then
+            refuse "output redirection outside the task write roots ($tgt) is refused under bypass"
+          elif [ -z "$rwt" ]; then
+            refuse "output redirection to $tgt cannot be resolved; refused under bypass"
+          else
+            no_approve "output redirection to $tgt"
           fi
         else
           no_approve "output redirection to $tgt"
@@ -1511,12 +1637,13 @@ analyze_segment() {
   load_grants
   [ -n "$GRANT_ENV_FILES" ] && grant_check=1
   for ((k = 0; k < ${#SW[@]}; k++)); do
-    sensitive_text "${SW[k]}" && { no_approve "argument names credential material"; break; }
+    sensitive_text "${SW[k]}" \
+      && { SENSITIVE_HIT=1; no_approve "argument names credential material"; break; }
     [ "$grant_check" = 1 ] || continue
     case "${SW[k]}" in *[/~]*) ;; *) continue ;; esac
     sabs=$(resolve_maybe_tilde "${SW[k]}" "${SWV[k]}" "$CWD" 2>/dev/null) || continue
     granted_env_file "$sabs" \
-      && { no_approve "argument names a credential file this task may only source"; break; }
+      && { SENSITIVE_HIT=1; no_approve "argument names a credential file this task may only source"; break; }
   done
 
   [ "$count" -gt 0 ] || return 0
@@ -1649,11 +1776,18 @@ analyze_segment() {
     return 0
   fi
 
-  # No statically visible writer may touch this worker's own instructions.
+  # No statically visible writer may touch this worker's own instructions or
+  # the adapter's protected wiring, and under a bypass launch no statically
+  # visible writer may reach outside the task write roots at all.
   case "$base" in
-    cp|install|rsync) refuse_brief_operands last 0 ;;
-    mv|rm|shred) refuse_brief_operands all 1 ;;
-    ln|dd|truncate|patch|tee|split) refuse_brief_operands all 0 ;;
+    cp|install|rsync) refuse_brief_operands last 0; refuse_bypass_outroot_operands last ;;
+    mv|rm|shred) refuse_brief_operands all 1; refuse_bypass_outroot_operands all ;;
+    # ln writes only its destination; patch's and split's operands are reads
+    # whose writes the policy cannot see lexically, so outroot refuses would
+    # hit the read side instead - those stay judged.
+    ln) refuse_brief_operands all 0; refuse_bypass_outroot_operands last ;;
+    dd|truncate|tee) refuse_brief_operands all 0; refuse_bypass_outroot_operands all ;;
+    patch|split) refuse_brief_operands all 0 ;;
   esac
   [ -n "$REFUSE_REASON" ] && return 0
   case "$base" in
@@ -1661,9 +1795,9 @@ analyze_segment() {
       local ii
       for ((ii = 1; ii < count; ii++)); do
         case "${E[ii]}" in
-          --in-place|--in-place=*) refuse_brief_operands all 0; break ;;
+          --in-place|--in-place=*) refuse_brief_operands all 0; refuse_bypass_outroot_operands all; break ;;
           --*) ;;
-          -*i*) refuse_brief_operands all 0; break ;;
+          -*i*) refuse_brief_operands all 0; refuse_bypass_outroot_operands all; break ;;
         esac
       done
       [ -n "$REFUSE_REASON" ] && return 0
@@ -2301,7 +2435,14 @@ approve_plain() {  # <base>
         local abs
         abs=$(resolve_maybe_tilde "$w" "${EV[k]}" "$CWD") \
           || { no_approve "$base of an unresolvable path"; return 0; }
-        write_dest_ok "$abs" || { no_approve "$base outside the task write roots"; return 0; }
+        if ! write_dest_ok "$abs"; then
+          if [ "${FM_POLICY_BYPASS:-0}" = 1 ]; then
+            refuse "$base outside the task write roots is refused under bypass"
+          else
+            no_approve "$base outside the task write roots"
+          fi
+          return 0
+        fi
       done
       return 0 ;;
     mv)
@@ -2441,6 +2582,8 @@ evaluate_exec() {
   local start_cwd q=0
   start_cwd=$(norm_abs "${2:-$WORKTREE}")
   REFUSE_REASON='' NOT_APPROVABLE='' NEVER_APPROVE='' NESTED=() NESTED_CWD=()
+  # shellcheck disable=SC2034 # output global; the agy adapter reads it after evaluate_exec.
+  SENSITIVE_HIT=''
   FETCH_FILES=''
   analyze_command "$1" "$start_cwd"
   while [ "$q" -lt "${#NESTED[@]}" ] && [ "$q" -lt 32 ]; do
@@ -2492,6 +2635,7 @@ JUDGE_BUDGET=${JUDGE_BUDGET:-100}
 # output). A clean DECLINE is a verdict and is never retried. Sets
 # JUDGE_VERDICT to approve or decline and JUDGE_REASON to its one-line reason.
 run_judge() {
+  # shellcheck disable=SC2034 # JUDGE_VERDICT is this function's output contract, read by the sourcing adapter
   JUDGE_VERDICT=decline JUDGE_REASON='' JUDGE_RETRYABLE=0
   if [ -z "$JUDGE_MODEL" ]; then JUDGE_REASON="first judge disabled"; return 0; fi
   if [ -z "$JUDGE_BIN" ] || [ ! -x "$JUDGE_BIN" ]; then JUDGE_REASON="first judge executable unavailable"; return 0; fi

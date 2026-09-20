@@ -4,14 +4,19 @@
 # its public interface: agy-shaped camelCase JSON payloads on stdin, the
 # per-task policy file, and the observable stdout decision, status file,
 # pending markers, verdict cache, and observer-log records. Covers the armed
-# heartbeat the spawn canary polls, the hard-refusal list holding under
-# bypass, the read-and-build and task-local abstentions (an approval IS no
-# output - agy cannot silently approve through a hook), the native file-write
-# tool mapping, every judge outcome denied rather than abstained, the
-# firstmate approve/decline resolution including declined-retry suppression
-# and held-call retry dedup, pending closure on post-tool-use and retire but
-# NOT on Stop, the grants digest pin, the workspace scoping guard, and the
-# no-policy and unparseable-payload failure modes.
+# heartbeat the spawn canary polls and its generation stamp, the hard-refusal
+# list holding under bypass, the read-and-build and task-local abstentions
+# (an approval IS no output - agy cannot silently approve through a hook),
+# the native file-write tool mapping including physical path resolution
+# against symlink escapes and the .agents/.git/wiring refusals, the
+# statically visible out-of-root exec write refusals under bypass, the
+# credential-material holds, every judge outcome denied rather than
+# abstained, the firstmate approve/decline resolution including the
+# never-approve one-shot token, declined-retry suppression, held-call retry
+# dedup and the marker binding that runs before the cache and the judge,
+# pending closure on post-tool-use - approved or anomaly - and retire but
+# NOT on Stop, the grants digest pin, and the fail-closed guards on foreign
+# workspaces, missing policies, and unparseable payloads.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -67,7 +72,7 @@ EOF
   jq -n --arg wt "$wt" --arg d "$dir" --arg judge "$judge" --arg sha "$sha" \
     '{task:"t1", worktree:$wt, status:($d+"/state/t1.status"), inbox:($d+"/state/t1.inbox"),
       data:($d+"/data/t1"), tasktmp:($d+"/tmp"), brief:($d+"/data/t1/brief.md"),
-      log:($d+"/state/agy-permission-log.jsonl"), agy:$judge,
+      log:($d+"/state/agy-permission-log.jsonl"), agy:$judge, gen:"g1",
       judge_model:(if $judge == "" then "" else "gemini-3.6-flash-low" end), judge_timeout:"5",
       grants_sha:$sha}' \
     > "$dir/state/t1.agy-permission.json"
@@ -113,12 +118,14 @@ test_armed_heartbeat_proves_wiring() {
     | "$POLICY_SH" armed "$policy" >/dev/null 2>&1
   [ "$(jq -r 'select(.event == "armed") | .task' "$log" 2>/dev/null)" = t1 ] \
     || fail "the armed heartbeat must land on the observer log: $(cat "$log" 2>/dev/null)"
+  [ "$(jq -r 'select(.event == "armed") | .gen' "$log" 2>/dev/null)" = g1 ] \
+    || fail "the armed heartbeat must carry this launch's generation for the canary: $(cat "$log" 2>/dev/null)"
   jq -nc --arg wt "$(jq -r .worktree "$policy")" \
     '{conversationId:"c1",workspacePaths:[$wt]}' \
     | "$POLICY_SH" armed "$policy" >/dev/null 2>&1
   [ "$(jq -s 'map(select(.event == "armed")) | length' "$log")" = 1 ] \
     || fail "the armed heartbeat must write exactly once per generation: $(cat "$log")"
-  pass "fm-agy-permission-policy: the armed heartbeat proves live wiring exactly once"
+  pass "fm-agy-permission-policy: the armed heartbeat proves live wiring exactly once, stamped with the launch's generation"
 }
 
 test_refusal_list_denies() {
@@ -210,6 +217,80 @@ EOF
   pass "fm-agy-permission-policy: non-command tools map onto the shared policy's file and read rules"
 }
 
+test_file_tool_writes_resolve_physically() {
+  local policy dir wt
+  policy=$(new_case symlink)
+  dir=$(case_dir "$policy")
+  wt=$(jq -r .worktree "$policy")
+  mkdir -p "$wt/real"
+  # A symlink inside the worktree pointing at an outside directory must not
+  # carry a file-tool write with it: the root check resolves the physical
+  # path, so the write is refused as outside the roots, not judged. The
+  # target must live outside every root - the scratch roots cover all of
+  # /tmp, so /etc is the honest outside.
+  ln -s /etc "$wt/out-link" || fail "could not create the escape symlink"
+  hook "$policy" pre-tool-use write_to_file "$wt/out-link/payload.txt"
+  denied "$OUT" "outside the task write roots" \
+    || fail "a write through an in-worktree symlink to outside must be refused, got: $OUT"
+  hook "$policy" pre-tool-use replace_file_content "out-link/payload.txt"
+  denied "$OUT" "outside the task write roots" \
+    || fail "a relative write through the escape symlink must be refused, got: $OUT"
+  # The same symlink check stays transparent for a link that resolves inside.
+  ln -s real "$wt/in-link" || fail "could not create the inside symlink"
+  hook "$policy" pre-tool-use write_to_file "$wt/in-link/ok.txt"
+  abstained "$OUT" || fail "a write through a symlink that resolves inside must abstain, got: $OUT"
+  pass "fm-agy-permission-policy: file-tool writes resolve the physical path before the root check"
+}
+
+test_file_tool_protected_and_config_paths() {
+  local policy dir wt
+  policy=$(new_case protected)
+  dir=$(case_dir "$policy")
+  wt=$(jq -r .worktree "$policy")
+  mkdir -p "$wt/.agents" "$wt/.git" "$dir/state/t1.agy-hooks"
+  local arg
+  # The worktree's own agent wiring and git state are refused outright under
+  # bypass - a hook file or git config written there disarms this layer or
+  # the repository's controls, and no native prompt exists to catch it.
+  while IFS= read -r arg; do
+    [ -n "$arg" ] || continue
+    hook "$policy" pre-tool-use write_to_file "$arg"
+    denied "$OUT" "agent or git configuration" \
+      || fail "write_to_file on '$arg' must be refused, got: $OUT"
+  done <<EOF
+$wt/.agents/hooks.json
+$wt/.agents/skills/evil/SKILL.md
+$wt/.git/config
+$wt/.git/hooks/pre-commit
+EOF
+  # .devin and .claude stay held for firstmate rather than hard-refused.
+  hook "$policy" pre-tool-use write_to_file "$wt/.devin/config.json"
+  denied "$OUT" "held for firstmate" \
+    || fail "a .devin write must escalate to firstmate, got: $OUT"
+  # The adapter's own firstmate-owned wiring is refused to the file tools too:
+  # the policy file, the pending and cache stores, the worker hook directory,
+  # and the observer log carrying the armed line and decision record.
+  while IFS= read -r arg; do
+    [ -n "$arg" ] || continue
+    hook "$policy" pre-tool-use write_to_file "$arg"
+    denied "$OUT" "permission wiring" \
+      || fail "write_to_file on wiring '$arg' must be refused, got: $OUT"
+  done <<EOF
+$dir/state/t1.agy-permission.json
+$dir/state/t1.agy-permission-pending/held.pending
+$dir/state/t1.agy-permission-cache/verdict
+$dir/state/t1.agy-hooks/.agents/hooks.json
+$dir/state/agy-permission-log.jsonl
+EOF
+  # Whether agy's file tools expand a leading ~ is unverified, so an ambiguous
+  # target refuses under bypass rather than trusting a literal '~' directory.
+  # shellcheck disable=SC2088 # the literal tilde IS the probe input
+  hook "$policy" pre-tool-use write_to_file '~/.zshrc'
+  denied "$OUT" "~ path" \
+    || fail "a ~ file-tool path must be refused under bypass, got: $OUT"
+  pass "fm-agy-permission-policy: file-tool writes refuse .agents/.git and the adapter's own wiring"
+}
+
 test_unlisted_tool_escalates_to_firstmate() {
   local policy dir
   policy=$(new_case residue)
@@ -255,7 +336,7 @@ test_held_call_retry_dedupes() {
 }
 
 test_post_tool_use_closes_the_marker_that_ran() {
-  local policy dir
+  local policy dir ckey
   policy=$(new_case closure)
   dir=$(case_dir "$policy")
   hook "$policy" pre-tool-use run_command "npm install" 5
@@ -263,14 +344,30 @@ test_post_tool_use_closes_the_marker_that_ran() {
   hook "$policy" post-tool-use run_command "ls" 6
   [ -f "$dir/state/t1.agy-permission-pending/c1-s5.pending" ] \
     || fail "an unrelated call must not close the marker"
-  # The retry arrives at a NEW stepIdx: the marker is matched by the call's
-  # input, not its key.
+  # A held call that runs WITHOUT firstmate's approval is an anomaly, not an
+  # approval: the marker still closes - the call ran - but the status line
+  # names the deny that was not honored so firstmate audits the pane.
   hook "$policy" post-tool-use run_command "npm install" 9
   [ ! -e "$dir/state/t1.agy-permission-pending/c1-s5.pending" ] \
     || fail "the held call running must close its marker"
+  grep -qF 'ran WITHOUT a firstmate approval' "$dir/state/t1.status" \
+    || fail "an unapproved run must close as an anomaly: $(cat "$dir/state/t1.status")"
   [ -z "$(status_open_decisions "$dir/state/t1.status")" ] \
     || fail "a run call must close its decision: $(cat "$dir/state/t1.status")"
-  pass "fm-agy-permission-policy: post-tool-use closes the escalation for the call that ran"
+  # The authorized shape: a marker still open whose call ran while a verdict
+  # was cached closes as approved, not as an anomaly.
+  hook "$policy" pre-tool-use run_command "pip install requests" 10
+  denied "$OUT" || fail "the second escalation must open"
+  ckey=$(sed -n '3p' "$dir/state/t1.agy-permission-pending/c1-s10.pending")
+  [ -n "$ckey" ] || fail "the marker must record its cache key"
+  mkdir -p "$dir/state/t1.agy-permission-cache"
+  printf 'verdict\n' > "$dir/state/t1.agy-permission-cache/$ckey"
+  hook "$policy" post-tool-use run_command "pip install requests" 11
+  [ ! -e "$dir/state/t1.agy-permission-pending/c1-s10.pending" ] \
+    || fail "an approved call running must close its marker"
+  grep -qF 'was approved and ran' "$dir/state/t1.status" \
+    || fail "an approved run must close as approved: $(cat "$dir/state/t1.status")"
+  pass "fm-agy-permission-policy: post-tool-use closes an approved run as approved and an unauthorized one as anomaly"
 }
 
 test_stop_preserves_pending_for_firstmate() {
@@ -337,6 +434,185 @@ test_decline_denies_the_retry_without_reescalating() {
   [ "$(grep -c '^needs-decision ' "$dir/state/t1.status")" = 1 ] \
     || fail "a declined retry must not open a second needs-decision: $(cat "$dir/state/t1.status")"
   pass "fm-agy-permission-policy: firstmate decline denies the exact retry without re-escalating"
+}
+
+test_exec_outroot_writes_refuse_not_judge() {
+  local policy wt cmd
+  policy=$(new_case outroot)
+  wt=$(jq -r .worktree "$policy")
+  # Under bypass there is no native prompt behind the judge, so a statically
+  # visible write or removal outside every write root is refused outright.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" pre-tool-use run_command "$cmd"
+    denied "$OUT" "refused under bypass" \
+      || fail "pre-tool-use must refuse '$cmd' under bypass, got: $OUT"
+  done <<EOF
+cp README.md /etc/fm-out
+install -m 644 README.md /etc/fm-out
+mv README.md /etc/fm-out
+rm -f /etc/fm-out
+rm -rf /etc/fm-out-dir
+ln README.md /etc/fm-out
+dd if=/dev/zero of=/etc/fm-out bs=1 count=1
+truncate -s 0 /etc/fm-out
+echo hi | tee /etc/fm-out
+echo hi > /etc/fm-out
+echo hi >> /etc/fm-out
+mkdir /etc/fm-out
+EOF
+  # Operands that are reads never bind the refusal: a cp whose outside
+  # operand is read-only and whose write lands inside the roots is an
+  # ordinary task-local file op, so it abstains.
+  hook "$policy" pre-tool-use run_command "cp /etc/hosts $wt/copy"
+  abstained "$OUT" \
+    || fail "a cp whose outside operand is a READ must not be refused, got: $OUT"
+  hook "$policy" pre-tool-use run_command "ln -s /etc/hosts $wt/host-link"
+  denied "$OUT" "held for firstmate" \
+    || fail "a symlink whose inside destination is the only write must escalate, got: $OUT"
+  hook "$policy" pre-tool-use run_command "split /etc/fm-big"
+  denied "$OUT" "held for firstmate" \
+    || fail "split's outside operand is a read and must escalate, got: $OUT"
+  hook "$policy" pre-tool-use run_command "cat /etc/hosts"
+  abstained "$OUT" \
+    || fail "a plain non-credential read must never be refused, got: $OUT"
+  # Interpreter reach is the lexical policy's documented boundary: a python
+  # write to /etc cannot be seen statically, so it escalates, never refuses.
+  hook "$policy" pre-tool-use run_command "python3 -c 'open(\"/etc/fm-out\",\"w\").write(\"x\")'"
+  denied "$OUT" "held for firstmate" \
+    || fail "an interpreter-write outside the roots is beyond lexical reach and must escalate, got: $OUT"
+  pass "fm-agy-permission-policy: statically visible out-of-root exec writes refuse under bypass; reads and interpreter reach escalate"
+}
+
+test_exec_wiring_writes_refuse() {
+  local policy dir cmd
+  policy=$(new_case wiring)
+  dir=$(case_dir "$policy")
+  # The same protected-wiring set binds run_command: a statically visible
+  # write or removal of the policy file, its stores, the hook dir, or the
+  # observer log is refused to every writer shape.
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    hook "$policy" pre-tool-use run_command "$cmd"
+    denied "$OUT" "permission wiring" \
+      || fail "pre-tool-use must refuse wiring write '$cmd', got: $OUT"
+  done <<EOF
+echo x > $dir/state/t1.agy-permission.json
+echo x >> $dir/state/agy-permission-log.jsonl
+rm -f $dir/state/agy-permission-log.jsonl
+rm -f $dir/state/t1.agy-permission.json
+rm -rf $dir/state/t1.agy-permission-cache
+mv $dir/state/t1.agy-permission.json $dir/state/evil
+cp README.md $dir/state/t1.agy-permission.json
+echo x | tee $dir/state/agy-permission-log.jsonl
+EOF
+  # A file beside the brief inside the task's own data root is NOT wiring:
+  # it stays held, proving the protection is file-precise rather than a
+  # blanket on the directories wiring happens to share.
+  hook "$policy" pre-tool-use run_command "rm -f $dir/data/t1/notes.txt"
+  denied "$OUT" "held for firstmate" \
+    || fail "a non-wiring in-root write must escalate, not refuse, got: $OUT"
+  pass "fm-agy-permission-policy: run_command refuses writes and removals of the adapter's own wiring"
+}
+
+test_never_approve_uses_a_one_shot_token() {
+  local policy dir key
+  policy=$(new_case once)
+  dir=$(case_dir "$policy")
+  hook "$policy" pre-tool-use run_command "git push origin main" 5
+  denied "$OUT" "held for firstmate" || fail "the outward call must first be held, got: $OUT"
+  [ "$(sed -n '4p' "$dir/state/t1.agy-permission-pending/c1-s5.pending")" = never ] \
+    || fail "an outward action must mark its marker never-class: $(cat "$dir/state/t1.agy-permission-pending/c1-s5.pending")"
+  key="agy-permission-c1-s5"
+  "$POLICY_SH" approve "$policy" "$key" </dev/null >/dev/null 2>&1 \
+    || fail "approve must succeed for an open never-class key"
+  grep -qF 'approved ONE run' "$dir/state/t1.status" \
+    || fail "a never-class approval must record its one-shot bound: $(cat "$dir/state/t1.status")"
+  [ "$(find "$dir/state/t1.agy-permission-cache" -name '*.once' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a never-class approval must leave a one-shot token, not a verdict cache entry"
+  [ "$(find "$dir/state/t1.agy-permission-cache" -type f ! -name '*.once' | wc -l | tr -d ' ')" = 0 ] \
+    || fail "a never-class approval must not plant a reusable verdict"
+  # The first retry consumes the token and runs.
+  hook "$policy" pre-tool-use run_command "git push origin main" 8
+  abstained "$OUT" || fail "the one-shot retry must abstain and run, got: $OUT"
+  [ "$(find "$dir/state/t1.agy-permission-cache" -name '*.once-spent' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the consumed token must be recorded as spent"
+  # A further retry escalates again - the approval was one run, not a verdict.
+  hook "$policy" pre-tool-use run_command "git push origin main" 9
+  denied "$OUT" "held for firstmate" \
+    || fail "a second retry after the one-shot must escalate again, got: $OUT"
+  [ -f "$dir/state/t1.agy-permission-pending/c1-s9.pending" ] \
+    || fail "the re-escalation must open a fresh marker"
+  pass "fm-agy-permission-policy: a never-approve approval is a one-shot token one retry consumes"
+}
+
+test_sensitive_paths_hold_for_firstmate_then_cache() {
+  local policy dir key arg
+  policy=$(new_case sensitive)
+  dir=$(case_dir "$policy")
+  # agy's own credential stores and the cloud CLIs' token material are
+  # credential reads: held for firstmate, never sent to the judge.
+  while IFS= read -r arg; do
+    [ -n "$arg" ] || continue
+    hook "$policy" pre-tool-use view_file "$arg"
+    denied "$OUT" "held for firstmate" \
+      || fail "view_file of credential material '$arg' must hold for firstmate, got: $OUT"
+  done <<EOF
+$HOME/.gemini/antigravity-cli/antigravity-oauth-token
+$HOME/.gemini/oauth_creds.json
+$HOME/.config/gcloud/application_default_credentials.json
+$HOME/.config/gcloud/credentials.db
+EOF
+  hook "$policy" pre-tool-use run_command "cat ~/.config/gcloud/legacy_credentials"
+  denied "$OUT" "held for firstmate" \
+    || fail "an exec read of gcloud material must hold for firstmate, got: $OUT"
+  hook "$policy" pre-tool-use run_command "cat ~/.gemini/oauth_creds.json"
+  denied "$OUT" "held for firstmate" \
+    || fail "an exec read of agy OAuth material must hold for firstmate, got: $OUT"
+  # Firstmate's approval of a held credential read must take effect: the
+  # retry hits the verdict cache rather than re-escalating forever.
+  hook "$policy" pre-tool-use view_file "$HOME/.ssh/id_rsa" 20
+  denied "$OUT" "held for firstmate" || fail "the credential read must first be held, got: $OUT"
+  key="agy-permission-c1-s20"
+  "$POLICY_SH" approve "$policy" "$key" </dev/null >/dev/null 2>&1 \
+    || fail "approve must succeed for the held credential read"
+  hook "$policy" pre-tool-use view_file "$HOME/.ssh/id_rsa" 21
+  abstained "$OUT" \
+    || fail "a firstmate-approved credential read must abstain on retry, got: $OUT"
+  pass "fm-agy-permission-policy: credential paths hold for firstmate and its approval caches normally"
+}
+
+test_held_marker_binds_before_the_judge() {
+  local policy dir
+  # The fake judge declines npm install on its first call and approves on the
+  # second: if a retried hold reached the judge it would approve and run, so
+  # the marker must be consulted before the judge is ever invoked.
+  # shellcheck disable=SC2016 # the body is the fake judge script's own source
+  policy=$(new_case binding '
+prompt=
+while [ $# -gt 0 ]; do [ "$1" = -p ] && prompt=$2; shift; done
+n=$(wc -l < "$JUDGE_CALLS" 2>/dev/null | tr -d " ")
+printf "%s\n" "judge-called" >> "$JUDGE_CALLS"
+case "$prompt" in
+  *"npm install"*)
+    if [ "$n" -eq 0 ]; then
+      echo "REASON: r"; echo "DECLINE: first answer"
+    else
+      echo "REASON: r"; echo "APPROVE: second answer"
+    fi ;;
+esac
+exit 0')
+  dir=$(case_dir "$policy")
+  export JUDGE_CALLS="$dir/judge-calls"
+  : > "$JUDGE_CALLS"
+  hook "$policy" pre-tool-use run_command "npm install" 5
+  denied "$OUT" "held for firstmate" || fail "the judged decline must hold, got: $OUT"
+  hook "$policy" pre-tool-use run_command "npm install" 6
+  denied "$OUT" "still held for firstmate" \
+    || fail "a retried hold must deny against its marker before judging, got: $OUT"
+  [ "$(wc -l < "$JUDGE_CALLS" | tr -d ' ')" = 1 ] \
+    || fail "the retried hold must never re-invoke the judge - it would have approved"
+  pass "fm-agy-permission-policy: an open marker binds a retried hold before the verdict cache and the judge"
 }
 
 test_judge_approve_abstains_and_caches() {
@@ -458,21 +734,30 @@ EOF
 test_workspace_scope_and_unparseable_payloads() {
   local policy out
   policy=$(new_case scope)
-  # A payload whose workspace does not include this task's worktree is not
-  # this task's to police: abstain, no marker, no status line.
-  out=$(jq -nc --arg wt "$(jq -r .worktree "$policy")" \
+  # A payload whose workspace does not include this task's worktree cannot be
+  # judged here - and under a bypass launch abstaining would run it, so even
+  # an otherwise safe command denies.
+  out=$(jq -nc \
+    '{conversationId:"c9", stepIdx:1, workspacePaths:["/somewhere/else"],
+      toolCall:{name:"run_command", args:{CommandLine:"ls", Cwd:"/somewhere/else"}}}' \
+    | "$POLICY_SH" pre-tool-use "$policy" 2>/dev/null)
+  denied "$out" "not scoped to this task's workspace" \
+    || fail "a foreign-workspace payload must deny, got: $out"
+  [ ! -e "$(case_dir "$policy")/state/t1.status" ] \
+    || fail "a foreign payload must never touch this task's status"
+  # The refusal list still speaks first: a refused command is refused no
+  # matter which workspace the call arrived under.
+  out=$(jq -nc \
     '{conversationId:"c9", stepIdx:1, workspacePaths:["/somewhere/else"],
       toolCall:{name:"run_command", args:{CommandLine:"sudo true", Cwd:"/somewhere/else"}}}' \
     | "$POLICY_SH" pre-tool-use "$policy" 2>/dev/null)
-  [ -z "$out" ] || fail "a foreign-workspace payload must abstain, got: $out"
-  [ ! -e "$(case_dir "$policy")/state/t1.status" ] \
-    || fail "a foreign payload must never touch this task's status"
+  denied "$out" || fail "a refused command in a foreign workspace must deny, got: $out"
   # A payload that cannot be read cannot be judged; under bypass abstaining
   # would run it, so it denies.
   out=$(printf 'not json at all' | "$POLICY_SH" pre-tool-use "$policy" 2>/dev/null)
   denied "$out" "unparseable" \
     || fail "an unparseable payload must deny, got: $out"
-  pass "fm-agy-permission-policy: foreign payloads abstain and unparseable ones deny"
+  pass "fm-agy-permission-policy: foreign-workspace and unparseable payloads deny"
 }
 
 test_missing_policy_file_fails_closed() {
@@ -481,11 +766,15 @@ test_missing_policy_file_fails_closed() {
       toolCall:{name:"run_command", args:{CommandLine:"rm -rf /tmp/x", Cwd:"/tmp"}}}' \
     | "$POLICY_SH" pre-tool-use "$TMP_ROOT/absent/t9.agy-permission.json" 2>/dev/null)
   denied "$out" || fail "without a policy file a recursive rm is unresolvable and must deny, got: $out"
+  # Without a readable policy there is no judge, no cache, and no workspace
+  # scope to trust - and under a bypass launch abstaining would run the call,
+  # so even a safe read denies rather than emitting nothing.
   out=$(jq -nc '{conversationId:"c1", stepIdx:1, workspacePaths:[],
       toolCall:{name:"run_command", args:{CommandLine:"cat README.md", Cwd:"/tmp"}}}' \
     | "$POLICY_SH" pre-tool-use "$TMP_ROOT/absent/t9.agy-permission.json" 2>/dev/null)
-  abstained "$out" || fail "without a policy file the refusal list still applies and the rest abstains, got: $out"
-  pass "fm-agy-permission-policy: a missing policy file keeps the refusal list and never judges"
+  denied "$out" "missing or unreadable" \
+    || fail "without a policy file even a safe read must deny, got: $out"
+  pass "fm-agy-permission-policy: a missing policy file keeps the refusal list and denies the rest"
 }
 
 test_verified_versions_and_grants_digest_verbs() {
@@ -589,12 +878,19 @@ test_armed_heartbeat_proves_wiring
 test_refusal_list_denies
 test_refusal_leaves_safe_commands_alone
 test_non_command_tool_mapping
+test_file_tool_writes_resolve_physically
+test_file_tool_protected_and_config_paths
 test_unlisted_tool_escalates_to_firstmate
 test_held_call_retry_dedupes
 test_post_tool_use_closes_the_marker_that_ran
 test_stop_preserves_pending_for_firstmate
 test_approve_caches_the_verdict_and_retry_abstains
 test_decline_denies_the_retry_without_reescalating
+test_exec_outroot_writes_refuse_not_judge
+test_exec_wiring_writes_refuse
+test_never_approve_uses_a_one_shot_token
+test_sensitive_paths_hold_for_firstmate_then_cache
+test_held_marker_binds_before_the_judge
 test_judge_approve_abstains_and_caches
 test_judge_failures_always_deny
 test_retire_closes_open_escalations

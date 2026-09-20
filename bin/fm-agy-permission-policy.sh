@@ -30,7 +30,10 @@
 #                              decision" and must stay resolvable until
 #                              approve, decline, or retire.
 #   approve <key>              firstmate's resolution of a held call: caches
-#                              the verdict so the worker's retry runs.
+#                              the verdict so the worker's retry runs. For a
+#                              never-approve call the approval is a one-shot
+#                              token consumed by one retry; a further retry
+#                              escalates again.
 #   decline <key>              firstmate's refusal of a held call: a retry of
 #                              the same call is denied without re-escalating.
 #   repin-grants               records the digest of a live brief's grants
@@ -43,31 +46,37 @@
 #                              fm-spawn refuses bypass mode on any other.
 #
 # Decisions: bin/fm-command-policy-lib.sh owns the command analysis - the
-# hard-refusal list, the read-and-build set, protected briefs, the
-# never-approve outward-action class, fetch classification, recursive-rm
-# roots, grants, the judge skeleton, and the verdict cache. This adapter
-# owns the agy payload schema (.conversationId, .stepIdx, .toolCall.name and
-# .toolCall.args camelCase fields), the agy tool-name mapping, the `agy -p`
-# judge invocation, and the agy decision surface:
-#   - the refusal list and a file write outside every write root emit
-#     {"decision":"deny","reason":"..."}, which agy enforces even under
-#     --dangerously-skip-permissions;
+# refusal list, the read-and-build set, protected briefs and protected
+# wiring, the never-approve outward-action class, fetch classification,
+# recursive-rm roots, grants, the judge skeleton, and the verdict cache. This
+# adapter owns the agy payload schema (.conversationId, .stepIdx,
+# .toolCall.name and .toolCall.args camelCase fields), the agy tool-name
+# mapping, the `agy -p` judge invocation, and the agy decision surface:
+#   - the refusal list, a statically visible write or removal outside every
+#     write root, and any write or removal of this adapter's own wiring - the
+#     policy file, its pending and cache stores, the worker hook directory,
+#     and the observer log - emit {"decision":"deny","reason":"..."}, which
+#     agy enforces even under --dangerously-skip-permissions;
 #   - the read-and-build set, read-only web lookups, task-local file
-#     operations, a cached verdict, and a judge APPROVE emit NOTHING - the
-#     call abstains and runs;
-#   - everything else - the never-approve class and every judge DECLINE,
-#     timeout, crash, or no-verdict - emits
-#     {"decision":"deny","reason":"held for firstmate: ..."}, writes the
-#     pending marker, and appends the needs-decision status line, so
+#     operations, a cached verdict, a consumed one-shot approval, and a
+#     judge APPROVE emit NOTHING - the call abstains and runs;
+#   - everything else - the never-approve class, a call touching credential
+#     material, and every judge DECLINE, timeout, crash, or no-verdict -
+#     emits {"decision":"deny","reason":"held for firstmate: ..."}, writes
+#     the pending marker, and appends the needs-decision status line, so
 #     firstmate can cache an approval and steer the worker to retry. A retry
-#     of the same held call is denied against the existing marker instead of
-#     opening a second escalation. The path never abstains: under a bypass
-#     launch, abstain is what runs a call.
+#     of the same held call is denied against the existing marker BEFORE the
+#     verdict cache or the judge is consulted, and a call firstmate declined
+#     is denied against its declined cache entry - neither re-escalates. The
+#     path never abstains: under a bypass launch, abstain is what runs a
+#     call.
 # Agy has no hook output that silently approves a call - {"decision":"allow"}
 # still lands on a native prompt - so this adapter's approval IS abstention,
 # which only means "run it" because the launch already skipped native review.
 # Because abstain runs the call, every failure mode here fails closed: no jq,
-# an unreadable payload, or an unknown tool class all deny rather than emit.
+# an unreadable payload, a call scoped to a foreign or missing workspace, or
+# an unreadable policy file all deny rather than emit - there is no native
+# prompt behind this layer to catch what it lets through.
 #
 # Tool mapping: run_command maps onto the shared exec analysis with
 # CommandLine and Cwd; view_file, grep_search, and list_dir are the read
@@ -79,13 +88,16 @@
 #
 # Policy file (written by bin/fm-spawn.sh): JSON object with string fields
 # task, worktree, status, inbox, data, tasktmp, brief, log, agy (absolute
-# judge executable), judge_model (an `agy --model` id read on every call,
-# empty disables the judge), judge_timeout (seconds, the bound on ONE judge
-# attempt), and grants_sha (the digest pin the shared library describes).
+# judge executable), gen (the launch's busy generation, stamped onto the
+# armed line so the canary can tell this launch's wiring from a stale record
+# left by an earlier launch), judge_model (an `agy --model` id read on every
+# call, empty disables the judge), judge_timeout (seconds, the bound on ONE
+# judge attempt), and grants_sha (the digest pin the shared library
+# describes).
 # Pending escalation markers live in <policy minus .json>-pending/ and the
 # per-task verdict cache in <policy minus .json>-cache/; bin/fm-teardown.sh
 # removes both with the policy file. With no readable policy file the
-# refusal list still applies and every other call abstains.
+# refusal list still applies and every other call denies.
 #
 # Exit codes: 0 always for hook events - agy reads the decision from stdout
 # and a non-zero exit blocks the tool without a reason the model can use.
@@ -102,6 +114,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$SCRIPT_DIR/fm-command-policy-lib.sh"
 
 FM_POLICY_EXEC_TOOL=run_command
+# This launch runs under agy's full bypass, so the shared analysis refuses
+# statically visible writes and removals outside the task write roots
+# outright rather than sending them to a judge with no native prompt behind
+# it.
+FM_POLICY_BYPASS=1
+# The judge budget is pinned per adapter so an inherited JUDGE_BUDGET cannot
+# stretch a hook invocation past the explicit timeout install-worker gives
+# the PreToolUse handler.
+JUDGE_BUDGET=100
 
 EVENT=${1-}
 POLICY=${2-}
@@ -162,7 +183,7 @@ fi
 PAYLOAD=
 case "$EVENT" in retire|repin-grants|approve|decline) ;; *) PAYLOAD=$(cat) ;; esac
 
-TASK='' WORKTREE='' STATUS='' INBOX='' DATA_DIR='' TASKTMP='' BRIEF='' LOG='' AGY='' JUDGE_BIN='' JUDGE_MODEL='' JUDGE_TIMEOUT='' GRANTS_SHA=''
+TASK='' WORKTREE='' STATUS='' INBOX='' DATA_DIR='' TASKTMP='' BRIEF='' LOG='' AGY='' JUDGE_BIN='' JUDGE_MODEL='' JUDGE_TIMEOUT='' GRANTS_SHA='' GEN=''
 if [ -n "$POLICY" ] && [ -r "$POLICY" ]; then
   {
     IFS= read -r -d '' TASK
@@ -177,17 +198,33 @@ if [ -n "$POLICY" ] && [ -r "$POLICY" ]; then
     IFS= read -r -d '' JUDGE_MODEL
     IFS= read -r -d '' JUDGE_TIMEOUT
     IFS= read -r -d '' GRANTS_SHA
-  } < <(jq -j '[.task, .worktree, .status, .inbox, .data, .tasktmp, .brief, .log, .agy, .judge_model, .judge_timeout, .grants_sha]
+    IFS= read -r -d '' GEN
+  } < <(jq -j '[.task, .worktree, .status, .inbox, .data, .tasktmp, .brief, .log, .agy, .judge_model, .judge_timeout, .grants_sha, .gen]
     | map((. // "") | tostring | gsub("\u0000"; "")) | join("\u0000") + "\u0000"' "$POLICY" 2>/dev/null)
   JUDGE_BIN=$AGY
 fi
 
-TOOL='' TOOL_USE_ID='' SESSION_ID='' STEP_IDX='' CMD='' AGY_CWD='' FILE_PATH='' INPUT_JSON='' INPUT_STRINGS='' CACHE_INPUT=''
+# The adapter's own firstmate-owned wiring, declared to the shared policy so
+# any statically visible write or removal of it is refused: the policy file
+# itself, its pending and cache stores, the worker hook directory beside the
+# policy file, and the observer log that carries the armed line and the
+# decision record. A worker rewriting any of these would disarm the only
+# check its bypassed launch has left.
+POLICY_PROTECTED=''
+if [ -n "$POLICY" ]; then
+  POLICY_PROTECTED=$POLICY
+  [ -n "$PENDING_DIR" ] && POLICY_PROTECTED="$POLICY_PROTECTED"$'\n'"$PENDING_DIR"
+  [ -n "$CACHE_DIR" ] && POLICY_PROTECTED="$POLICY_PROTECTED"$'\n'"$CACHE_DIR"
+  [ -n "$TASK" ] && POLICY_PROTECTED="$POLICY_PROTECTED"$'\n'"${POLICY%/*}/$TASK.agy-hooks"
+  [ -n "$LOG" ] && POLICY_PROTECTED="$POLICY_PROTECTED"$'\n'"$LOG"
+fi
+
+TOOL='' TOOL_USE_ID='' SESSION_ID='' CMD='' AGY_CWD='' FILE_PATH='' INPUT_JSON='' INPUT_STRINGS='' CACHE_INPUT=''
 {
   IFS= read -r -d '' TOOL
   IFS= read -r -d '' TOOL_USE_ID
   IFS= read -r -d '' SESSION_ID
-  IFS= read -r -d '' STEP_IDX
+  IFS= read -r -d '' _
   IFS= read -r -d '' CMD
   IFS= read -r -d '' AGY_CWD
   IFS= read -r -d '' FILE_PATH
@@ -220,16 +257,13 @@ if [ "$EVENT" = pre-tool-use ] && [ -z "$TOOL" ]; then
   deny "firstmate agy permission policy: unparseable tool call"
 fi
 
-# A payload scoped to a different workspace is not this task's to police.
-if [ -n "$WORKTREE" ] && [ -n "$PAYLOAD" ]; then
-  printf '%s' "$PAYLOAD" | jq -e --arg wt "$WORKTREE" \
-    '.workspacePaths | type == "array" and index($wt) != null' >/dev/null 2>&1 || exit 0
-fi
-
 write_armed() {
   # The canary's heartbeat: one armed line on the observer log proves the
-  # hook wiring fired at least once this generation. The flag file dedupes;
-  # retire removes it with the pending directory so a relaunch re-arms.
+  # hook wiring fired at least once this generation. It carries the launch's
+  # busy generation from the policy file, so the canary can tell it from a
+  # stale line an earlier launch or a reused task id left in the append-only
+  # log. The flag file dedupes; retire removes it with the pending directory
+  # so a relaunch re-arms.
   local flag="$PENDING_DIR/.armed" conv='' model=''
   [ -n "$PENDING_DIR" ] && [ -n "$LOG" ] || return 0
   [ -e "$flag" ] && return 0
@@ -238,37 +272,62 @@ write_armed() {
   conv=${SESSION_ID:-$(printf '%s' "$PAYLOAD" | jq -r '.conversationId // ""' 2>/dev/null)}
   model=$(printf '%s' "$PAYLOAD" | jq -r '.modelName // ""' 2>/dev/null)
   jq -c -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg task "$TASK" \
-    --arg conv "$conv" --arg model "$model" '{
+    --arg conv "$conv" --arg model "$model" --arg gen "$GEN" '{
       ts: $ts, task: $task, event: "armed",
-      tool: "fm-agy-permission-policy", session_id: $conv,
+      tool: "fm-agy-permission-policy", session_id: $conv, gen: $gen,
       step_idx: null, model: $model, input: "", cwd: "", error: ""
     }' >> "$LOG" 2>/dev/null || true
 }
 
 evaluate_tool() {  # non-exec agy tools: sets NOT_APPROVABLE
-  REFUSE_REASON='' NOT_APPROVABLE='' NEVER_APPROVE=''
+  REFUSE_REASON='' NOT_APPROVABLE='' NEVER_APPROVE='' SENSITIVE_HIT=''
   case "$TOOL" in
     view_file|grep_search|list_dir|search_web|read_url_content)
-      sensitive_text "$INPUT_STRINGS" && no_approve "$TOOL of credential material"
+      sensitive_text "$INPUT_STRINGS" \
+        && { SENSITIVE_HIT=1; no_approve "$TOOL of credential material"; }
       granted_env_file_text "$INPUT_STRINGS" \
-        && no_approve "$TOOL of a credential file this task may only source"
+        && { SENSITIVE_HIT=1; no_approve "$TOOL of a credential file this task may only source"; }
       ;;
     write_to_file|replace_file_content)
-      local abs rel wt_abs
+      local abs rel
       [ -n "$FILE_PATH" ] || { no_approve "$TOOL without a file path"; return 0; }
-      wt_abs=$(CWD=$WORKTREE write_target_path "$FILE_PATH" 0 2>/dev/null) || wt_abs=''
-      if [ -n "$wt_abs" ] && brief_protected "$wt_abs"; then
+      # Whether agy's file tools expand a leading ~ is unverified; under
+      # bypass an ambiguous write target is refused rather than trusted to
+      # land inside the worktree as a literal '~' directory.
+      case "$FILE_PATH" in
+        '~'*)
+          refuse "$TOOL of a ~ path ($FILE_PATH) is refused by firstmate policy"
+          return 0 ;;
+      esac
+      # The write root check resolves the path PHYSICALLY - a symlink inside
+      # the worktree pointing outside the roots must not carry the write with
+      # it, and an unresolvable target is refused rather than judged.
+      abs=$(CWD=$WORKTREE write_target_path "$FILE_PATH" 0 2>/dev/null) || abs=''
+      [ -n "$abs" ] || {
+        refuse "$TOOL of an unresolvable path ($FILE_PATH) is refused by firstmate policy"
+        return 0
+      }
+      if brief_protected "$abs"; then
         refuse "writing this task's own instructions ($FILE_PATH) is refused by firstmate policy"
         return 0
       fi
-      sensitive_text "$FILE_PATH" && { no_approve "$TOOL of credential material"; return 0; }
+      if protected_target "$abs"; then
+        refuse "$TOOL of firstmate's own permission wiring ($FILE_PATH) is refused by firstmate policy"
+        return 0
+      fi
+      sensitive_text "$FILE_PATH" \
+        && { SENSITIVE_HIT=1; no_approve "$TOOL of credential material"; return 0; }
       granted_env_file_text "$FILE_PATH" \
-        && { no_approve "$TOOL of a credential file this task may only source"; return 0; }
-      abs=$(resolve_path "$FILE_PATH" "$WORKTREE") || { no_approve "$TOOL path unresolvable"; return 0; }
+        && { SENSITIVE_HIT=1; no_approve "$TOOL of a credential file this task may only source"; return 0; }
       if strictly_inside "$abs" "$WORKTREE"; then
         rel=${abs#"$(norm_abs "$WORKTREE")"/}
         case "$rel" in
-          .git|.git/*|.devin|.devin/*|.claude|.claude/*|.agents|.agents/*)
+          # A write into the worktree's hook or git state can disarm this
+          # layer or the repository's own controls, so it is refused outright
+          # rather than judged.
+          .git|.git/*|.agents|.agents/*)
+            refuse "$TOOL of agent or git configuration ($rel) is refused by firstmate policy" ;;
+          .devin|.devin/*|.claude|.claude/*)
             no_approve "$TOOL of agent or git configuration" ;;
         esac
       elif ! inside_scratch_write_roots "$abs"; then
@@ -378,23 +437,72 @@ case "$EVENT" in
     exit 0
     ;;
   pre-tool-use)
-    write_armed
     if [ "$TOOL" = "$FM_POLICY_EXEC_TOOL" ]; then
       evaluate_exec "$CMD" "${AGY_CWD:-$WORKTREE}"
     else
       evaluate_tool
     fi
+    # The armed line is written even for a call about to be denied: any hook
+    # invocation proves this launch's wiring is live, and the canary watches
+    # the observer log only.
+    write_armed
+    # The refusal list speaks before every scope check: a refused command is
+    # refused no matter whose workspace or policy state the call arrived
+    # under.
     if [ -n "$REFUSE_REASON" ]; then
       log_record refuse policy "$REFUSE_REASON"
       deny "Blocked by firstmate policy: $REFUSE_REASON"
     fi
-    [ -n "$POLICY" ] && [ -r "$POLICY" ] || exit 0
+    # A call scoped to a foreign or missing workspace, or arriving with no
+    # readable policy behind it, cannot be judged here - and under a bypass
+    # launch abstaining would run it, so both deny.
+    if [ -n "$WORKTREE" ]; then
+      printf '%s' "$PAYLOAD" | jq -e --arg wt "$WORKTREE" \
+        '.workspacePaths | type == "array" and index($wt) != null' >/dev/null 2>&1 \
+        || { log_record refuse policy "tool call is not scoped to this task's workspace"
+             deny "firstmate agy permission policy: tool call is not scoped to this task's workspace"; }
+    fi
+    [ -n "$POLICY" ] && [ -r "$POLICY" ] \
+      || deny "firstmate agy permission policy: per-task policy file is missing or unreadable"
     if [ -z "$NOT_APPROVABLE" ]; then
       log_record approve policy "read-and-build set"
       exit 0
     fi
+    summary=$(one_line "$(input_summary)" 2000)
+    # A call already held for firstmate stays held: the open marker is
+    # consulted BEFORE the verdict cache and before the judge so a retried
+    # hold can never re-roll a nondeterministic judge into running it anyway.
+    # Only firstmate's approve verb closes the marker and lands the cache
+    # entry that lets the retry through.
+    if [ -d "$PENDING_DIR" ]; then
+      for m in "$PENDING_DIR"/*.pending; do
+        [ -f "$m" ] || continue
+        [ "$(sed -n '2p' "$m" 2>/dev/null)" = "$summary" ] || continue
+        IFS= read -r held_key < "$m" 2>/dev/null || held_key=''
+        log_record refuse policy "retried a call still held for firstmate as ${held_key:-held}"
+        deny "still held for firstmate as ${held_key:-held}: $(one_line "$NOT_APPROVABLE" 160). Do not retry unless firstmate approves it."
+      done
+    fi
+    if declined_file=$(declined_key_file 2>/dev/null) && [ -n "$declined_file" ] && [ -f "$declined_file" ]; then
+      # Firstmate already declined this exact call; a retry is denied without
+      # a second escalation so a looping worker cannot spam the status file.
+      log_record refuse policy "firstmate declined this call earlier in this task"
+      deny "firstmate declined this call; do not retry it"
+    fi
     escalate_reason='' escalate_source='first judge'
-    if [ -n "$NEVER_APPROVE" ]; then
+    if [ -n "$NEVER_APPROVE" ] && [ -n "$CACHE_DIR" ] \
+      && once_key=$(cache_key 2>/dev/null) && [ -n "$once_key" ] \
+      && [ -f "$CACHE_DIR/$once_key.once" ]; then
+      # Firstmate's one-shot approval of a never-approve call: the token is
+      # consumed by this retry, so a further retry escalates again. It is
+      # renamed, not deleted, so post-tool-use can still tell the authorized
+      # run from a deny the worker ignored.
+      if mv -f "$CACHE_DIR/$once_key.once" "$CACHE_DIR/$once_key.once-spent" 2>/dev/null; then
+        log_record approve firstmate "one-shot approval consumed"
+        exit 0
+      fi
+      deny "firstmate agy permission policy: could not consume the one-shot approval"
+    elif [ -n "$NEVER_APPROVE" ]; then
       # Outward actions skip the judge and the cache entirely; a firstmate
       # approval is a one-off, so a retry escalates again.
       escalate_reason=$NEVER_APPROVE escalate_source='firstmate policy'
@@ -402,11 +510,13 @@ case "$EVENT" in
     elif cache_lookup; then
       log_record approve cache "$CACHE_REASON (static: $NOT_APPROVABLE)"
       exit 0
-    elif declined_file=$(declined_key_file 2>/dev/null) && [ -n "$declined_file" ] && [ -f "$declined_file" ]; then
-      # Firstmate already declined this exact call; a retry is denied without
-      # a second escalation so a looping worker cannot spam the status file.
-      log_record refuse policy "firstmate declined this call earlier in this task"
-      deny "firstmate declined this call; do not retry it"
+    elif [ -n "$SENSITIVE_HIT" ]; then
+      # Credential material never reaches the judge under bypass: there is no
+      # native prompt behind it, so the call is held for firstmate directly.
+      # The cache is consulted first so firstmate's own approval of the read
+      # takes effect on the retry instead of re-escalating forever.
+      escalate_reason=$NOT_APPROVABLE escalate_source='firstmate policy'
+      log_record escalate policy "$NOT_APPROVABLE"
     else
       run_judge
       if [ "$JUDGE_VERDICT" = approve ]; then
@@ -419,24 +529,13 @@ case "$EVENT" in
     fi
     slug=$(tool_slug)
     key="agy-permission-$slug"
-    summary=$(one_line "$(input_summary)" 2000)
-    if [ -d "$PENDING_DIR" ]; then
-      # The same call retried at a new stepIdx must not open a second
-      # escalation: the marker's summary line is the deterministic input
-      # digest, so a match means this exact call is already held.
-      for m in "$PENDING_DIR"/*.pending; do
-        [ -f "$m" ] || continue
-        [ "$(sed -n '2p' "$m" 2>/dev/null)" = "$summary" ] || continue
-        IFS= read -r existing_key < "$m" 2>/dev/null || existing_key=$key
-        deny "still held for firstmate as ${existing_key:-$key}: $(one_line "$escalate_reason" 160). Do not retry unless firstmate approves it."
-      done
-    fi
     if [ -n "$PENDING_DIR" ] && mkdir -p "$PENDING_DIR" 2>/dev/null; then
       marker="$PENDING_DIR/$slug.pending"
       if [ ! -e "$marker" ]; then
-        ckey=''
-        [ -n "$NEVER_APPROVE" ] || ckey=$(cache_key 2>/dev/null || true)
-        printf '%s\n%s\n%s\n' "$key" "$summary" "$ckey" \
+        ckey=$(cache_key 2>/dev/null || true)
+        mclass=judge
+        [ -n "$NEVER_APPROVE" ] && mclass=never
+        printf '%s\n%s\n%s\n%s\n' "$key" "$summary" "$ckey" "$mclass" \
           > "$marker" 2>/dev/null || true
         status_append "needs-decision [key=$key]: agy worker held a tool call for firstmate - $TOOL ($escalate_source: $(one_line "$escalate_reason" 160)): $(one_line "$summary" 300)"
       fi
@@ -444,14 +543,22 @@ case "$EVENT" in
     deny "held for firstmate: $(one_line "$escalate_reason" 200). Do not retry unless firstmate approves it."
     ;;
   post-tool-use)
-    # A held call that later ran closes its marker here: the retry arrives at
-    # a new stepIdx, so the marker is matched by the same deterministic input
-    # summary the escalation dedup writes, not by the call's key.
+    # A held call that later ran is matched by the same deterministic input
+    # summary the escalation writes, not by the call's key - the retry
+    # arrives at a new stepIdx. Only a firstmate approval authorizes the run:
+    # a matching call with no approval cache entry ran DESPITE its deny,
+    # which is an anomaly with its own status line rather than an approval.
     summary=$(one_line "$(input_summary)" 2000)
     for m in "$PENDING_DIR"/*.pending; do
       [ -f "$m" ] || continue
       [ "$(sed -n '2p' "$m" 2>/dev/null)" = "$summary" ] || continue
-      close_pending "$m" approved "the escalated $TOOL call was approved and ran" policy
+      mckey=$(sed -n '3p' "$m" 2>/dev/null)
+      if [ -n "$mckey" ] && { [ -f "$CACHE_DIR/$mckey" ] \
+        || [ -f "$CACHE_DIR/$mckey.once" ] || [ -f "$CACHE_DIR/$mckey.once-spent" ]; }; then
+        close_pending "$m" approved "the escalated $TOOL call was approved and ran" policy
+      else
+        close_pending "$m" anomaly "the held $TOOL call ran WITHOUT a firstmate approval - the deny was not honored; audit this worker's pane" policy
+      fi
     done
     exit 0
     ;;
@@ -471,13 +578,25 @@ case "$EVENT" in
       echo "fm-agy-permission-policy: no pending escalation for key: $KEY" >&2
       exit 1
     }
-    { IFS= read -r pkey; IFS= read -r psummary; IFS= read -r pckey; } < "$marker" 2>/dev/null
+    { IFS= read -r _; IFS= read -r _; IFS= read -r pckey; IFS= read -r pclass; } < "$marker" 2>/dev/null
     if [ "$EVENT" = approve ]; then
-      if [ -n "$pckey" ]; then
+      [ -n "$pckey" ] && rm -f "$CACHE_DIR/$pckey.declined" 2>/dev/null || true
+      if [ "$pclass" = never ]; then
+        # A never-approve call cannot be cache-approved: the next identical
+        # call would run forever. The approval is a one-shot token the retry
+        # consumes, so a further retry escalates again.
+        if [ -n "$pckey" ] && mkdir -p "$CACHE_DIR" 2>/dev/null \
+          && printf 'one-shot\n' > "$CACHE_DIR/$pckey.once" 2>/dev/null; then
+          close_pending "$marker" approved "firstmate approved ONE run of the held call; the worker may retry it once - a further retry escalates again" firstmate
+        else
+          close_pending "$marker" not-run "firstmate approved it, but this call cannot be honored without a verdict cache - run it manually" firstmate
+        fi
+      elif [ -n "$pckey" ]; then
         cache_store "firstmate approved earlier in this task" "$pckey"
-        rm -f "$CACHE_DIR/$pckey.declined" 2>/dev/null || true
+        close_pending "$marker" approved "firstmate approved the held call; the worker may retry it" firstmate
+      else
+        close_pending "$marker" approved "firstmate approved the held call; the worker may retry it" firstmate
       fi
-      close_pending "$marker" approved "firstmate approved the held call; the worker may retry it" firstmate
     else
       if [ -n "$pckey" ]; then
         mkdir -p "$CACHE_DIR" 2>/dev/null \

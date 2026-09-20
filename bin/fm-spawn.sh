@@ -332,8 +332,8 @@
 # task record, busy generation, and hooks are kept for teardown instead, and
 # the failure says the worker may still be running.
 #   --agy-bypass is the opt-in reviewed path onto agy's
-#   --dangerously-skip-permissions, available to agy ship and scout spawns on
-#   the wired launch path only. It installs bin/fm-agy-permission-policy.sh
+#   --dangerously-skip-permissions, available to agy scout spawns on the wired
+#   launch path only. It installs bin/fm-agy-permission-policy.sh
 #   beside the worker hooks - an armed heartbeat on PreInvocation and Stop,
 #   and a hard-deny/judge decision on PreToolUse after the log-only observer
 #   - so the bypass is policed rather than bare. The
@@ -343,9 +343,12 @@
 #   root, an unwritable policy file, or a failed hook install. After the
 #   session starts, a canary (FM_AGY_ARMED_POLLS, default 40) refuses and
 #   closes the endpoint when the adapter's armed line never reaches the
-#   observer log - dead wiring is never trusted under bypass. A relaunch
-#   inherits the recorded posture through meta and retires the old
-#   generation's policy wiring first. agy cannot silently approve through a
+#   observer log - dead wiring is never trusted under bypass, and the armed
+#   line is stamped with this launch's busy generation so a stale record from
+#   an earlier launch or a reused task id cannot satisfy it. A relaunch
+#   inherits the recorded posture through meta when it resolves onto an agy
+#   scout again and retires the old generation's policy wiring first. agy
+#   cannot silently approve through a
 #   hook, so the layer's approvals are abstentions; what it still buys is
 #   hard refusals that hold under bypass, a judge for the residue, and
 #   durable escalation records firstmate can resolve.
@@ -1431,7 +1434,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
-  [ "$(fm_meta_get "$RELAUNCH_META" agy_bypass)" = on ] && AGY_BYPASS=1
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1464,6 +1466,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  # The recorded bypass posture binds to agy scout spawns only: a relaunch
+  # onto a different harness or a non-scout kind drops it rather than carrying
+  # an agy-only layer's name forward into a posture it was never reviewed for.
+  [ "$(fm_meta_get "$RELAUNCH_META" agy_bypass)" = on ] && [ "$ARG3" = agy ] && [ "$KIND" = scout ] && AGY_BYPASS=1
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
@@ -1875,8 +1881,9 @@ esac
 # --dangerously-skip-permissions: firstmate's permission layer
 # (bin/fm-agy-permission-policy.sh) rides the worker hook file it installs, so
 # the bypass is policed rather than bare. It is never the default, applies
-# only to agy ship and scout spawns on the wired launch path - a raw launch
-# command installs no hooks at all - and refuses to combine with
+# only to agy scout spawns on the wired launch path - a raw launch command
+# installs no hooks at all, and the reviewed posture covers the read-only
+# scout surface only - and refuses to combine with
 # config/crew-permissions=manual, which is itself an explicit prompt posture.
 # A relaunch inherits the recorded posture through the meta read above, so
 # every check below and at install time applies to it unchanged.
@@ -1889,8 +1896,8 @@ if [ "$AGY_BYPASS" -eq 1 ]; then
     echo "error: --agy-bypass cannot ride a raw launch command; the permission layer it requires is never installed there" >&2
     exit 1
   }
-  [ "$KIND" != secondmate ] || {
-    echo "error: --agy-bypass applies to ship and scout workers, not secondmate spawns" >&2
+  [ "$KIND" = scout ] || {
+    echo "error: --agy-bypass applies only to agy scout spawns; the policed-bypass posture is reviewed for the read-only scout surface only" >&2
     exit 1
   }
   [ "$CREW_PERMISSION_MODE" = auto ] || {
@@ -3534,10 +3541,16 @@ agy_wait_for_started() {
 agy_wait_for_armed() {
   local log="$STATE_REAL/agy-permission-log.jsonl" i=0 \
     max=${FM_AGY_ARMED_POLLS:-40} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  # The adapter stamps its armed line with the busy generation the spawn
+  # recorded in the policy file, so a line left in the append-only log by an
+  # earlier launch - or a previous task that reused this log - can never
+  # satisfy the canary for THIS launch. With no generation armed the match
+  # would degenerate to gen:"", so the canary refuses outright.
+  [ -n "$BUSY_GEN" ] || return 1
   while [ "$i" -lt "$max" ]; do
     [ -f "$log" ] \
-      && jq -eR --arg task "$ID" \
-        'fromjson? | select(.task == $task and .event == "armed")' \
+      && jq -eR --arg task "$ID" --arg gen "$BUSY_GEN" \
+        'fromjson? | select(.task == $task and .event == "armed" and .gen == $gen)' \
         "$log" >/dev/null 2>&1 && return 0
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -3868,12 +3881,15 @@ if [ "$KIND" != secondmate ]; then
           # The digest pins the grants block firstmate wrote, so a block the
           # worker adds or edits in its own brief grants nothing.
           agy_grants_sha=$("$SCRIPT_DIR/fm-agy-permission-policy.sh" grants-digest "$BRIEF" 2>/dev/null || true)
+          # gen binds this launch's armed line to its own busy generation: the
+          # canary matches it so an armed record left by a previous launch or
+          # a reused task id can never pass for this one's live wiring.
           jq -n --arg task "$ID" --arg worktree "$agy_wt_real" \
             --arg status "$STATE_REAL/$ID.status" --arg inbox "$STATE_REAL/$ID.inbox" \
             --arg data "$agy_task_data" --arg tasktmp "$TASK_TMP" --arg brief "$BRIEF" \
             --arg log "$STATE_REAL/agy-permission-log.jsonl" --arg agy "$AGY_BIN" \
-            --arg grants_sha "$agy_grants_sha" \
-            '{task:$task, worktree:$worktree, status:$status, inbox:$inbox, data:$data, tasktmp:$tasktmp, brief:$brief, log:$log, agy:$agy, judge_model:"gemini-3.6-flash-low", judge_timeout:"60", grants_sha:$grants_sha}' \
+            --arg gen "$BUSY_GEN" --arg grants_sha "$agy_grants_sha" \
+            '{task:$task, worktree:$worktree, status:$status, inbox:$inbox, data:$data, tasktmp:$tasktmp, brief:$brief, log:$log, agy:$agy, gen:$gen, judge_model:"gemini-3.6-flash-low", judge_timeout:"60", grants_sha:$grants_sha}' \
             > "$agy_policy" || {
             echo "error: cannot spawn agy bypass worker: could not write $agy_policy" >&2
             exit 1

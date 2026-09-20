@@ -237,8 +237,8 @@ out=$(cd "$CASE_WS" && "$AGY_BIN" -p \
 # The exact query fm-spawn's agy_wait_for_armed polls must still find nothing.
 armed=0
 for _ in 1 2 3 4; do
-  [ -f "$CASE_LOG" ] && jq -eR --arg task "$CASE_ID" \
-    'fromjson? | select(.task == $task and .event == "armed")' "$CASE_LOG" >/dev/null 2>&1 \
+  [ -f "$CASE_LOG" ] && jq -eR --arg task "$CASE_ID" --arg gen "$GEN" \
+    'fromjson? | select(.task == $task and .event == "armed" and .gen == $gen)' "$CASE_LOG" >/dev/null 2>&1 \
     && armed=1 && break
   sleep 0.5
 done

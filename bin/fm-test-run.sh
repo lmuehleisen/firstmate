@@ -281,6 +281,7 @@ family_for_basename() {
     fm-captain-hold-completed-ship.test.sh|fm-captain-hold-rehold.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-devin-harness.test.sh|fm-devin-permission-policy.test.sh|\
+    fm-agy-permission-policy.test.sh|\
     fm-harness-precedence.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
@@ -348,6 +349,7 @@ family_for_basename() {
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|\
     fm-agy-primary-live-e2e.test.sh|fm-agy-observer-live-e2e.test.sh|\
+    fm-agy-bypass-live-e2e.test.sh|\
     fm-devin-signals-live-e2e.test.sh|fm-devin-permission-policy-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
@@ -1457,6 +1459,19 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-agy-signals-live-e2e.test.sh
       printf '%s\n' __script__:fm-agy-primary-live-e2e.test.sh
       printf '%s\n' __script__:fm-agy-observer-live-e2e.test.sh
+      ;;
+    bin/fm-agy-permission-policy.sh)
+      printf '%s\n' __script__:fm-agy-permission-policy.test.sh
+      printf '%s\n' __script__:fm-agy-bypass-live-e2e.test.sh
+      ;;
+    bin/fm-command-policy-lib.sh|bin/fm-devin-permission-policy.sh)
+      # The shared command policy binds both adapters: a change to it or to
+      # the Devin adapter's shell selects both portable suites plus each
+      # adapter's live guard.
+      printf '%s\n' __script__:fm-devin-permission-policy.test.sh
+      printf '%s\n' __script__:fm-agy-permission-policy.test.sh
+      printf '%s\n' __script__:fm-devin-permission-policy-live-e2e.test.sh
+      printf '%s\n' __script__:fm-agy-bypass-live-e2e.test.sh
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)
