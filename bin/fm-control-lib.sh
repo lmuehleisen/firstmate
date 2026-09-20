@@ -266,8 +266,15 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     # The directory and per-generation session bindings are retired through
-    # fm-agy-hook.sh retire-worker; only this file is a flat wiring artifact.
-    agy) printf '%s\n' "$state/$id.agy-hooks/.agents/hooks.json" ;;
+    # fm-agy-hook.sh retire-worker; these are the flat wiring artifacts. The
+    # bypass layer's sibling $id.agy-permission-pending/ markers are retired
+    # through fm-agy-permission-policy.sh retire before the policy file goes,
+    # so each open decision is closed as not-run while the policy file still
+    # names the status file.
+    agy)
+      printf '%s\n' "$state/$id.agy-hooks/.agents/hooks.json"
+      printf '%s\n' "$state/$id.agy-permission.json"
+      ;;
     # The sibling $id.devin-permission-pending/ escalation markers are retired
     # through fm-devin-permission-policy.sh retire before these files go, so
     # each open decision is closed as not-run while the policy file still

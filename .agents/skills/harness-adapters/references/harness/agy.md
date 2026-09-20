@@ -101,6 +101,25 @@ An operator who wants a quieter agy worker can add their own allow rules there d
 
 Headless `-p` runs behave differently and are not the worker path: a tool needing approval is auto-denied with a stderr notice naming the missing rule, and the run still exits 0.
 
+### Opt-in bypass permission layer
+
+`../../../../../bin/fm-spawn.sh --agy-bypass` is a separate, per-spawn opt-in path that pairs `--dangerously-skip-permissions` with a firstmate-owned policing adapter, `../../../../../bin/fm-agy-permission-policy.sh`, wired beside the observer hooks by `install-worker`'s optional policy argument.
+It is never selected by default, applies to scout spawns only, and is never a fallback: an unmet gate refuses the launch rather than emitting a bare bypass, and a relaunch inherits the recorded posture only while it still resolves onto an agy scout.
+
+Under bypass the hook decision surface collapses to two effective outcomes, verified live on agy 1.2.6: `deny` still blocks with its reason, and abstention runs the call - `allow`, `ask`, and even `force_ask` have no prompt left to act on, so they cannot surface a question.
+The adapter therefore emits only `deny` or silence; every "ask the human" case denies with `held for firstmate`, writes a pending marker under `<policy>-pending/` keyed `agy-permission-<conversationId>-s<stepIdx>`, and appends a `needs-decision` status line.
+A held call is binding: a retry is matched against the open marker and the declined record before any cache lookup or judge run, so the same call can never run on a re-judged verdict or a shifted step index - only a firstmate `approve` opens it, and `decline` leaves a durable record that stops the retry from re-escalating.
+An approval lands in the per-task verdict cache for ordinary calls; for a never-approve class it is a one-shot token that the authorized retry consumes.
+Markers deliberately survive `Stop` - nothing in a bypassed session is still waiting, so the marker means "firstmate still owes this call a decision" and closes only on approve, decline, a retried call's PostToolUse, or `retire`.
+
+File-tool writes are checked against the resolved physical path, so a symlink cannot route a `write_to_file` outside the task roots, and a target under `.agents/`, `.git/`, or firstmate's own worker wiring is refused outright.
+Under bypass a statically visible exec write or removal outside the task write roots is refused rather than judged - there is no native prompt behind the judge to correct a bad verdict - while credential reads are refused rather than escalated.
+The remaining surface is inherent to a lexical policy: a refused command reached through an interpreter, encoded pipe, alias, or expansion is not statically visible, so it still reaches the judge, and no lexical layer can close that reach.
+
+Defences that gate the launch: `jq` present, the agy version inside the adapter's live-verified set (`verified-versions`, currently `1.2.4 1.2.5 1.2.6`), no project-supplied `.agents/hooks.json` in the worktree or ancestors up to the git root (one malformed entry silently disables every hook in that file, firstmate's denies included), and a startup canary that closes the endpoint when the adapter's armed line for this launch's busy generation never reaches the observer log.
+The judge tier calls `agy -p` under its own sandbox on `gemini-3.6-flash-low` with a 100-second budget pinned beside the Devin adapter's; its prompt rides on the process argument list, so a call under review is visible in `ps` while the judge runs.
+The layer's decision log is the same `state/agy-permission-log.jsonl` the observer writes.
+
 ## Native hooks and primary integration
 
 The working hook schema is a named definition in `.agents/hooks.json`, with direct handlers for PreInvocation and Stop and matcher groups for PreToolUse and PostToolUse.

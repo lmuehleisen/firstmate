@@ -886,6 +886,31 @@ ok - agy 1.2.5: installed worker hooks emit a PreToolUse and PostToolUse line wh
 
 The portable suite `tests/fm-agy-harness.test.sh` pins the record schema, the field caps, the never-log-contents rule, every inert failure path, concurrent appends, and the install-time refusal of a malformed merged `hooks.json`.
 
+### Bypass permission layer (opt-in)
+
+Verified on 2026-09-18 with agy 1.2.6 on macOS 25.6.0 in scratch workspaces under the task temp root, on `gemini-3.6-flash-low` headless runs.
+The earlier hook-contract facts were verified on 1.2.4 and 1.2.5, so the layer's live-verified set is `1.2.4 1.2.5 1.2.6`.
+
+```sh
+FM_AGY_BYPASS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-bypass-live-e2e.test.sh
+```
+
+```text
+ok - agy 1.2.6: a policy deny blocks a bypassed call and the reason reaches the model
+ok - agy 1.2.6: an abstained task-local file op runs unchanged and the armed heartbeat logged
+ok - agy 1.2.6: a timed-out judge denies, holds the call for firstmate, and never abstains
+ok - agy 1.2.6: install-worker refuses a malformed merged hooks.json before any launch
+ok - agy 1.2.6: a force_ask decision under bypass did not block the call - no prompt exists to force
+ok - agy 1.2.6: a bypass session whose hook never logs leaves no armed line for the canary to trust
+# agy bypass permission layer live checks passed (agy 1.2.6)
+```
+
+What this proves: `{"decision":"deny","reason":...}` holds under `--dangerously-skip-permissions` and the model echoes the reason; abstention runs the call (the layer's only approval surface); a dead judge still denies; a malformed merge is caught before launch; and a session that never loads the adapter produces no armed line for `fm-spawn`'s canary to trust.
+What it also shows: `force_ask` is inert under bypass - there is no prompt left to force - so deny plus abstain are the only effective decisions the layer can emit, and every "ask the human" path must go through the pending-marker escalation instead.
+
+`--sandbox` composition probe, 2026-09-19, agy 1.2.7 (the installed CLI self-updated past the live-verified set between review rounds, so this run is evidence about composition, not a member of the verified set): `agy -p --model gemini-3.6-flash-low --dangerously-skip-permissions --sandbox` parses and runs in headless mode, and the model completed file-tool and `run_command` writes to the workspace, to a sibling state directory, and to `$HOME` - no file-write surface the probes reached was restricted.
+The launch therefore stays on `--dangerously-skip-permissions` alone: `--sandbox` is not omitted because it fails to compose but because no containment was observable in this mode, and its interactive-session behaviour under a spawned pane is unverified.
+
 ### Primary and secondmate supervision
 
 Verified on 2026-09-10 with Agy 1.2.0 and `gemini-3.8-flash` at low effort on macOS using a throwaway Firstmate home and private tmux socket.

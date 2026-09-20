@@ -343,6 +343,7 @@ This is the only worker permission setting: no value selects Claude's `--dangero
 Auto requests Claude's classifier-backed permission mode and Codex's automatic approval reviewer with workspace-write sandboxing.
 agy has no reviewed-auto mode of its own, so Auto selects its accept-edits mode, which approves file edits inside the granted directories while still asking for every shell command; its blanket bypass is never selected by either setting.
 An agy worker therefore pauses for approval more often than a Claude or Codex worker, including for the shell command that appends its own status lines, and that pause is a visible prompt in its window rather than a silent stop.
+A separate per-spawn `bin/fm-spawn.sh --agy-bypass` flag exists that pairs agy's bypass flag with firstmate's own hook permission layer, and it stays unselected unless a launch names it; [`docs/verification/runtime-backends.md`](verification/runtime-backends.md) and the [agy adapter reference](../.agents/skills/harness-adapters/references/harness/agy.md) own its gates and decision surface.
 Availability depends on the installed CLI, account, and managed policy; an unsupported or denied request must be reported, never retried with bypass permissions.
 Manual keeps approval prompts available for human review, so an unattended task may wait for intervention.
 Both modes preserve the separate project delivery and merge-approval rules.

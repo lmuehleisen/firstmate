@@ -3625,6 +3625,11 @@ remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+if [ -e "$STATE/$ID.agy-permission.json" ] || [ -d "$STATE/$ID.agy-permission-pending" ]; then
+  # The bypass adapter's retire closes every pending escalation as not-run
+  # while the policy file still names the status file.
+  "$SCRIPT_DIR/fm-agy-permission-policy.sh" retire "$STATE/$ID.agy-permission.json" </dev/null || exit 1
+fi
 if [ -e "$STATE/$ID.agy-hooks" ] || [ -L "$STATE/$ID.agy-hooks" ]; then
   "$SCRIPT_DIR/fm-agy-hook.sh" retire-worker "$STATE" "$ID" || exit 1
 fi
@@ -3636,10 +3641,12 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" "$STATE/$ID.treehouse-lease"
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/$ID.devin-permission.json" "$STATE/.$ID.branch-outcome-index"
+  "$STATE/$ID.devin-permission.json" "$STATE/$ID.agy-permission.json" \
+  "$STATE/.$ID.branch-outcome-index"
 # Devin permission-policy escalation markers and per-task verdict cache
-# (bin/fm-devin-permission-policy.sh).
-rm -rf "$STATE/$ID.devin-permission-pending" "$STATE/$ID.devin-permission-cache"
+# (bin/fm-devin-permission-policy.sh); the same for the agy bypass layer.
+rm -rf "$STATE/$ID.devin-permission-pending" "$STATE/$ID.devin-permission-cache" \
+  "$STATE/$ID.agy-permission-pending" "$STATE/$ID.agy-permission-cache"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
