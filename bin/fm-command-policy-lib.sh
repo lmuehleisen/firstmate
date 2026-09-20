@@ -931,7 +931,7 @@ write_target_path() {  # <word> <expansion-flag>
   local w abs link hops=0
   w=$(resolve_maybe_tilde "$1" "$2" "$CWD" 2>/dev/null) || return 1
   abs=$(physical_target "$w" "$CWD" 0) || abs=$(norm_abs "$w")
-  while [ -L "$abs" ] && [ "$hops" -lt 8 ]; do
+  while [ -L "$abs" ] && [ "$hops" -lt 40 ]; do
     link=$(readlink "$abs" 2>/dev/null) || break
     case "$link" in
       /*) abs=$(norm_abs "$link") ;;
@@ -940,6 +940,11 @@ write_target_path() {  # <word> <expansion-flag>
     abs=$(physical_target "$abs" '' 0) || break
     hops=$((hops + 1))
   done
+  # A chain that outruns the hop bound, or a cycle that never reaches a
+  # non-symlink, is unresolvable: returning the partially resolved path would
+  # read an outside target as still inside the worktree, so fail closed and
+  # let the caller refuse or judge instead.
+  [ ! -L "$abs" ] || return 1
   printf '%s' "$abs"
 }
 

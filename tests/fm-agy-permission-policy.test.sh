@@ -239,6 +239,26 @@ test_file_tool_writes_resolve_physically() {
   ln -s real "$wt/in-link" || fail "could not create the inside symlink"
   hook "$policy" pre-tool-use write_to_file "$wt/in-link/ok.txt"
   abstained "$OUT" || fail "a write through a symlink that resolves inside must abstain, got: $OUT"
+  # A deep but legal chain resolves to its end and is judged by where it
+  # lands; a chain that outruns the resolver's hop bound fails closed rather
+  # than returning a partially resolved path that still reads as in-worktree.
+  local i prev
+  prev=/etc/hosts
+  for i in 9 8 7 6 5 4 3 2 1; do
+    ln -sfn "$prev" "$wt/chain-$i" || fail "could not create chain link $i"
+    prev="$wt/chain-$i"
+  done
+  hook "$policy" pre-tool-use write_to_file "$wt/chain-1"
+  denied "$OUT" "outside the task write roots" \
+    || fail "a resolved deep chain must refuse by its physical end, got: $OUT"
+  prev=/etc/hosts
+  for i in $(seq 45 -1 1); do
+    ln -sfn "$prev" "$wt/deep-$i" || fail "could not create deep link $i"
+    prev="$wt/deep-$i"
+  done
+  hook "$policy" pre-tool-use write_to_file "$wt/deep-1"
+  denied "$OUT" "unresolvable path" \
+    || fail "a chain past the hop bound must fail closed, got: $OUT"
   pass "fm-agy-permission-policy: file-tool writes resolve the physical path before the root check"
 }
 
