@@ -924,6 +924,263 @@ test_observer_and_turnend_survive_the_merge() {
   pass "fm-agy-permission-policy: the observer and turn-end supervision survive the merged install"
 }
 
+# --- judge tier selection ------------------------------------------------------
+
+# set_tier <policy> <tier> [judge-bin]: rewrite the policy's judge tier fields,
+# the way fm-spawn records what --agy-judge selected.
+set_tier() {
+  local policy=$1 tier=$2 bin=${3-}
+  jq --arg t "$tier" --arg b "$bin" '.judge_tier = $t | .judge_bin = $b' \
+    "$policy" > "$policy.new" && mv "$policy.new" "$policy"
+}
+
+# a fake judge executable for a NON-agy tier, invoked with that tier's own argv.
+make_devin_tier_judge() {  # <dir> -> path
+  local dir=$1 bin="$1/bin/devin"
+  mkdir -p "$1/bin"
+  cat > "$bin" <<'SH'
+#!/usr/bin/env bash
+prompt= mode= model=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --prompt-file) prompt=$2 ;;
+    --permission-mode) mode=$2 ;;
+    --model) model=$2 ;;
+  esac
+  shift
+done
+printf 'devin-tier model=%s mode=%s\n' "$model" "$mode" >> "$JUDGE_CALLS"
+[ -n "$prompt" ] || { echo "DECLINE: no --prompt-file"; exit 0; }
+grep -q "npm install" "$prompt" || { echo "DECLINE: prompt missing the tool call"; exit 0; }
+# The prompt names the WORKER being supervised, which is still an agy worker
+# whatever tier answers the question.
+grep -q "unattended agy coding worker" "$prompt" || { echo "DECLINE: wrong worker label"; exit 0; }
+echo "REASON: rule 3, routine project-local install"
+echo "APPROVE: judged on the selected tier"
+exit 0
+SH
+  chmod +x "$bin"
+  printf '%s\n' "$bin"
+}
+
+test_judge_tier_is_selected_never_assumed() {
+  local policy dir tier_bin
+  # The fake `agy` judge approves everything it is asked about. Every case
+  # below that must NOT reach it proves the point by leaving it uncalled.
+  # shellcheck disable=SC2016 # the body is the fake judge script's own source
+  policy=$(new_case tier '
+printf "%s\n" "agy-tier" >> "$JUDGE_CALLS"
+echo "REASON: rule 3, routine"
+echo "APPROVE: judged on the agy tier"
+exit 0')
+  dir=$(case_dir "$policy")
+  export JUDGE_CALLS="$dir/judge-calls"
+  : > "$JUDGE_CALLS"
+
+  # A policy that names no tier keeps this adapter's own tier: the posture
+  # every bypass task had before the tier was selectable.
+  hook "$policy" pre-tool-use run_command "npm install" 1
+  abstained "$OUT" || fail "an unset tier must keep the adapter's own judge, got: $OUT"
+  [ "$(grep -c agy-tier "$JUDGE_CALLS")" = 1 ] \
+    || fail "the adapter's own judge must have answered: $(cat "$JUDGE_CALLS")"
+
+  # Naming that same tier explicitly is the same decision, written down.
+  set_tier "$policy" agy
+  hook "$policy" pre-tool-use run_command "npm ci" 2
+  abstained "$OUT" || fail "an explicit agy tier must judge as before, got: $OUT"
+  [ "$(grep -c agy-tier "$JUDGE_CALLS")" = 2 ] \
+    || fail "the explicit agy tier must reach the same judge: $(cat "$JUDGE_CALLS")"
+
+  # An unknown tier is a configuration error: it denies and holds for
+  # firstmate, and it never quietly falls back onto the judge this adapter
+  # used to hard-wire - which would have approved.
+  set_tier "$policy" swe-9000
+  hook "$policy" pre-tool-use run_command "npm dedupe" 3
+  denied "$OUT" "held for firstmate" || fail "an unknown judge tier must deny, got: $OUT"
+  grep -qF 'is not a known judge tier' "$dir/state/t1.status" \
+    || fail "the escalation must name the unknown tier: $(cat "$dir/state/t1.status")"
+  [ "$(grep -c agy-tier "$JUDGE_CALLS")" = 2 ] \
+    || fail "an unknown tier must never fall back onto this adapter's judge: $(cat "$JUDGE_CALLS")"
+
+  # A known tier whose executable this task does not carry denies too, and
+  # again never reaches for the adapter's own binary.
+  set_tier "$policy" devin
+  hook "$policy" pre-tool-use run_command "npm prune" 4
+  denied "$OUT" "held for firstmate" \
+    || fail "a tier with no executable must deny, got: $OUT"
+  grep -qF 'first judge executable unavailable' "$dir/state/t1.status" \
+    || fail "the escalation must name the missing judge: $(cat "$dir/state/t1.status")"
+  [ "$(grep -c agy-tier "$JUDGE_CALLS")" = 2 ] \
+    || fail "a tier with no executable must never borrow this adapter's judge: $(cat "$JUDGE_CALLS")"
+
+  # The selected tier, with its executable, runs under THAT tier's invocation
+  # shape and its verdict decides the call - an agy worker judged elsewhere.
+  tier_bin=$(make_devin_tier_judge "$dir")
+  set_tier "$policy" devin "$tier_bin"
+  jq '.judge_model = "swe-2-high"' "$policy" > "$policy.new" && mv "$policy.new" "$policy"
+  hook "$policy" pre-tool-use run_command "npm install --no-save" 5
+  abstained "$OUT" \
+    || fail "the selected tier's APPROVE must abstain, got: $OUT ($(tail -1 "$dir/state/agy-permission-log.jsonl"))"
+  grep -qF 'devin-tier model=swe-2-high mode=normal' "$JUDGE_CALLS" \
+    || fail "the tier must be invoked with its own argv and model: $(cat "$JUDGE_CALLS")"
+  [ "$(grep -c agy-tier "$JUDGE_CALLS")" = 2 ] \
+    || fail "selecting another tier must not also run this adapter's judge: $(cat "$JUDGE_CALLS")"
+  # The log has to say which judge adjudicated each call: the per-task policy
+  # file that records the tier is removed at teardown, the log outlives it.
+  tail -1 "$dir/state/agy-permission-log.jsonl" | grep -qF 'judge: devin/swe-2-high' \
+    || fail "the judge record must name the tier that decided it: $(tail -1 "$dir/state/agy-permission-log.jsonl")"
+  grep -qF 'judge: agy/gemini-3.6-flash-low' "$dir/state/agy-permission-log.jsonl" \
+    || fail "the adapter's own tier must be named in its own judge records: $(cat "$dir/state/agy-permission-log.jsonl")"
+  pass "fm-agy-permission-policy: the judge tier is selected, and an unknown or unavailable one denies instead of falling back"
+}
+
+test_judge_keeps_a_verdict_a_killed_attempt_already_gave() {
+  local policy dir
+  # A judge that answers and then hangs: the bound kills it, but the verdict
+  # it already emitted is complete and must not be thrown away.
+  # shellcheck disable=SC2016 # the body is the fake judge script's own source
+  policy=$(new_case timeout-verdict '
+prompt=
+while [ $# -gt 0 ]; do [ "$1" = -p ] && prompt=$2; shift; done
+case "$prompt" in
+  *"npm install"*)
+    echo "REASON: rule 3, routine project-local install"
+    echo "APPROVE: answered before hanging"
+    sleep 30 ;;
+  *"pip install --user"*)
+    echo "REASON: rule 4, machine-wide install"
+    echo "DECLINE: answered before hanging"
+    sleep 30 ;;
+  *) sleep 30 ;;
+esac
+exit 0')
+  dir=$(case_dir "$policy")
+  jq '.judge_timeout = "1"' "$policy" > "$policy.new" && mv "$policy.new" "$policy"
+
+  hook "$policy" pre-tool-use run_command "npm install" 1
+  abstained "$OUT" \
+    || fail "a verdict the killed attempt already gave must stand, got: $OUT ($(cat "$dir/state/agy-permission-log.jsonl"))"
+  [ ! -e "$dir/state/t1.status" ] \
+    || fail "a recovered approval must not wake firstmate: $(cat "$dir/state/t1.status")"
+  [ "$(jq -s 'map(select(.decision == "judge-timeout-verdict")) | length' \
+      "$dir/state/agy-permission-log.jsonl")" = 1 ] \
+    || fail "the recovery must be recorded: $(cat "$dir/state/agy-permission-log.jsonl")"
+
+  # A recovered DECLINE is still a decline: recovery changes which verdict is
+  # honored, never which way an unanswered call falls.
+  hook "$policy" pre-tool-use run_command "pip install --user requests" 2
+  denied "$OUT" "held for firstmate" \
+    || fail "a recovered DECLINE must still hold the call, got: $OUT"
+  grep -qF 'answered before hanging' "$dir/state/t1.status" \
+    || fail "the recovered decline's own reason must escalate: $(cat "$dir/state/t1.status")"
+
+  # A killed attempt that said nothing usable is still no verdict at all.
+  hook "$policy" pre-tool-use run_command "make deploy" 3
+  denied "$OUT" "held for firstmate" || fail "a silent hang must still deny, got: $OUT"
+  grep -qF 'first judge timed out after 1s' "$dir/state/t1.status" \
+    || fail "a silent hang must escalate as a timeout: $(cat "$dir/state/t1.status")"
+  pass "fm-agy-permission-policy: a verdict a timed-out judge already emitted is honored, and a silent one still denies"
+}
+
+test_judge_retry_is_not_weaker_than_the_first_attempt() {
+  local policy dir bounds fakebin b1 b2
+  # The bound handed to the bounding mechanism is observable: a stand-in
+  # `timeout` on PATH records it. Both attempts must get the same bound - a
+  # retry that is structurally weaker than the attempt it replaces is not a
+  # retry.
+  # shellcheck disable=SC2016 # the body is the fake judge script's own source
+  policy=$(new_case retry-bound '
+exit 3')
+  dir=$(case_dir "$policy")
+  bounds="$dir/bounds"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+# Records the bound, then runs the command unbounded: every attempt under
+# this case returns at once, so no bound needs enforcing.
+while [ $# -gt 0 ]; do
+  case $1 in -k) shift 2 ;; *) break ;; esac
+done
+printf '%s\n' "$1" >> "$FM_TEST_JUDGE_BOUNDS"
+shift
+exec "$@"
+SH
+  chmod +x "$fakebin/timeout"
+
+  # A judge_timeout the budget can fund twice is honored in full on both.
+  export FM_TEST_JUDGE_BOUNDS="$bounds"
+  : > "$bounds"
+  PATH="$fakebin:$PATH" hook "$policy" pre-tool-use run_command "npm install" 1
+  [ "$(wc -l < "$bounds" | tr -d ' ')" = 2 ] \
+    || fail "the judge must make exactly two attempts, bounds: $(cat "$bounds")"
+  b1=$(sed -n 1p "$bounds"); b2=$(sed -n 2p "$bounds")
+  [ "$b1" = 5 ] && [ "$b2" = 5 ] \
+    || fail "a judge_timeout the budget can fund twice must be honored on both attempts, got $b1 then $b2"
+
+  # A judge_timeout the budget cannot fund TWICE is shared equally instead of
+  # spent first-come. Spending it first-come is what left the retry weaker:
+  # the first attempt took its whole bound and the retry got the remainder.
+  # Both bounds fitting inside the adapter's 100s judge budget is exactly the
+  # property that stops that happening, whatever the first attempt consumes.
+  jq '.judge_timeout = "90"' "$policy" > "$policy.new" && mv "$policy.new" "$policy"
+  : > "$bounds"
+  PATH="$fakebin:$PATH" hook "$policy" pre-tool-use run_command "npm ci" 2
+  b1=$(sed -n 1p "$bounds"); b2=$(sed -n 2p "$bounds")
+  [ "$b1" = "$b2" ] \
+    || fail "both judge attempts must get the same bound, got $b1 then $b2"
+  [ "$b1" -gt 0 ] || fail "each judge attempt must get a positive bound, got $b1"
+  [ "$((b1 + b2))" -le 100 ] \
+    || fail "two attempts must fit the adapter's judge budget, got $b1 + $b2"
+  unset FM_TEST_JUDGE_BOUNDS
+  pass "fm-agy-permission-policy: the judge's retry gets the same bound as the attempt it replaces"
+}
+
+test_judge_probe_measures_without_touching_the_task() {
+  local policy dir out before_log
+  # shellcheck disable=SC2016 # the body is the fake judge script's own source
+  policy=$(new_case probe '
+printf "%s\n" "probed" >> "$JUDGE_CALLS"
+echo "REASON: rule 3, routine"
+echo "APPROVE: project-local install"
+exit 0')
+  dir=$(case_dir "$policy")
+  export JUDGE_CALLS="$dir/judge-calls"
+  : > "$JUDGE_CALLS"
+  before_log="$dir/state/agy-permission-log.jsonl"
+
+  out=$(printf '%s' "$(jq -nc --arg wt "$(jq -r .worktree "$policy")" \
+    '{conversationId:"c1", stepIdx:1, workspacePaths:[$wt],
+      toolCall:{name:"run_command", args:{CommandLine:"npm install", Cwd:$wt}}}')" \
+    | "$POLICY_SH" judge-probe "$policy" 2>/dev/null)
+  case "$out" in
+    *"tier=agy"*"model=gemini-3.6-flash-low"*"static=residue"*"verdict=approve"*) ;;
+    *) fail "the probe must report the tier, model, static class, and verdict, got: $out" ;;
+  esac
+  [ "$(grep -c probed "$JUDGE_CALLS")" = 1 ] || fail "the probe must actually ask the judge"
+
+  # Measurement leaves no trace: nothing cached, held, woken, or logged.
+  [ ! -e "$dir/state/t1.status" ] || fail "the probe must not wake firstmate: $(cat "$dir/state/t1.status")"
+  [ ! -e "$dir/state/t1.agy-permission-pending" ] \
+    || fail "the probe must leave no pending marker or armed flag"
+  [ ! -e "$dir/state/t1.agy-permission-cache" ] \
+    || fail "the probe must not cache a verdict a real call would then reuse"
+  [ ! -e "$before_log" ] || fail "the probe must write no observer-log record: $(cat "$before_log")"
+
+  # A statically decided call is reported without spending a judge call.
+  out=$(printf '%s' "$(jq -nc --arg wt "$(jq -r .worktree "$policy")" \
+    '{conversationId:"c1", stepIdx:2, workspacePaths:[$wt],
+      toolCall:{name:"run_command", args:{CommandLine:"sudo ls", Cwd:$wt}}}')" \
+    | "$POLICY_SH" judge-probe "$policy" 2>/dev/null)
+  case "$out" in
+    *"static=refuse"*"verdict=n/a"*) ;;
+    *) fail "a refused call must probe as refused without a verdict, got: $out" ;;
+  esac
+  [ "$(grep -c probed "$JUDGE_CALLS")" = 1 ] \
+    || fail "a statically decided call must not spend a judge call"
+  pass "fm-agy-permission-policy: judge-probe reports a tier's verdict and writes nothing"
+}
+
 test_armed_heartbeat_proves_wiring
 test_refusal_list_denies
 test_refusal_leaves_safe_commands_alone
@@ -944,6 +1201,10 @@ test_sensitive_paths_hold_for_firstmate_then_cache
 test_held_marker_binds_before_the_judge
 test_judge_approve_abstains_and_caches
 test_judge_failures_always_deny
+test_judge_tier_is_selected_never_assumed
+test_judge_keeps_a_verdict_a_killed_attempt_already_gave
+test_judge_retry_is_not_weaker_than_the_first_attempt
+test_judge_probe_measures_without_touching_the_task
 test_retire_closes_open_escalations
 test_grants_digest_pins_the_block
 test_workspace_scope_and_unparseable_payloads

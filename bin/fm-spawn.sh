@@ -2,7 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--agy-bypass]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--agy-bypass [--agy-judge <tier>[:<model>]]]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -363,6 +363,14 @@
 #   hook, so the layer's approvals are abstentions; what it still buys is
 #   hard refusals that hold under bypass, a judge for the residue, and
 #   durable escalation records firstmate can resolve.
+#   --agy-judge <tier>[:<model>] selects WHICH judge answers that residue,
+#   from the tiers bin/fm-judge-tier-lib.sh knows. It requires --agy-bypass,
+#   and its default needs no flag at all: agy judges agy, on that tier's own
+#   model. Selecting another tier refuses rather than falls back when the tier
+#   is unknown or its executable is not installed. The resolved tier is printed
+#   before the launch, repeated on the spawned line, and recorded as agy_judge=
+#   so a relaunch re-judges on the same tier and a later reader of the decision
+#   log can tell which judge adjudicated this task's calls.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -559,6 +567,10 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# The judge tier registry, so --agy-judge is validated here at launch rather
+# than discovered by a worker whose first residue call finds no judge.
+# shellcheck source=bin/fm-judge-tier-lib.sh
+. "$SCRIPT_DIR/fm-judge-tier-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -585,6 +597,11 @@ YOLO_SET=0
 TRACEPARENT_SET=0
 AGY_BYPASS=0
 AGY_BYPASS_SET=0
+AGY_JUDGE_ARG=
+AGY_JUDGE_SET=0
+AGY_JUDGE_TIER=
+AGY_JUDGE_MODEL=
+AGY_JUDGE_BIN=
 RELAUNCH=0
 POS=()
 want_value=
@@ -624,6 +641,10 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    agy-judge)
+      AGY_JUDGE_ARG=$a
+      AGY_JUDGE_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -679,6 +700,11 @@ for a in "$@"; do
     TRACEPARENT_SET=1
     ;;
   --agy-bypass) AGY_BYPASS=1 AGY_BYPASS_SET=1 ;;
+  --agy-judge) want_value=agy-judge ;;
+  --agy-judge=*)
+    AGY_JUDGE_ARG=${a#--agy-judge=}
+    AGY_JUDGE_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -696,6 +722,10 @@ done
 }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || {
   echo "error: --effort requires a non-empty value" >&2
+  exit 1
+}
+[ "$AGY_JUDGE_SET" -eq 0 ] || [ -n "$AGY_JUDGE_ARG" ] || {
+  echo "error: --agy-judge requires a non-empty value" >&2
   exit 1
 }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || {
@@ -758,6 +788,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   [ "$AGY_BYPASS_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded agy permission posture; --agy-bypass cannot override it" >&2
+    exit 1
+  }
+  [ "$AGY_JUDGE_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded judge tier; --agy-judge cannot override it" >&2
     exit 1
   }
 else
@@ -1609,6 +1643,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # onto a different harness or a non-scout kind drops it rather than carrying
   # an agy-only layer's name forward into a posture it was never reviewed for.
   [ "$(fm_meta_get "$RELAUNCH_META" agy_bypass)" = on ] && [ "$ARG3" = agy ] && [ "$KIND" = scout ] && AGY_BYPASS=1
+  # The recorded judge tier rides the same inheritance: a relaunch that dropped
+  # it would silently re-judge the task on a different tier than the one its
+  # record names. A record written before the tier was selectable carries no
+  # field, which resolves to this adapter's own tier below.
+  if [ "$AGY_BYPASS" -eq 1 ]; then
+    AGY_JUDGE_ARG=$(fm_meta_get "$RELAUNCH_META" agy_judge || true)
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
   '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
@@ -2087,7 +2128,30 @@ if [ "$AGY_BYPASS" -eq 1 ]; then
     echo "error: --agy-bypass conflicts with config/crew-permissions=manual; drop one posture" >&2
     exit 1
   }
+  # The judge tier, resolved here so an unknown or unavailable judge refuses
+  # the launch instead of turning every residue call into a hold the captain
+  # has to answer by hand. The default needs no flag - agy judges agy - and
+  # whatever is resolved is recorded and printed, because the judge that
+  # adjudicated a call has to stay identifiable when the decision log is read
+  # back after the per-task policy file is gone.
+  AGY_JUDGE_TIER=${AGY_JUDGE_ARG%%:*}
+  case "$AGY_JUDGE_ARG" in *:*) AGY_JUDGE_MODEL=${AGY_JUDGE_ARG#*:} ;; *) AGY_JUDGE_MODEL= ;; esac
+  # Absent means this adapter's own tier: agy judges agy, automatically, which
+  # is the decided default rather than an opt-in.
+  [ -n "$AGY_JUDGE_TIER" ] || AGY_JUDGE_TIER=agy
+  fm_judge_tier_known "$AGY_JUDGE_TIER" || {
+    echo "error: --agy-judge names an unknown judge tier '$AGY_JUDGE_TIER'; known tiers: $(fm_judge_tiers)" >&2
+    exit 1
+  }
+  [ -n "$AGY_JUDGE_MODEL" ] || AGY_JUDGE_MODEL=$(fm_judge_tier_model "$AGY_JUDGE_TIER")
+  # Whether the tier's judge is actually installed here is decided beside the
+  # bypass posture's other installed-binary gates below, once the agy binary
+  # itself has been resolved.
 fi
+[ "$AGY_JUDGE_SET" -eq 0 ] || [ "$AGY_BYPASS" -eq 1 ] || {
+  echo "error: --agy-judge selects the judge for the --agy-bypass permission layer; without that posture no judge is installed" >&2
+  exit 1
+}
 
 # muse, gemini, and devin are verified as CREWMATE/SCOUT adapters only. A
 # secondmate is a firstmate instance, so it needs a primary supervision protocol.
@@ -4176,6 +4240,9 @@ if [ "$KIND" != secondmate ]; then
         #   its ancestors up to the git root, because one malformed entry
         #   there silently disables every hook in the file, including the
         #   adapter's own denies;
+        # - the selected judge tier's executable, because a tier whose judge
+        #   is not installed would hold every residue call for firstmate
+        #   instead of judging it;
         # - and the policy file itself, which install-worker then verifies
         #   exists before merging the adapter into the hooks.
         command -v jq >/dev/null 2>&1 || {
@@ -4191,6 +4258,19 @@ if [ "$KIND" != secondmate ]; then
             exit 1
             ;;
         esac
+        if [ "$AGY_JUDGE_TIER" = agy ]; then
+          # The judge tier and the worker share one binary, already gated above.
+          AGY_JUDGE_BIN=$AGY_BIN
+        else
+          AGY_JUDGE_BIN=$(command -v "$(fm_judge_tier_command "$AGY_JUDGE_TIER")" 2>/dev/null || true)
+        fi
+        [ -n "$AGY_JUDGE_BIN" ] && [ -x "$AGY_JUDGE_BIN" ] || {
+          echo "error: cannot spawn agy bypass worker: the $AGY_JUDGE_TIER judge tier needs the '$(fm_judge_tier_command "$AGY_JUDGE_TIER")' executable, which is not installed; install it or select a tier that is" >&2
+          exit 1
+        }
+        # Say the judge out loud before the launch: which judge adjudicated a
+        # task's calls is part of reading its decisions back later.
+        echo "agy bypass judge tier: $AGY_JUDGE_TIER model=$AGY_JUDGE_MODEL executable=$AGY_JUDGE_BIN" >&2
         agy_wt_real=$(cd "$WT" && pwd -P) || exit 1
         agy_check_dir=$agy_wt_real
         agy_git_root=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$agy_wt_real")
@@ -4215,7 +4295,9 @@ if [ "$KIND" != secondmate ]; then
           --arg data "$agy_task_data" --arg tasktmp "$TASK_TMP" --arg brief "$BRIEF" \
           --arg log "$STATE_REAL/agy-permission-log.jsonl" --arg agy "$AGY_BIN" \
           --arg gen "$BUSY_GEN" --arg grants_sha "$agy_grants_sha" \
-          '{task:$task, worktree:$worktree, status:$status, inbox:$inbox, data:$data, tasktmp:$tasktmp, brief:$brief, log:$log, agy:$agy, gen:$gen, judge_model:"gemini-3.6-flash-low", judge_timeout:"60", grants_sha:$grants_sha}' \
+          --arg judge_tier "$AGY_JUDGE_TIER" --arg judge_bin "$AGY_JUDGE_BIN" \
+          --arg judge_model "$AGY_JUDGE_MODEL" \
+          '{task:$task, worktree:$worktree, status:$status, inbox:$inbox, data:$data, tasktmp:$tasktmp, brief:$brief, log:$log, agy:$agy, gen:$gen, judge_tier:$judge_tier, judge_bin:$judge_bin, judge_model:$judge_model, judge_timeout:"60", grants_sha:$grants_sha}' \
           > "$agy_policy" || {
           echo "error: cannot spawn agy bypass worker: could not write $agy_policy" >&2
           exit 1
@@ -4700,7 +4782,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx agy_bypass", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx agy_bypass agy_judge", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4723,6 +4805,10 @@ preserve_relaunch_meta() {
   # Recorded only when the opt-in bypass posture is armed, so an absent
   # field is the accept-edits/manual default every other agy task carries.
   [ "$AGY_BYPASS" -eq 0 ] || echo "agy_bypass=on"
+  # The judge tier rides the recorded posture so a relaunch re-judges on the
+  # same tier, and so the task's own record answers which judge decided its
+  # held and approved calls.
+  [ "$AGY_BYPASS" -eq 0 ] || echo "agy_judge=$AGY_JUDGE_TIER:$AGY_JUDGE_MODEL"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -5179,4 +5265,9 @@ SPAWN_META_LOCK_HELD=0
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+# A bypass spawn always names the judge tier it just armed, so the judge behind
+# this worker's decisions is visible where the spawn is read, not only in the
+# task's record.
+SPAWN_JUDGE=
+[ "$AGY_BYPASS" -eq 0 ] || SPAWN_JUDGE=" judge=$AGY_JUDGE_TIER:$AGY_JUDGE_MODEL"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY$SPAWN_JUDGE window=$META_WINDOW worktree=$WT"

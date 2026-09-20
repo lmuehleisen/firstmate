@@ -817,6 +817,145 @@ EOF
   pass "fm-spawn.sh: --agy-bypass launches a policed bypass once the adapter is armed"
 }
 
+test_agy_bypass_records_and_prints_the_judge_tier() {
+  local fields case_dir home proj wt fakebin id out policy
+  fields=$(make_spawn_case bypass-judge-default)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass) \
+    || fail "an armed agy bypass spawn failed: $out"
+  policy="$home/state/$id.agy-permission.json"
+  # With no flag the judge stays on this adapter's own tier - the posture that
+  # adds no second caller to anyone else's quota - and says so out loud.
+  [ "$(jq -r .judge_tier "$policy")" = agy ] \
+    || fail "the default judge tier must be recorded in the policy: $(cat "$policy")"
+  [ "$(jq -r .judge_model "$policy")" = gemini-3.6-flash-low ] \
+    || fail "the tier's own model must be recorded: $(cat "$policy")"
+  [ -x "$(jq -r .judge_bin "$policy")" ] \
+    || fail "the resolved judge executable must be recorded: $(cat "$policy")"
+  grep -q '^agy_judge=agy:gemini-3.6-flash-low$' "$home/state/$id.meta" \
+    || fail "the judge tier must ride the recorded posture: $(cat "$home/state/$id.meta")"
+  case "$out" in
+    *"agy bypass judge tier: agy model=gemini-3.6-flash-low"*) ;;
+    *) fail "the spawn must name the judge tier before launching, got: $out" ;;
+  esac
+  case "$out" in
+    *"judge=agy:gemini-3.6-flash-low"*) ;;
+    *) fail "the spawned line must name the judge tier, got: $out" ;;
+  esac
+  pass "fm-spawn.sh: a bypass spawn records and prints the judge tier it armed"
+}
+
+test_agy_judge_selects_another_tier() {
+  local fields case_dir home proj wt fakebin id out policy
+  fields=$(make_spawn_case bypass-judge-select)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  fm_fake_exit0 "$fakebin" devin
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass \
+    --agy-judge devin) || fail "selecting an installed judge tier failed: $out"
+  policy="$home/state/$id.agy-permission.json"
+  [ "$(jq -r .judge_tier "$policy")" = devin ] \
+    || fail "the selected tier must be recorded: $(cat "$policy")"
+  [ "$(jq -r .judge_model "$policy")" = swe-2-high ] \
+    || fail "the selected tier's own default model must be recorded: $(cat "$policy")"
+  [ "$(jq -r .judge_bin "$policy")" = "$fakebin/devin" ] \
+    || fail "the selected tier's executable must be resolved at launch: $(cat "$policy")"
+  grep -q '^agy_judge=devin:swe-2-high$' "$home/state/$id.meta" \
+    || fail "the selected tier must ride the recorded posture: $(cat "$home/state/$id.meta")"
+  case "$out" in
+    *"agy bypass judge tier: devin model=swe-2-high"*) ;;
+    *) fail "the spawn must name the selected tier before launching, got: $out" ;;
+  esac
+
+  # An explicit model rides the same flag.
+  fields=$(make_spawn_case bypass-judge-model)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  fm_fake_exit0 "$fakebin" devin
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass \
+    --agy-judge devin:swe-2-medium) || fail "selecting a tier and model failed: $out"
+  [ "$(jq -r .judge_model "$home/state/$id.agy-permission.json")" = swe-2-medium ] \
+    || fail "an explicit judge model must be recorded: $(cat "$home/state/$id.agy-permission.json")"
+  pass "fm-spawn.sh: --agy-judge arms another tier and records its model"
+}
+
+test_agy_judge_refuses_rather_than_falling_back() {
+  local fields case_dir home proj wt fakebin id out status sans
+  # An unknown tier is a typo or an unbuilt judge; falling back would put the
+  # worker on a judge nobody asked for.
+  fields=$(make_spawn_case bypass-judge-unknown)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass \
+    --agy-judge swe-9000)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unknown judge tier must refuse the spawn: $out"
+  case "$out" in
+    *"unknown judge tier 'swe-9000'"*) ;;
+    *) fail "the refusal must name the unknown tier, got: $out" ;;
+  esac
+  ! grep -Fq -- '--dangerously-skip-permissions' "$home/launch.log" 2>/dev/null \
+    || fail "a refused judge tier must never reach the launch: $(cat "$home/launch.log")"
+  [ ! -e "$home/state/$id.agy-permission.json" ] \
+    || fail "a refused judge tier must not leave a policy file"
+
+  # A known tier whose judge is not installed refuses too, rather than arming
+  # a layer whose every residue call would hold for firstmate. The PATH is
+  # curated rather than inherited so the case still proves that on a machine
+  # where the real judge IS installed.
+  fields=$(make_spawn_case bypass-judge-missing)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  sans=$(fm_test_base_path_sans "$PATH" devin) \
+    || fail 'could not build a PATH without the judge tier executable'
+  out=$(PATH="$sans" run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --scout --agy-bypass --agy-judge devin)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a judge tier with no executable must refuse the spawn: $out"
+  case "$out" in
+    *"which is not installed"*) ;;
+    *) fail "the refusal must name the missing judge executable, got: $out" ;;
+  esac
+  [ ! -e "$home/state/$id.agy-permission.json" ] \
+    || fail "a refused judge tier must not leave a policy file"
+
+  # The flag selects the judge for the bypass layer; without that layer there
+  # is no judge to select.
+  fields=$(make_spawn_case bypass-judge-no-posture)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-judge devin)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--agy-judge without --agy-bypass must refuse: $out"
+  case "$out" in
+    *"without that posture no judge is installed"*) ;;
+    *) fail "the refusal must explain that no judge is installed, got: $out" ;;
+  esac
+  pass "fm-spawn.sh: --agy-judge refuses an unknown or uninstalled tier instead of falling back"
+}
+
 test_agy_bypass_refuses_an_unverified_version() {
   local fields case_dir home proj wt fakebin id out status
   fields=$(make_spawn_case bypass-version)
@@ -1445,6 +1584,9 @@ test_agy_spawn_confirms_the_brief_started
 test_agy_spawn_fails_and_closes_when_the_brief_never_starts
 test_agy_spawn_keeps_its_record_when_the_endpoint_will_not_close
 test_agy_bypass_launch_installs_the_adapter_and_skips_permissions
+test_agy_bypass_records_and_prints_the_judge_tier
+test_agy_judge_selects_another_tier
+test_agy_judge_refuses_rather_than_falling_back
 test_agy_bypass_refuses_an_unverified_version
 test_agy_bypass_refuses_a_project_hooks_file
 test_agy_bypass_refuses_the_wrong_posture
