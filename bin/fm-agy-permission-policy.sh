@@ -137,8 +137,17 @@ esac
 
 if [ "$EVENT" = verified-versions ]; then
   # The agy versions docs/verification/runtime-backends.md records live
-  # evidence for; fm-spawn gates --agy-bypass launches on this set.
-  printf '1.2.4 1.2.5 1.2.6\n'
+  # evidence for; fm-spawn gates --agy-bypass launches on this set. Each
+  # entry is admitted only after tests/fm-agy-bypass-live-e2e.test.sh passes
+  # against that installed binary, because the hook contract this layer rests
+  # on is version-sensitive: 1.2.7 was added on 2026-09-20 after all six live
+  # checks passed on it - deny blocks a bypassed call with its reason,
+  # abstention runs the call, a timed-out judge denies and holds, a malformed
+  # merged hooks.json is refused before launch, force_ask stays inert, and a
+  # session that never loads the adapter logs no armed line. Keep this an
+  # explicit list, never a minimum or a range: a range would admit the next
+  # release unproven, which is the failure this gate exists to prevent.
+  printf '1.2.4 1.2.5 1.2.6 1.2.7\n'
   exit 0
 fi
 if [ "$EVENT" = grants-digest ]; then
