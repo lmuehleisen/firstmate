@@ -372,6 +372,27 @@ physical_target() {  # <word> <cwd> <follow-final>
   norm_abs "$cur"
 }
 
+# Resolve <abs>'s final component through its symlink chain and print the
+# physical destination; callers resolve the directory components first. A
+# chain that outruns the hop bound, or a cycle that never reaches a
+# non-symlink, is unresolvable: a partially resolved path would read an
+# outside target as still inside the roots, so fail closed and let the caller
+# refuse or judge instead.
+resolve_symlink_chain() {  # <abs>
+  local abs=$1 link resolved='' hops=0
+  while [ -L "$abs" ] && [ "$hops" -lt 40 ]; do
+    link=$(readlink "$abs" 2>/dev/null) || return 1
+    case "$link" in
+      /*) abs=$(norm_abs "$link") ;;
+      *) abs=$(norm_abs "${abs%/*}/$link") ;;
+    esac
+    resolved=$(physical_target "$abs" '' 0 2>/dev/null) && abs=$resolved
+    hops=$((hops + 1))
+  done
+  [ ! -L "$abs" ] || return 1
+  printf '%s' "$abs"
+}
+
 # --- task grants ---------------------------------------------------------------
 
 # Grants are read once, only from the brief path the policy file records, and
@@ -588,18 +609,9 @@ fetch_dest_ok() {  # <abs>
     */bin|*/bin/*|*/.git|*/.git/*|*/.devin|*/.devin/*|*/.claude|*/.claude/*|*/.gitconfig|*/.git-credentials)
       return 1 ;;
   esac
-  local phys='' tgt='' resolved='' hops=0
+  local phys=''
   phys=$(physical_target "$1" '' 0 2>/dev/null) || phys=$1
-  while [ -L "$phys" ] && [ "$hops" -lt 10 ]; do
-    tgt=$(readlink "$phys" 2>/dev/null) || break
-    case "$tgt" in
-      /*) phys=$tgt ;;
-      *) phys="${phys%/*}/$tgt" ;;
-    esac
-    phys=$(norm_abs "$phys")
-    resolved=$(physical_target "$phys" '' 0 2>/dev/null) && phys=$resolved
-    hops=$((hops + 1))
-  done
+  phys=$(resolve_symlink_chain "$phys" 2>/dev/null) || return 1
   if [ "$phys" != "$1" ]; then
     write_dest_ok "$phys" || return 1
     case "$phys" in
@@ -928,23 +940,10 @@ load_protected_briefs() {
 # component through its symlink chain, because writing through a symlink writes
 # what it points at.
 write_target_path() {  # <word> <expansion-flag>
-  local w abs link hops=0
+  local w abs
   w=$(resolve_maybe_tilde "$1" "$2" "$CWD" 2>/dev/null) || return 1
   abs=$(physical_target "$w" "$CWD" 0) || abs=$(norm_abs "$w")
-  while [ -L "$abs" ] && [ "$hops" -lt 40 ]; do
-    link=$(readlink "$abs" 2>/dev/null) || break
-    case "$link" in
-      /*) abs=$(norm_abs "$link") ;;
-      *) abs=$(norm_abs "${abs%/*}/$link") ;;
-    esac
-    abs=$(physical_target "$abs" '' 0) || break
-    hops=$((hops + 1))
-  done
-  # A chain that outruns the hop bound, or a cycle that never reaches a
-  # non-symlink, is unresolvable: returning the partially resolved path would
-  # read an outside target as still inside the worktree, so fail closed and
-  # let the caller refuse or judge instead.
-  [ ! -L "$abs" ] || return 1
+  abs=$(resolve_symlink_chain "$abs") || return 1
   printf '%s' "$abs"
 }
 

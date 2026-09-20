@@ -262,6 +262,36 @@ test_file_tool_writes_resolve_physically() {
   pass "fm-agy-permission-policy: file-tool writes resolve the physical path before the root check"
 }
 
+test_fetch_dest_writes_resolve_physically() {
+  local policy wt i prev
+  policy=$(new_case fetch-symlink)
+  wt=$(jq -r .worktree "$policy")
+  # A curl or wget destination resolves through the same bounded resolver as
+  # the file tools: a deep but legal chain is judged by where it physically
+  # lands, and a chain that outruns the hop bound fails closed rather than
+  # validating the lexical position of an intermediate link.
+  prev=/etc/hosts
+  for i in 9 8 7 6 5 4 3 2 1; do
+    ln -sfn "$prev" "$wt/chain-$i" || fail "could not create chain link $i"
+    prev="$wt/chain-$i"
+  done
+  hook "$policy" pre-tool-use run_command "curl -o $wt/chain-1 https://example.com/x"
+  denied "$OUT" "outside the task write roots" \
+    || fail "a fetch through a resolved deep chain must hold by its physical end, got: $OUT"
+  hook "$policy" pre-tool-use run_command "wget -O $wt/chain-1 https://example.com/x"
+  denied "$OUT" "outside the task write roots" \
+    || fail "a wget through a resolved deep chain must hold by its physical end, got: $OUT"
+  prev=/etc/hosts
+  for i in $(seq 45 -1 1); do
+    ln -sfn "$prev" "$wt/deep-$i" || fail "could not create deep link $i"
+    prev="$wt/deep-$i"
+  done
+  hook "$policy" pre-tool-use run_command "curl -o $wt/deep-1 https://example.com/x"
+  denied "$OUT" "outside the task write roots" \
+    || fail "a fetch chain past the hop bound must fail closed, got: $OUT"
+  pass "fm-agy-permission-policy: fetch destinations resolve the physical path before the root check"
+}
+
 test_file_tool_protected_and_config_paths() {
   local policy dir wt
   policy=$(new_case protected)
@@ -899,6 +929,7 @@ test_refusal_list_denies
 test_refusal_leaves_safe_commands_alone
 test_non_command_tool_mapping
 test_file_tool_writes_resolve_physically
+test_fetch_dest_writes_resolve_physically
 test_file_tool_protected_and_config_paths
 test_unlisted_tool_escalates_to_firstmate
 test_held_call_retry_dedupes
