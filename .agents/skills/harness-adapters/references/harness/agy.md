@@ -104,7 +104,11 @@ Headless `-p` runs behave differently and are not the worker path: a tool needin
 ### Opt-in bypass permission layer
 
 `../../../../../bin/fm-spawn.sh --agy-bypass` is a separate, per-spawn opt-in path that pairs `--dangerously-skip-permissions` with a firstmate-owned policing adapter, `../../../../../bin/fm-agy-permission-policy.sh`, wired beside the observer hooks by `install-worker`'s optional policy argument.
-It is never selected by default, applies to scout spawns only, and is never a fallback: an unmet gate refuses the launch rather than emitting a bare bypass, and a relaunch inherits the recorded posture only while it still resolves onto an agy scout.
+It applies to agy crewmate and scout spawns and is never a fallback: an unmet gate refuses the launch rather than emitting a bare bypass, and a relaunch inherits the recorded posture while it still resolves onto an agy worker.
+A secondmate is a firstmate instance rather than a worker this layer polices, so it stays refused.
+The posture was scout-only until the captain widened it to ships on 2026-09-20.
+That matters for how the write guards below are read: on a read-only scout they were belt-and-braces, and on a ship they are the only thing between a bypassed worker and the project worktree, because `--sandbox` was proven not to restrict writes under bypass.
+None of them reads the task kind - every write target is resolved physically against the policy file's own worktree and scratch roots - so the widening changed who they protect rather than what they check.
 
 Under bypass the hook decision surface collapses to two effective outcomes, verified live on agy 1.2.6: `deny` still blocks with its reason, and abstention runs the call - `allow`, `ask`, and even `force_ask` have no prompt left to act on, so they cannot surface a question.
 The adapter therefore emits only `deny` or silence; every "ask the human" case denies with `held for firstmate`, writes a pending marker under `<policy>-pending/` keyed `agy-permission-<conversationId>-s<stepIdx>`, and appends a `needs-decision` status line.
@@ -117,8 +121,11 @@ Under bypass a statically visible exec write or removal outside the task write r
 The remaining surface is inherent to a lexical policy: a refused command reached through an interpreter, encoded pipe, alias, or expansion is not statically visible, so it still reaches the judge, and no lexical layer can close that reach.
 
 Defences that gate the launch: `jq` present, the agy version inside the adapter's live-verified set (`verified-versions`, currently `1.2.4 1.2.5 1.2.6 1.2.7`), no project-supplied `.agents/hooks.json` in the worktree or ancestors up to the git root (one malformed entry silently disables every hook in that file, firstmate's denies included), and a startup canary that closes the endpoint when the adapter's armed line for this launch's busy generation never reaches the observer log.
-The judge tier calls `agy -p` under its own sandbox on `gemini-3.6-flash-low` with a 100-second budget pinned beside the Devin adapter's; its prompt rides on the process argument list, so a call under review is visible in `ps` while the judge runs.
+The judge is selected per task from the tiers `../../../../../bin/fm-judge-tier-lib.sh` owns, and agy judges agy by default: without `--agy-judge` the tier calls `agy -p` under its own sandbox on `gemini-3.6-flash-low`, with a 100-second budget pinned beside the Devin adapter's, and its prompt rides on the process argument list, so a call under review is visible in `ps` while the judge runs.
+`--agy-judge <tier>[:<model>]` selects another tier - a Devin SWE-2 judge for an agy worker, for instance - and refuses the launch when the tier is unknown or its executable is not installed, rather than falling back onto the default.
+The resolved tier is printed before the launch, repeated on the spawned line, recorded as `agy_judge=` in the task's metadata, and named in every judge-decided log record, so which judge adjudicated a call stays readable after teardown removes the per-task policy file.
 The layer's decision log is the same `state/agy-permission-log.jsonl` the observer writes.
+`judge-probe` runs the same static analysis and judge call on a payload and prints the verdict while writing nothing, so tiers can be compared on identical inputs.
 
 ## Native hooks and primary integration
 

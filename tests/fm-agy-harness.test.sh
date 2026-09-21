@@ -817,6 +817,230 @@ EOF
   pass "fm-spawn.sh: --agy-bypass launches a policed bypass once the adapter is armed"
 }
 
+# agy_hook <policy> <event> <tool> <arg> [step]: drive the permission adapter
+# with an agy-shaped payload scoped to the policy's own worktree, the way the
+# installed worker hook does. Sets OUT.
+agy_hook() {
+  local policy=$1 event=$2 tool=$3 arg=$4 step=${5:-1} wt payload
+  wt=$(jq -r .worktree "$policy")
+  payload=$(jq -nc --arg t "$tool" --arg a "$arg" --argjson s "$step" --arg wt "$wt" \
+    '{conversationId:"c1", stepIdx:$s, modelName:"m", workspacePaths:[$wt],
+      toolCall:{name:$t, args:(if $t == "run_command" then {CommandLine:$a, Cwd:$wt}
+                              else {AbsolutePath:$a, Content:"x"} end)}}')
+  OUT=$(printf '%s' "$payload" | "$ROOT/bin/fm-agy-permission-policy.sh" "$event" "$policy" 2>/dev/null)
+}
+
+test_agy_bypass_ship_keeps_every_write_guard() {
+  local fields case_dir home proj wt fakebin id out policy outside
+  # The captain widened the bypass gate from scouts to ships on 2026-09-20.
+  # On a read-only scout the write guards were belt-and-braces; on a ship they
+  # are the only thing between a bypassed worker and the project worktree,
+  # because --sandbox was proven not to restrict writes under bypass. So this
+  # drives the adapter through the policy file a REAL ship spawn just wrote.
+  fields=$(make_spawn_case bypass-ship)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode local-only --yolo off --agy-bypass) \
+    || fail "a ship bypass spawn must launch: $out"
+  grep -Fq -- '--dangerously-skip-permissions' "$home/launch.log" \
+    || fail "the ship bypass launch must carry the bypass flag: $(cat "$home/launch.log")"
+  policy="$home/state/$id.agy-permission.json"
+  [ -f "$policy" ] || fail "a ship bypass spawn must write the per-task policy file"
+  grep -q '^agy_bypass=on$' "$home/state/$id.meta" \
+    || fail "a ship's bypass posture must be recorded: $(cat "$home/state/$id.meta")"
+  grep -q '^agy_judge=agy:' "$home/state/$id.meta" \
+    || fail "a ship's judge tier must be recorded: $(cat "$home/state/$id.meta")"
+  # The armed canary protects a WRITING worker now, so the spawn above only
+  # succeeded because the adapter's armed line for this generation landed.
+  jq -e --arg t "$id" 'select(.task == $t and .event == "armed")' \
+    "$home/state/agy-permission-log.jsonl" >/dev/null 2>&1 \
+    || fail "the ship spawn's canary passed without an armed line: $(cat "$home/state/agy-permission-log.jsonl" 2>/dev/null)"
+
+  # The refusal list speaks first, before any scope or judge consideration.
+  agy_hook "$policy" pre-tool-use run_command "sudo ls"
+  [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = deny ] \
+    || fail "a refused command must still deny on the ship path, got: $OUT"
+  printf '%s' "$OUT" | jq -r .reason | grep -qF 'Blocked by firstmate policy' \
+    || fail "the ship-path refusal must name the policy: $OUT"
+
+  # A statically visible write outside every write root is refused outright,
+  # not judged - there is no prompt behind the judge to correct a bad verdict.
+  # The scratch roots cover all of /tmp, and this whole fixture lives there,
+  # so /etc is the honest outside, exactly as the policy suite uses it.
+  outside=/etc
+  agy_hook "$policy" pre-tool-use write_to_file "$outside/fm-ship-escape.txt" 2
+  printf '%s' "$OUT" | jq -r .reason 2>/dev/null | grep -qF 'outside the task write roots' \
+    || fail "an out-of-root write must be refused on the ship path, got: $OUT"
+  agy_hook "$policy" pre-tool-use run_command "echo x > $outside/fm-ship-escape2.txt" 3
+  [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = deny ] \
+    || fail "an out-of-root exec write must be refused on the ship path, got: $OUT"
+
+  # A write through a symlink lands on the symlink's target, so the target is
+  # what the root check sees - the shared chain resolver, on the ship path.
+  ln -s "$outside" "$wt/escape-link" || fail "could not create the escape symlink"
+  agy_hook "$policy" pre-tool-use write_to_file "$wt/escape-link/fm-ship-through.txt" 4
+  printf '%s' "$OUT" | jq -r .reason 2>/dev/null | grep -qF 'outside the task write roots' \
+    || fail "a symlinked write must be resolved physically on the ship path, got: $OUT"
+
+  # The fakebin agy answers nothing, so the judge produces no verdict: that
+  # must deny and hold, never abstain into a run, now that the worker writes.
+  agy_hook "$policy" pre-tool-use run_command "npm install" 5
+  printf '%s' "$OUT" | jq -r .reason 2>/dev/null | grep -qF 'held for firstmate' \
+    || fail "a judge failure must deny and hold on the ship path, got: $OUT"
+  ls "${policy%.json}-pending"/*.pending >/dev/null 2>&1 \
+    || fail "a held ship call must leave a pending marker for firstmate"
+  grep -q 'needs-decision' "$home/state/$id.status" \
+    || fail "a held ship call must wake firstmate: $(cat "$home/state/$id.status" 2>/dev/null)"
+
+  # And a task-local write still abstains, so the guards did not simply deny
+  # everything the ship tried to do.
+  agy_hook "$policy" pre-tool-use write_to_file "$wt/in-scope.txt" 6
+  [ -z "$OUT" ] || fail "a task-local ship write must still abstain, got: $OUT"
+  pass "fm-spawn.sh: a ship under bypass keeps every refusal, write-root, symlink, and judge guard"
+}
+
+test_agy_bypass_records_and_prints_the_judge_tier() {
+  local fields case_dir home proj wt fakebin id out policy
+  fields=$(make_spawn_case bypass-judge-default)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass) \
+    || fail "an armed agy bypass spawn failed: $out"
+  policy="$home/state/$id.agy-permission.json"
+  # With no flag the judge stays on this adapter's own tier, and says so.
+  [ "$(jq -r .judge_tier "$policy")" = agy ] \
+    || fail "the default judge tier must be recorded in the policy: $(cat "$policy")"
+  [ "$(jq -r .judge_model "$policy")" = gemini-3.6-flash-low ] \
+    || fail "the tier's own model must be recorded: $(cat "$policy")"
+  [ -x "$(jq -r .judge_bin "$policy")" ] \
+    || fail "the resolved judge executable must be recorded: $(cat "$policy")"
+  grep -q '^agy_judge=agy:gemini-3.6-flash-low$' "$home/state/$id.meta" \
+    || fail "the judge tier must ride the recorded posture: $(cat "$home/state/$id.meta")"
+  case "$out" in
+    *"agy bypass judge tier: agy model=gemini-3.6-flash-low"*) ;;
+    *) fail "the spawn must name the judge tier before launching, got: $out" ;;
+  esac
+  case "$out" in
+    *"judge=agy:gemini-3.6-flash-low"*) ;;
+    *) fail "the spawned line must name the judge tier, got: $out" ;;
+  esac
+  pass "fm-spawn.sh: a bypass spawn records and prints the judge tier it armed"
+}
+
+test_agy_judge_selects_another_tier() {
+  local fields case_dir home proj wt fakebin id out policy
+  fields=$(make_spawn_case bypass-judge-select)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  fm_fake_exit0 "$fakebin" devin
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass \
+    --agy-judge devin) || fail "selecting an installed judge tier failed: $out"
+  policy="$home/state/$id.agy-permission.json"
+  [ "$(jq -r .judge_tier "$policy")" = devin ] \
+    || fail "the selected tier must be recorded: $(cat "$policy")"
+  [ "$(jq -r .judge_model "$policy")" = swe-2-high ] \
+    || fail "the selected tier's own default model must be recorded: $(cat "$policy")"
+  [ "$(jq -r .judge_bin "$policy")" = "$fakebin/devin" ] \
+    || fail "the selected tier's executable must be resolved at launch: $(cat "$policy")"
+  grep -q '^agy_judge=devin:swe-2-high$' "$home/state/$id.meta" \
+    || fail "the selected tier must ride the recorded posture: $(cat "$home/state/$id.meta")"
+  case "$out" in
+    *"agy bypass judge tier: devin model=swe-2-high"*) ;;
+    *) fail "the spawn must name the selected tier before launching, got: $out" ;;
+  esac
+
+  # An explicit model rides the same flag.
+  fields=$(make_spawn_case bypass-judge-model)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  fm_fake_exit0 "$fakebin" devin
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass \
+    --agy-judge devin:swe-2-medium) || fail "selecting a tier and model failed: $out"
+  [ "$(jq -r .judge_model "$home/state/$id.agy-permission.json")" = swe-2-medium ] \
+    || fail "an explicit judge model must be recorded: $(cat "$home/state/$id.agy-permission.json")"
+  pass "fm-spawn.sh: --agy-judge arms another tier and records its model"
+}
+
+test_agy_judge_refuses_rather_than_falling_back() {
+  local fields case_dir home proj wt fakebin id out status sans
+  # An unknown tier is a typo or an unbuilt judge; falling back would put the
+  # worker on a judge nobody asked for.
+  fields=$(make_spawn_case bypass-judge-unknown)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass \
+    --agy-judge swe-9000)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unknown judge tier must refuse the spawn: $out"
+  case "$out" in
+    *"unknown judge tier 'swe-9000'"*) ;;
+    *) fail "the refusal must name the unknown tier, got: $out" ;;
+  esac
+  ! grep -Fq -- '--dangerously-skip-permissions' "$home/launch.log" 2>/dev/null \
+    || fail "a refused judge tier must never reach the launch: $(cat "$home/launch.log")"
+  [ ! -e "$home/state/$id.agy-permission.json" ] \
+    || fail "a refused judge tier must not leave a policy file"
+
+  # A known tier whose judge is not installed refuses too, rather than arming
+  # a layer whose every residue call would hold for firstmate. The PATH is
+  # curated rather than inherited so the case still proves that on a machine
+  # where the real judge IS installed.
+  fields=$(make_spawn_case bypass-judge-missing)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  rm -f "$fakebin/agy"
+  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
+  sans=$(fm_test_base_path_sans "$PATH" devin) \
+    || fail 'could not build a PATH without the judge tier executable'
+  out=$(PATH="$sans" run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --scout --agy-bypass --agy-judge devin)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a judge tier with no executable must refuse the spawn: $out"
+  case "$out" in
+    *"which is not installed"*) ;;
+    *) fail "the refusal must name the missing judge executable, got: $out" ;;
+  esac
+  [ ! -e "$home/state/$id.agy-permission.json" ] \
+    || fail "a refused judge tier must not leave a policy file"
+
+  # The flag selects the judge for the bypass layer; without that layer there
+  # is no judge to select.
+  fields=$(make_spawn_case bypass-judge-no-posture)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-judge devin)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--agy-judge without --agy-bypass must refuse: $out"
+  case "$out" in
+    *"without that posture no judge is installed"*) ;;
+    *) fail "the refusal must explain that no judge is installed, got: $out" ;;
+  esac
+  pass "fm-spawn.sh: --agy-judge refuses an unknown or uninstalled tier instead of falling back"
+}
+
 test_agy_bypass_refuses_an_unverified_version() {
   local fields case_dir home proj wt fakebin id out status
   fields=$(make_spawn_case bypass-version)
@@ -901,22 +1125,8 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "--agy-bypass on a secondmate must refuse: $out"
   case "$out" in
-    *'applies only to agy scout spawns'*) ;;
-    *) fail "the secondmate refusal must name the scout-only gate, got: $out" ;;
-  esac
-  # A ship launch is not a bypass candidate either: the posture is scout-only.
-  fields=$(make_spawn_case bypass-ship)
-  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
-$fields
-EOF
-  : "$case_dir"
-  fakebin=$(make_bypass_fakebin "$case_dir/fake2")
-  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode local-only --yolo off --agy-bypass)
-  status=$?
-  [ "$status" -ne 0 ] || fail "--agy-bypass on a ship must refuse: $out"
-  case "$out" in
-    *'applies only to agy scout spawns'*) ;;
-    *) fail "the ship refusal must name the scout-only gate, got: $out" ;;
+    *'not a worker this layer polices'*) ;;
+    *) fail "the secondmate refusal must say why a secondmate is excluded, got: $out" ;;
   esac
   # A raw launch command installs no hooks, so bypass cannot ride it.
   fields=$(make_spawn_case bypass-raw)
@@ -938,7 +1148,7 @@ EOF
     *'cannot ride a raw launch'*) ;;
     *) fail "the raw-launch refusal must name the constraint, got: $out" ;;
   esac
-  pass "fm-spawn.sh: --agy-bypass refuses manual review, ships, secondmates, and raw launches"
+  pass "fm-spawn.sh: --agy-bypass refuses manual review, secondmates, and raw launches"
 }
 
 test_agy_bypass_canary_refuses_a_dead_adapter() {
@@ -1013,7 +1223,7 @@ EOF
   pass "fm-spawn.sh: the armed canary binds to this launch's generation and ignores stale records"
 }
 
-test_agy_bypass_relaunch_inherits_only_for_an_agy_scout() {
+test_agy_bypass_relaunch_inherits_only_for_an_agy_worker() {
   local fields case_dir home proj wt fakebin id out gen1 gen2
   fields=$(make_spawn_case bypass-relaunch)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
@@ -1074,8 +1284,10 @@ EOF
     || fail "a harness-switch relaunch must retire the agy policy wiring"
   [ ! -e "$home/state/$id.agy-hooks" ] \
     || fail "a harness-switch relaunch must retire the agy worker hooks"
-  # A relaunch whose recorded kind is not scout drops the posture the same
-  # way: the agy relaunch lands on accept-edits, not on the scout-only flag.
+  # A relaunch whose recorded kind is a ship KEEPS the posture: since the
+  # captain widened the gate, a ship is a bypass candidate too, and dropping
+  # the posture at relaunch would silently move a worker off the layer its
+  # record says is policing it.
   fields=$(make_spawn_case bypass-relaunch-ship)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $fields
@@ -1093,12 +1305,14 @@ EOF
     FM_FAKE_LAUNCH_LOG="$home/launch.log" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" --relaunch 2>&1) \
-    || fail "a non-scout agy relaunch must still launch: $out"
+    || fail "a ship agy relaunch must still launch: $out"
   tail -1 "$home/launch.log" | grep -Fq -- '--dangerously-skip-permissions' \
-    && fail "a non-scout relaunch must never carry the bypass flag: $(tail -1 "$home/launch.log")"
-  tail -1 "$home/launch.log" | grep -Fq -- '--mode accept-edits' \
-    || fail "a non-scout agy relaunch must land on accept-edits: $(tail -1 "$home/launch.log")"
-  pass "fm-spawn.sh: a relaunch inherits agy_bypass only when it resolves onto an agy scout"
+    || fail "a ship relaunch must keep the recorded bypass posture: $(tail -1 "$home/launch.log")"
+  grep -q '^agy_bypass=on$' "$home/state/$id.meta" \
+    || fail "a ship relaunch must keep the recorded posture: $(cat "$home/state/$id.meta")"
+  [ -f "$home/state/$id.agy-permission.json" ] \
+    || fail "a ship relaunch must keep the permission layer wired"
+  pass "fm-spawn.sh: a relaunch inherits agy_bypass whenever it resolves onto an agy worker"
 }
 
 # --- control mechanics ------------------------------------------------------
@@ -1445,12 +1659,16 @@ test_agy_spawn_confirms_the_brief_started
 test_agy_spawn_fails_and_closes_when_the_brief_never_starts
 test_agy_spawn_keeps_its_record_when_the_endpoint_will_not_close
 test_agy_bypass_launch_installs_the_adapter_and_skips_permissions
+test_agy_bypass_ship_keeps_every_write_guard
+test_agy_bypass_records_and_prints_the_judge_tier
+test_agy_judge_selects_another_tier
+test_agy_judge_refuses_rather_than_falling_back
 test_agy_bypass_refuses_an_unverified_version
 test_agy_bypass_refuses_a_project_hooks_file
 test_agy_bypass_refuses_the_wrong_posture
 test_agy_bypass_canary_refuses_a_dead_adapter
 test_agy_bypass_canary_ignores_a_stale_generation
-test_agy_bypass_relaunch_inherits_only_for_an_agy_scout
+test_agy_bypass_relaunch_inherits_only_for_an_agy_worker
 test_agy_control_mechanics_are_the_verified_ones
 test_agy_supports_all_task_kinds
 test_agy_wiring_has_a_cleanup_owner
