@@ -1473,7 +1473,7 @@ test_stopfailure_stands_down_under_afk() {
     printf "sf_rc=%s\n" "$?"')
   assert_contains "$out" "sf_rc=0" "away mode entered mid-wait must stand the recovery down"
   [ ! -s "$dir/state/sf.out" ] || fail "an away-mode stand-down mid-wait produced output: $(cat "$dir/state/sf.out")"
-  [ "$(epoch_outcome "$dir")" = stopfailure-standdown ] || fail "the stand-down must close its own claim, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_outcome "$dir")" = stopfailure-wait ] || fail "a stand-down gives ownership up and must leave the ledger untouched, got: $(epoch_outcome "$dir")"
   [ "$(sf_record_field "$dir" reason)" = afk ] || fail "the record must name away mode as the reason"
   pass "StopFailure: stands down under away mode, at the failure and when away mode starts mid-wait"
 }
@@ -1588,6 +1588,105 @@ test_stopfailure_claims_only_from_the_generation_it_started_on() {
   [ "$(epoch_outcome "$dir")" = rewake ] && [ "$(epoch_field "$dir" epoch)" = 1 ] \
     || fail "the ledger must end on the Stop cycle's own rewake, got: $(sed -n 1p "$dir/state/.claude-autoarm-epoch")"
   pass "StopFailure: a hook claims only from the generation it started on, so a newer halt, waiter, or Stop cycle supersedes it"
+}
+
+# The compare-and-swap covers the WHOLE ledger record a hook saw at its start,
+# not one field: a predecessor that commits within its own generation, or any
+# other same-generation write, means another hook owns the outcome.
+test_stopfailure_claims_only_against_the_whole_record_it_started_on() {
+  local dir out kind base
+  # The reported case: the predecessor commits its rewake, in its own
+  # generation, while the second hook is still settling.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-record-predecessor-rewake")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/first-payload"
+  write_settling_payload "$dir" old overloaded
+  out=$(SF_BASE=30 SF_BACKOFF_MAX=30 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/first-payload" > "$FM_HOME/state/first.out" 2>&1 &
+    first=$!
+    until grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.05; done
+    FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=1 $SF_HOOK < "$FM_HOME/state/old-payload" > "$FM_HOME/state/second.out" 2>&1 &
+    second=$!
+    n=0
+    while [ "$n" -lt 200 ] && ! pgrep -P "$second" -f "sleep 0.5" >/dev/null 2>&1; do sleep 0.02; n=$((n + 1)); done
+    kill -TERM "$first"
+    wait "$first"
+    printf "first_rc=%s\n" "$?"
+    grep -q "^epoch=1 .*outcome=rewake" "$FM_HOME/state/.claude-autoarm-epoch" && kill -0 "$second" 2>/dev/null \
+      && printf "committed-while-second-settled\n"
+    wait "$second"
+    printf "second_rc=%s\n" "$?"')
+  assert_contains "$out" "committed-while-second-settled" "the predecessor must commit while the second hook is still before its claim"
+  assert_contains "$out" "first_rc=2" "the predecessor owns the one recovery"
+  assert_contains "$out" "second_rc=0" "the second hook must not start a second recovery"
+  [ ! -s "$dir/state/second.out" ] || fail "a second recovery followed the predecessor's rewake: $(cat "$dir/state/second.out")"
+  [ "$(epoch_outcome "$dir")" = rewake ] && [ "$(epoch_field "$dir" epoch)" = 1 ] \
+    || fail "the ledger must end on the predecessor's rewake, got: $(sed -n 1p "$dir/state/.claude-autoarm-epoch")"
+
+  # Every same-generation change a writer can make, one fresh home each, run
+  # side by side: each outcome an owned write can record, and the identity line.
+  for kind in rewake failed failed-suppressed clean afk identity; do
+    base="$TMP_ROOT/sf-record-same-gen-$kind"
+    make_primary_dir "$base" >/dev/null
+    : > "$base/state/task.meta"
+    printf 'epoch=5 owner_pid=9999999 outcome=stopfailure-wait updated_at=1\nfixture-identity\n' > "$base/state/.claude-autoarm-epoch"
+    write_settling_payload "$base" old overloaded
+    (
+      out=$(SF_BASE=1 SF_BACKOFF_MAX=1 SF_KIND="$kind" run_session "$base" '
+        $SF_HOOK < "$FM_HOME/state/old-payload" > "$FM_HOME/state/old.out" 2>&1 &
+        old=$!
+        n=0
+        while [ "$n" -lt 200 ] && ! pgrep -P "$old" -f "sleep 0.5" >/dev/null 2>&1; do sleep 0.02; n=$((n + 1)); done
+        grep -q "^epoch=5 " "$FM_HOME/state/.claude-autoarm-epoch" || printf "older-claimed-early\n"
+        if [ "$SF_KIND" = identity ]; then
+          printf "epoch=5 owner_pid=9999999 outcome=stopfailure-wait updated_at=1\nrewritten-identity\n" > "$FM_HOME/state/.claude-autoarm-epoch"
+        else
+          printf "epoch=5 owner_pid=9999999 outcome=%s updated_at=1\nfixture-identity\n" "$SF_KIND" > "$FM_HOME/state/.claude-autoarm-epoch"
+        fi
+        wait "$old"
+        printf "old_rc=%s\n" "$?"')
+      printf '%s\n' "$out" > "$base/state/session.out"
+    ) &
+  done
+  wait
+  for kind in rewake failed failed-suppressed clean afk identity; do
+    base="$TMP_ROOT/sf-record-same-gen-$kind"
+    out=$(cat "$base/state/session.out")
+    assert_not_contains "$out" "older-claimed-early" "$kind: the hook must still be before its claim when the record changes"
+    assert_contains "$out" "old_rc=0" "$kind: a same-generation change must stop the claim"
+    [ ! -s "$base/state/old.out" ] || fail "$kind: a recovery started after a same-generation change: $(cat "$base/state/old.out")"
+    [ "$(epoch_field "$base" epoch)" = 5 ] || fail "$kind: the hook claimed past a changed record"
+  done
+
+  # A stand-down is not a claim: an older waiter giving up while a newer hook
+  # settles must not leave the newer failure without its recovery.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-record-standdown")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/first-payload"
+  write_settling_payload "$dir" old overloaded
+  out=$(SF_BASE=30 SF_BACKOFF_MAX=30 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/first-payload" > "$FM_HOME/state/first.out" 2>&1 &
+    first=$!
+    until grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.05; done
+    FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=1 $SF_HOOK < "$FM_HOME/state/old-payload" > "$FM_HOME/state/second.out" 2>&1 &
+    second=$!
+    n=0
+    while [ "$n" -lt 200 ] && ! pgrep -P "$second" -f "sleep 0.5" >/dev/null 2>&1; do sleep 0.02; n=$((n + 1)); done
+    printf "%s\n" "{\"type\":\"user\",\"origin\":{\"kind\":\"human\"},\"message\":{\"role\":\"user\",\"content\":\"status?\"}}" >> "$FM_HOME/state/transcript.jsonl"
+    wait "$first"
+    printf "first_rc=%s\n" "$?"
+    grep -q "^epoch=1 " "$FM_HOME/state/.claude-autoarm-epoch" && kill -0 "$second" 2>/dev/null \
+      && printf "stood-down-while-second-settled\n"
+    wait "$second"
+    printf "second_rc=%s\n" "$?"')
+  assert_contains "$out" "stood-down-while-second-settled" "the older waiter must stand down while the newer hook is still before its claim"
+  assert_contains "$out" "first_rc=0" "the older waiter must stand down on the newer turn"
+  assert_contains "$out" "second_rc=2" "the newer failure must still get its one recovery after an older waiter stands down"
+  [ "$(grep -c '^firstmate recovery turn' "$dir/state/second.out")" -eq 1 ] || fail "the newer failure must emit one banner"
+  [ ! -s "$dir/state/first.out" ] || fail "the stood-down waiter produced output: $(cat "$dir/state/first.out")"
+  pass "StopFailure: a hook claims only against the whole record it started on, and a stand-down never blocks a newer failure"
 }
 
 # A transient failure's recovery is already waiting when a later turn fails on
@@ -1927,6 +2026,7 @@ test_stopfailure_stands_down_under_afk
 test_stopfailure_halts_on_errors_a_retry_cannot_fix
 test_stopfailure_halt_supersedes_a_waiting_recovery
 test_stopfailure_claims_only_from_the_generation_it_started_on
+test_stopfailure_claims_only_against_the_whole_record_it_started_on
 test_stopfailure_defers_to_live_continuity
 test_stopfailure_superseded_by_ordinary_stop_goes_silent
 test_stopfailure_newer_failure_supersedes_older_waiter

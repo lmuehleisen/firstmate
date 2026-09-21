@@ -97,12 +97,16 @@
 #     the same way, so sleepers never stack and a superseded one goes silent.
 #     No lock is held while waiting.
 #   - Order hooks by when they started. Before any gate or settling work, each
-#     hook notes the ledger generation it sees, and every claim it makes, wait
-#     or halt, is a compare-and-swap against exactly that generation. A hook
-#     that anything newer was written after - a halt, another hook's claim, or
-#     a Stop-owned cycle - is superseded and exits without claiming, so a halt
-#     is terminal for every hook that started before it, while a failure that
-#     starts after the halt is handled on its own.
+#     hook notes the WHOLE ledger record it sees (fm_autoarm_ledger_token), and
+#     every claim it makes, wait or halt, is a compare-and-swap against exactly
+#     that record. Any write at all since then - a halt, another hook's claim,
+#     a predecessor committing its rewake or any other outcome in the same
+#     generation, or a Stop-owned cycle - means another hook owns the outcome,
+#     so this one exits without claiming. A halt is therefore terminal for
+#     every hook that started before it, while a failure that starts after the
+#     halt is handled on its own. A stand-down gives ownership up rather than
+#     taking it, so it never writes the ledger: its waiting entry stays behind,
+#     never open, and a newer hook that started meanwhile can still claim.
 #   - Wait. For rate_limit: until the reset plus FM_CLAUDE_STOPFAILURE_RESET_SLACK
 #     (default 60s), preferring quotaLimits.resetsAt from the transcript's
 #     fresh API-error entry, then the "resets <h[:mm]am|pm> (<zone>)" text of
@@ -180,12 +184,15 @@ esac
 # owner of that max(300, poll+60) derivation.
 GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 
-# StopFailure mode notes the ledger generation first, before the payload,
+# StopFailure mode notes the whole ledger record first, before the payload,
 # gates, or settling, so its claim can be a compare-and-swap against the state
-# it started from. The read matches fm_autoarm_claim_next's own: 0 when absent.
+# it started from. The generation and outcome read next only feed the attempt
+# count; any change between the two reads fails that compare-and-swap anyway.
+SF_OBSERVED_TOKEN=
 SF_OBSERVED_GEN=
 SF_OBSERVED_OUTCOME=
 if [ "$MODE" = stop-failure ]; then
+  SF_OBSERVED_TOKEN=$(fm_autoarm_ledger_token "$STATE")
   SF_OBSERVED_GEN=$(_fm_autoarm_epoch_field "$STATE/.claude-autoarm-epoch" epoch 2>/dev/null || true)
   case "$SF_OBSERVED_GEN" in
     ''|*[!0-9]*) SF_OBSERVED_GEN=0 ;;
@@ -414,11 +421,13 @@ sf_stand_down_reason() {
   [ -n "$SF_REASON" ]
 }
 
-# A superseded generation goes silent; any other stand-down closes its own
-# claim so the ledger never keeps a waiting entry for a finished process.
+# A superseded generation goes silent. Any other stand-down gives ownership up
+# rather than taking it, so it leaves the ledger untouched - its never-open
+# waiting entry stays behind - and a newer hook that started meanwhile can
+# still claim; only the side record keeps the reason.
 sf_stand_down() {
   [ "$SF_REASON" = superseded ] && exit 0
-  fm_autoarm_write_owned "$STATE" "$MY_GEN" stopfailure-standdown >/dev/null 2>&1 || exit 0
+  fm_autoarm_still_owner "$STATE" "$MY_GEN" || exit 0
   sf_record "$MY_GEN" "$SF_ATTEMPT" "$SF_ERROR" standdown "$SF_BASIS" "$SF_WAIT" "$SF_RESET_DESC" "$SF_REASON"
   exit 0
 }
@@ -466,15 +475,15 @@ sf_fire() {  # <what-happened> <reason-token>
 }
 
 # Claim the next generation with <outcome>, by compare-and-swap against the
-# generation this hook observed when it started. Returns 0 with MY_GEN set, 2
-# when a live open Stop-owned claim owns continuity, 3 when anything newer was
+# whole ledger record this hook observed when it started. Returns 0 with MY_GEN
+# set, 2 when a live open Stop-owned claim owns continuity, 3 when anything was
 # written since this hook started, and 1 when bounded micro-mutex contention or
 # a write failure persists.
 sf_claim() {  # <outcome>
   local rc i=0
   MY_GEN=
   while :; do
-    fm_autoarm_claim_next "$STATE" "$GRACE" "$1" "$SF_OBSERVED_GEN"
+    fm_autoarm_claim_next "$STATE" "$GRACE" "$1" "$SF_OBSERVED_TOKEN"
     rc=$?
     if [ "$rc" -eq 0 ]; then
       MY_GEN=$FM_AUTOARM_MY_GEN
