@@ -104,7 +104,11 @@ Headless `-p` runs behave differently and are not the worker path: a tool needin
 ### Opt-in bypass permission layer
 
 `../../../../../bin/fm-spawn.sh --agy-bypass` is a separate, per-spawn opt-in path that pairs `--dangerously-skip-permissions` with a firstmate-owned policing adapter, `../../../../../bin/fm-agy-permission-policy.sh`, wired beside the observer hooks by `install-worker`'s optional policy argument.
-It is never selected by default, applies to scout spawns only, and is never a fallback: an unmet gate refuses the launch rather than emitting a bare bypass, and a relaunch inherits the recorded posture only while it still resolves onto an agy scout.
+It applies to agy crewmate and scout spawns and is never a fallback: an unmet gate refuses the launch rather than emitting a bare bypass, and a relaunch inherits the recorded posture while it still resolves onto an agy worker.
+A secondmate is a firstmate instance rather than a worker this layer polices, so it stays refused.
+The posture was scout-only until the captain widened it to ships on 2026-09-20.
+That matters for how the write guards below are read: on a read-only scout they were belt-and-braces, and on a ship they are the only thing between a bypassed worker and the project worktree, because `--sandbox` was proven not to restrict writes under bypass.
+None of them reads the task kind - every write target is resolved physically against the policy file's own worktree and scratch roots - so the widening changed who they protect rather than what they check.
 
 Under bypass the hook decision surface collapses to two effective outcomes, verified live on agy 1.2.6: `deny` still blocks with its reason, and abstention runs the call - `allow`, `ask`, and even `force_ask` have no prompt left to act on, so they cannot surface a question.
 The adapter therefore emits only `deny` or silence; every "ask the human" case denies with `held for firstmate`, writes a pending marker under `<policy>-pending/` keyed `agy-permission-<conversationId>-s<stepIdx>`, and appends a `needs-decision` status line.

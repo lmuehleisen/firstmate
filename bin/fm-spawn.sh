@@ -342,9 +342,9 @@
 # 1. When closure cannot be confirmed (the backend still finds the target), the
 # task record, busy generation, and hooks are kept for teardown instead, and
 # the failure says the worker may still be running.
-#   --agy-bypass is the opt-in reviewed path onto agy's
-#   --dangerously-skip-permissions, available to agy scout spawns on the wired
-#   launch path only. It installs bin/fm-agy-permission-policy.sh
+#   --agy-bypass is the reviewed path onto agy's
+#   --dangerously-skip-permissions, available to agy crewmate and scout spawns
+#   on the wired launch path. It installs bin/fm-agy-permission-policy.sh
 #   beside the worker hooks - an armed heartbeat on PreInvocation and Stop,
 #   and a hard-deny/judge decision on PreToolUse after the log-only observer
 #   - so the bypass is policed rather than bare. The
@@ -1639,10 +1639,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
-  # The recorded bypass posture binds to agy scout spawns only: a relaunch
-  # onto a different harness or a non-scout kind drops it rather than carrying
-  # an agy-only layer's name forward into a posture it was never reviewed for.
-  [ "$(fm_meta_get "$RELAUNCH_META" agy_bypass)" = on ] && [ "$ARG3" = agy ] && [ "$KIND" = scout ] && AGY_BYPASS=1
+  # The recorded bypass posture binds to agy worker spawns: a relaunch onto a
+  # different harness, or onto a secondmate, drops it rather than carrying an
+  # agy worker layer's name forward into a posture it does not police.
+  [ "$(fm_meta_get "$RELAUNCH_META" agy_bypass)" = on ] && [ "$ARG3" = agy ] && [ "$KIND" != secondmate ] && AGY_BYPASS=1
   # The recorded judge tier rides the same inheritance: a relaunch that dropped
   # it would silently re-judge the task on a different tier than the one its
   # record names. A record written before the tier was selectable carries no
@@ -2101,16 +2101,24 @@ case "$ARG3" in
   ;;
 esac
 
-# --agy-bypass is the opt-in reviewed path onto agy's
+# --agy-bypass is the reviewed path onto agy's
 # --dangerously-skip-permissions: firstmate's permission layer
 # (bin/fm-agy-permission-policy.sh) rides the worker hook file it installs, so
-# the bypass is policed rather than bare. It is never the default, applies
-# only to agy scout spawns on the wired launch path - a raw launch command
-# installs no hooks at all, and the reviewed posture covers the read-only
-# scout surface only - and refuses to combine with
-# config/crew-permissions=manual, which is itself an explicit prompt posture.
+# the bypass is policed rather than bare. It applies to agy crewmate and scout
+# spawns on the wired launch path - a raw launch command installs no hooks at
+# all - and refuses to combine with config/crew-permissions=manual, which is
+# itself an explicit prompt posture. A secondmate is a firstmate instance
+# rather than a worker this layer polices, so it stays refused.
 # A relaunch inherits the recorded posture through the meta read above, so
 # every check below and at install time applies to it unchanged.
+# The posture was scout-only until the captain widened it to ships on
+# 2026-09-20. On a read-only scout the layer's write guards were
+# belt-and-braces; on a ship they are the only thing between a bypassed worker
+# and the project worktree, because --sandbox was proven not to restrict
+# writes under bypass. The guards never read the task kind - they resolve
+# every write target physically against the policy file's worktree and scratch
+# roots - so widening the gate changed who they protect, not what they check,
+# and tests/fm-agy-harness.test.sh exercises them on the ship path.
 if [ "$AGY_BYPASS" -eq 1 ]; then
   [ "$HARNESS" = agy ] || {
     echo "error: --agy-bypass applies only to agy spawns" >&2
@@ -2120,8 +2128,8 @@ if [ "$AGY_BYPASS" -eq 1 ]; then
     echo "error: --agy-bypass cannot ride a raw launch command; the permission layer it requires is never installed there" >&2
     exit 1
   }
-  [ "$KIND" = scout ] || {
-    echo "error: --agy-bypass applies only to agy scout spawns; the policed-bypass posture is reviewed for the read-only scout surface only" >&2
+  [ "$KIND" != secondmate ] || {
+    echo "error: --agy-bypass applies to agy crewmate and scout spawns; a secondmate is a firstmate instance, not a worker this layer polices" >&2
     exit 1
   }
   [ "$CREW_PERMISSION_MODE" = auto ] || {
