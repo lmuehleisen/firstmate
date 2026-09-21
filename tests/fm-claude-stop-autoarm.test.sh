@@ -1263,10 +1263,11 @@ stopfailure_payload() {  # <transcript-path> <error> <message>
     '{session_id: "sess-stopfailure", transcript_path: $t, cwd: "/", hook_event_name: "StopFailure", error: $e, last_assistant_message: $m}'
 }
 
-# Every StopFailure knob, overridable per case through SF_* variables.
+# Every StopFailure knob, overridable per case through SF_* variables. An
+# empty SF_SLACK leaves the script's own default slack in force.
 stopfailure_env() {
   printf '%s\n' \
-    "FM_CLAUDE_STOPFAILURE_RESET_SLACK=${SF_SLACK:-1}" \
+    "FM_CLAUDE_STOPFAILURE_RESET_SLACK=${SF_SLACK-1}" \
     "FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=${SF_BASE:-1}" \
     "FM_CLAUDE_STOPFAILURE_BACKOFF_MAX=${SF_BACKOFF_MAX:-4}" \
     "FM_CLAUDE_STOPFAILURE_POLL=${SF_POLL:-1}" \
@@ -1846,7 +1847,7 @@ test_stopfailure_turn_in_progress_stands_down() {
 }
 
 test_stopfailure_reset_text_and_bounded_fallbacks() {
-  local dir out status now hour minute h12 suffix reset
+  local dir out status now hour minute h12 suffix reset wait_s
   # The error text alone names the reset: "resets h:mmam|pm (<zone>)", here two
   # hours ahead in UTC. The cap keeps the case short and must say so.
   dir=$(make_primary_dir "$TMP_ROOT/sf-text")
@@ -1866,6 +1867,22 @@ test_stopfailure_reset_text_and_bounded_fallbacks() {
     || fail "the parsed reset $reset is not two hours after $now"
   [ "$(sf_record_field "$dir" wait)" = 1 ] || fail "the wait must be capped"
   assert_contains "$out" "as long as one wait may last although the usage limit resets at" "a capped wait must say the turn may be rejected again"
+
+  # With no override, the wait runs to the reset plus the default 180s slack,
+  # so Claude Code's own continue-at-usage-limit can start its turn first.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-default-slack")
+  : > "$dir/state/task.meta"
+  reset=$(( $(date +%s) + 10 ))
+  write_failure_transcript "$dir/state/transcript.jsonl" rate_limit "limit" "$reset"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" rate_limit "limit")" > "$dir/state/sf-payload"
+  out=$(SF_SLACK= SF_CAP=1000 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
+    sf=$!
+    until grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.05; done
+    kill -TERM "$sf"
+    wait "$sf"')
+  wait_s=$(sf_record_field "$dir" wait)
+  [ "$wait_s" -ge 188 ] && [ "$wait_s" -le 190 ] || fail "the default slack must wait until 180s past the reset, got wait=$wait_s"
 
   # A dated reset is more than a day away: wait the cap.
   dir=$(make_primary_dir "$TMP_ROOT/sf-text-far")
@@ -1888,7 +1905,7 @@ test_stopfailure_reset_text_and_bounded_fallbacks() {
   expect_code 2 "$status" "an unrecognized error must be treated as transient"
   [ "$(sf_record_field "$dir" error)" = some_future_error ] || fail "the record must keep the error name"
   [ "$(sf_record_field "$dir" basis)" = backoff ] || fail "a transient error must use the backoff"
-  pass "StopFailure: reads the reset from the error text, waits the cap for a far reset, and backs off when unreadable"
+  pass "StopFailure: reads the reset from the error text, defaults to 180s of slack, waits the cap for a far reset, and backs off when unreadable"
 }
 
 test_stopfailure_signal_fires_recovery() {

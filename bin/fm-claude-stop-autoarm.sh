@@ -108,7 +108,9 @@
 #     taking it, so it never writes the ledger: its waiting entry stays behind,
 #     never open, and a newer hook that started meanwhile can still claim.
 #   - Wait. For rate_limit: until the reset plus FM_CLAUDE_STOPFAILURE_RESET_SLACK
-#     (default 60s), preferring quotaLimits.resetsAt from the transcript's
+#     (default 180s, so that where Claude Code's own continue-at-usage-limit is
+#     active its turn starts first and the turn-started check below stands
+#     this hook down), preferring quotaLimits.resetsAt from the transcript's
 #     fresh API-error entry, then the "resets <h[:mm]am|pm> (<zone>)" text of
 #     the error message; a dated "resets <Mon> <d>, ..." text names a reset more
 #     than a day away and waits the cap. Otherwise, and whenever the reset time
@@ -518,7 +520,7 @@ stopfailure_recover() {
   SF_MAX_WAIT=$(sf_int "${FM_CLAUDE_STOPFAILURE_MAX_WAIT:-}" 28500)
   SF_BACKOFF_BASE=$(sf_int "${FM_CLAUDE_STOPFAILURE_BACKOFF_BASE:-}" 300)
   SF_BACKOFF_MAX=$(sf_int "${FM_CLAUDE_STOPFAILURE_BACKOFF_MAX:-}" 1800)
-  SF_RESET_SLACK=$(sf_int "${FM_CLAUDE_STOPFAILURE_RESET_SLACK:-}" 60)
+  SF_RESET_SLACK=$(sf_int "${FM_CLAUDE_STOPFAILURE_RESET_SLACK:-}" 180)
   SF_POLL=$(sf_int "${FM_CLAUDE_STOPFAILURE_POLL:-}" 30)
   SF_ATTEMPT=0
   SF_BASIS=none
