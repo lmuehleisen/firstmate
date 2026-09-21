@@ -1875,7 +1875,7 @@ test_stopfailure_reset_text_and_bounded_fallbacks() {
   reset=$(( $(date +%s) + 10 ))
   write_failure_transcript "$dir/state/transcript.jsonl" rate_limit "limit" "$reset"
   printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" rate_limit "limit")" > "$dir/state/sf-payload"
-  out=$(SF_SLACK= SF_CAP=1000 run_session "$dir" '
+  out=$(SF_SLACK='' SF_CAP=1000 run_session "$dir" '
     $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
     sf=$!
     until grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.05; done
