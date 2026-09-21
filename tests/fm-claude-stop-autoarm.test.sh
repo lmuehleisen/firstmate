@@ -1233,6 +1233,486 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+# --- StopFailure mode ----------------------------------------------------------
+# Claude Code fires StopFailure INSTEAD of Stop when a turn ends on an API error,
+# so the Stop-owned re-arm never runs (the 2026-09-21 weekly-limit blind night).
+# These cases drive --stop-failure with the hook input Claude Code 2.1.278
+# delivers (error, last_assistant_message, transcript_path) and a transcript whose
+# API-error entry carries the fields that night's transcript recorded, trimmed to
+# what the hook reads. The live proof that the harness fires only StopFailure on
+# an API-error turn end, only Stop on a normal one, and starts a turn on the
+# asyncRewake exit 2 is tests/fm-claude-stopfailure-live-e2e.test.sh. Test knobs
+# keep every wait to a few seconds.
+
+write_failure_transcript() {  # <path> <error> <message> [resets-at-epoch]
+  local path=$1 error=$2 message=$3 reset=${4:-null} ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+  {
+    printf '{"type":"queue-operation","operation":"dequeue","timestamp":"%s"}\n' "$ts"
+    printf '{"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"Stop hook feedback"},"timestamp":"%s"}\n' "$ts"
+    jq -nc --arg ts "$ts" --arg error "$error" --arg text "$message" --argjson reset "$reset" \
+      '{type: "assistant", message: {model: "<synthetic>", role: "assistant", content: [{type: "text", text: $text}]},
+        error: $error, isApiErrorMessage: true, apiErrorStatus: 429, timestamp: $ts}
+       + (if $reset == null then {} else {quotaLimits: {status: "rejected", resetsAt: $reset, rateLimitType: "seven_day"}} end)'
+    printf '{"type":"system","subtype":"turn_duration","timestamp":"%s"}\n' "$ts"
+  } > "$path"
+}
+
+stopfailure_payload() {  # <transcript-path> <error> <message>
+  jq -nc --arg t "$1" --arg e "$2" --arg m "$3" \
+    '{session_id: "sess-stopfailure", transcript_path: $t, cwd: "/", hook_event_name: "StopFailure", error: $e, last_assistant_message: $m}'
+}
+
+# Every StopFailure knob, overridable per case through SF_* variables.
+stopfailure_env() {
+  printf '%s\n' \
+    "FM_CLAUDE_STOPFAILURE_RESET_SLACK=${SF_SLACK:-1}" \
+    "FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=${SF_BASE:-1}" \
+    "FM_CLAUDE_STOPFAILURE_BACKOFF_MAX=${SF_BACKOFF_MAX:-4}" \
+    "FM_CLAUDE_STOPFAILURE_POLL=${SF_POLL:-1}" \
+    "FM_CLAUDE_STOPFAILURE_MAX_WAIT=${SF_CAP:-30}"
+}
+
+# One fake Claude session: it takes the home lock, then runs <script> as its
+# child, so every hook the script starts shares that session's ancestry exactly
+# as the hooks of one Claude process do. $SF_HOOK and $SF_STOP are the two
+# registrations' commands.
+run_session() {  # <dir> <script>
+  local dir=$1 script=$2 rc=0
+  # shellcheck disable=SC2046 # one KEY=value word per knob
+  env FM_HOME="$dir" $(stopfailure_env) \
+    SF_HOOK="$dir/bin/fm-claude-stop-autoarm.sh --stop-failure" \
+    SF_STOP="$dir/bin/fm-claude-stop-autoarm.sh" \
+    "$FAKE_CLAUDE" -c 'printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+'"$script" </dev/null 2>&1 || rc=$?
+  return "$rc"
+}
+
+# Run one StopFailure hook in the foreground of a fresh session. Prints the
+# hook's collected output; the hook's exit status is the return status.
+run_stopfailure() {  # <dir> <payload>
+  local dir=$1
+  printf '%s\n' "$2" > "$dir/state/sf-payload"
+  run_session "$dir" '$SF_HOOK < "$FM_HOME/state/sf-payload"'
+}
+
+sf_record_field() {  # <dir> <field>
+  awk -v field="$2" 'NR == 1 { for (i = 1; i <= NF; i++) if (index($i, field "=") == 1) { print substr($i, length(field) + 2); exit } }' \
+    "$1/state/.claude-stopfailure" 2>/dev/null || true
+}
+
+# Wait until the StopFailure generation has claimed the ledger and started its
+# wait, so a case can act on the sleeper mid-wait.
+wait_for_sf_claim() {  # <dir>
+  local n=0
+  while [ "$n" -lt 100 ]; do
+    [ "$(epoch_outcome "$1")" = stopfailure-wait ] && return 0
+    sleep 0.1
+    n=$((n + 1))
+  done
+  fail "the StopFailure hook never claimed its waiting generation"
+}
+
+test_stopfailure_tracked_registration_routes_one_recovery() {
+  local dir payload reset cmd out rc_line
+  dir=$(make_primary_dir "$TMP_ROOT/sf-registration")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  printf 'pending:downtime:fixture-generation\n' > "$dir/state/.watcher-down"
+  # Record which registration reached which entry point, then run the real
+  # auto-arm; the synchronous guard is only recorded, because its cooperation
+  # with the auto-arm has its own suite.
+  mv "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.real.sh"
+  cat > "$dir/bin/fm-claude-stop-autoarm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'fm-claude-stop-autoarm.sh%s\n' "${1:+ $1}" >> "$FM_HOME/state/entrypoints"
+exec "$(dirname "$0")/fm-claude-stop-autoarm.real.sh" "$@"
+SH
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'fm-turnend-guard.sh%s\n' "${1:+ $1}" >> "$FM_HOME/state/entrypoints"
+SH
+  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-turnend-guard.sh"
+  reset=$(( $(date +%s) + 2 ))
+  write_failure_transcript "$dir/state/transcript.jsonl" rate_limit "You've hit your weekly limit" "$reset"
+  payload=$(stopfailure_payload "$dir/state/transcript.jsonl" rate_limit "You've hit your weekly limit")
+  printf '%s\n' "$payload" > "$dir/state/sf-payload"
+  printf '%s\n' '{"session_id":"sess-stopfailure","stop_hook_active":true}' > "$dir/state/stop-payload"
+  # A turn that ends on an API error: the harness runs every StopFailure
+  # registration and nothing registered for Stop.
+  : > "$dir/state/commands"
+  while IFS= read -r cmd; do
+    printf '%s\n' "$cmd" >> "$dir/state/commands"
+  done < <(jq -r '.hooks.StopFailure[]?.hooks[]?.command' "$ROOT/.claude/settings.json")
+  out=$(run_session "$dir" '
+    while IFS= read -r cmd; do
+      CLAUDE_PROJECT_DIR="$FM_HOME" bash -c "$cmd" < "$FM_HOME/state/sf-payload"
+      printf "rc=%s\n" "$?"
+    done < "$FM_HOME/state/commands"')
+  [ "$(grep -c '^rc=' <<<"$out")" -eq 1 ] || fail "expected exactly one StopFailure registration, got: $out"
+  rc_line=$(grep '^rc=' <<<"$out")
+  [ "$rc_line" = rc=2 ] || fail "the API-error turn end must schedule exactly one recovery rewake, got $rc_line: $out"
+  [ "$(grep -c '^firstmate recovery turn' <<<"$out")" -eq 1 ] || fail "expected exactly one recovery banner: $out"
+  [ "$(cat "$dir/state/entrypoints")" = 'fm-claude-stop-autoarm.sh --stop-failure' ] \
+    || fail "an API-error turn end must reach only the StopFailure mode, got: $(cat "$dir/state/entrypoints")"
+  assert_absent "$dir/state/arm-ran" "the StopFailure recovery must leave re-arming to the recovery turn's Stop"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the recovery must commit outcome=rewake, got: $(epoch_outcome "$dir")"
+
+  # The recovery turn ends normally: the harness runs every Stop registration,
+  # and the ordinary auto-arm re-arms without ever entering StopFailure mode.
+  : > "$dir/state/entrypoints"
+  : > "$dir/state/commands"
+  while IFS= read -r cmd; do
+    printf '%s\n' "$cmd" >> "$dir/state/commands"
+  done < <(jq -r '.hooks.Stop[]?.hooks[]?.command' "$ROOT/.claude/settings.json")
+  out=$(run_session "$dir" '
+    while IFS= read -r cmd; do
+      CLAUDE_PROJECT_DIR="$FM_HOME" bash -c "$cmd" < "$FM_HOME/state/stop-payload"
+      printf "rc=%s\n" "$?"
+    done < "$FM_HOME/state/commands"')
+  assert_no_grep '--stop-failure' "$dir/state/entrypoints" "a normal turn end reached the StopFailure mode"
+  assert_grep 'fm-turnend-guard.sh --claude' "$dir/state/entrypoints" "a normal turn end must still run the turn-end guard"
+  assert_grep 'fm-claude-stop-autoarm.sh' "$dir/state/entrypoints" "a normal turn end must still run the Stop auto-arm"
+  assert_present "$dir/state/arm-ran" "the recovery turn's Stop must resume the watcher"
+  assert_not_contains "$out" "firstmate recovery turn" "a normal turn end must not start another recovery"
+  [ "$(epoch_field "$dir" epoch)" = 2 ] || fail "the recovery turn's Stop must take the next generation, got: $(epoch_field "$dir" epoch)"
+  pass "StopFailure: the tracked registration turns one API-error turn end into one recovery, and the next normal Stop re-arms"
+}
+
+test_stopfailure_waits_for_reset_then_rewakes_once() {
+  local dir out status reset started elapsed
+  dir=$(make_primary_dir "$TMP_ROOT/sf-reset")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  printf 'pending:downtime:fixture-generation\n' > "$dir/state/.watcher-down"
+  reset=$(( $(date +%s) + 3 ))
+  write_failure_transcript "$dir/state/transcript.jsonl" rate_limit "You've hit your weekly limit · resets 5am (America/New_York)" "$reset"
+  started=$(date +%s)
+  out=$(run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/transcript.jsonl" rate_limit "You've hit your weekly limit · resets 5am (America/New_York)")"); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 2 "$status" "a usage-limit turn end must end in exactly one recovery rewake"
+  [ "$elapsed" -ge 3 ] || fail "the recovery fired ${elapsed}s after the failure, before the limit's resetsAt"
+  [ "$(grep -c '^firstmate recovery turn' <<<"$out")" -eq 1 ] || fail "expected exactly one recovery banner: $out"
+  assert_contains "$out" "(rate_limit)" "the banner must name the API error"
+  assert_contains "$out" "for the usage limit to reset at" "the banner must say it waited for the reset"
+  assert_contains "$out" "bin/fm-wake-drain.sh" "the banner must direct the drain-first protocol"
+  assert_contains "$out" "do NOT run bin/fm-watch-arm.sh" "the banner must leave re-arming to the Stop hook"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the recovery must commit outcome=rewake"
+  [ "$(epoch_field "$dir" session_pid)" = "$(cat "$dir/state/.lock")" ] \
+    || fail "the recovery rewake must bind the lock-owning session"
+  [ "$(epoch_field "$dir" recovery_generation)" = fixture-generation ] \
+    || fail "the recovery rewake must bind the watcher recovery generation"
+  [ "$(sf_record_field "$dir" basis)" = resetsAt ] || fail "the wait must come from quotaLimits.resetsAt, got: $(sf_record_field "$dir" basis)"
+  [ "$(sf_record_field "$dir" reset)" = "$reset" ] || fail "the record must keep the reset time"
+  [ "$(sf_record_field "$dir" decision)" = rewake ] || fail "the record must end on the rewake decision"
+  assert_absent "$dir/state/arm-ran" "the StopFailure mode must never arm the watcher itself"
+  assert_absent "$dir/state/.claude-autoarm.lock" "no lock may be left behind"
+  pass "StopFailure: a usage limit waits until its resetsAt, then commits one bound rewake and exits 2 once"
+}
+
+test_stopfailure_failed_recovery_waits_again() {
+  local dir out status started elapsed payload
+  dir=$(make_primary_dir "$TMP_ROOT/sf-again")
+  : > "$dir/state/task.meta"
+  printf 'pending:downtime:fixture-generation\n' > "$dir/state/.watcher-down"
+  write_failure_transcript "$dir/state/transcript.jsonl" rate_limit "limit" "$(( $(date +%s) + 1 ))"
+  payload=$(stopfailure_payload "$dir/state/transcript.jsonl" rate_limit "limit")
+  out=$(run_stopfailure "$dir" "$payload"); status=$?
+  expect_code 2 "$status" "the first failure must recover once"
+  [ "$(sf_record_field "$dir" attempt)" = 1 ] || fail "the first recovery must be attempt 1"
+
+  # The recovery turn itself hits the same limit, whose reported reset is now
+  # already past: the next recovery must wait out the attempt-2 backoff, not
+  # retry at once.
+  write_failure_transcript "$dir/state/transcript.jsonl" rate_limit "limit" "$(( $(date +%s) - 30 ))"
+  started=$(date +%s)
+  out=$(SF_BASE=2 SF_BACKOFF_MAX=8 run_stopfailure "$dir" "$payload"); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 2 "$status" "a failed recovery turn must lead to exactly one later recovery"
+  [ "$(sf_record_field "$dir" attempt)" = 2 ] || fail "a failed recovery must advance to attempt 2, got: $(sf_record_field "$dir" attempt)"
+  [ "$(sf_record_field "$dir" basis)" = backoff ] || fail "a past reset must fall back to the backoff"
+  [ "$(sf_record_field "$dir" wait)" = 4 ] || fail "attempt 2 must double the backoff base, got wait=$(sf_record_field "$dir" wait)"
+  [ "$elapsed" -ge 4 ] || fail "a failed recovery was retried after ${elapsed}s instead of waiting its backoff"
+
+  # Once more, now with a reset that is again in the future but sooner than the
+  # attempt-3 backoff: a known reset never shortens a repeated failure's wait.
+  write_failure_transcript "$dir/state/transcript.jsonl" rate_limit "limit" "$(( $(date +%s) + 1 ))"
+  started=$(date +%s)
+  out=$(SF_BASE=1 SF_BACKOFF_MAX=4 run_stopfailure "$dir" "$payload"); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 2 "$status" "the third failure must still recover exactly once"
+  [ "$(sf_record_field "$dir" attempt)" = 3 ] || fail "attempt must keep growing across failed recoveries"
+  [ "$(sf_record_field "$dir" wait)" = 4 ] || fail "a repeated failure must wait at least its backoff, got wait=$(sf_record_field "$dir" wait)"
+  [ "$elapsed" -ge 4 ] || fail "attempt 3 fired after ${elapsed}s, before its backoff"
+  pass "StopFailure: a recovery turn that fails again waits again with a growing backoff instead of retrying at once"
+}
+
+test_stopfailure_stands_down_under_afk() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/sf-afk")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.afk"
+  write_failure_transcript "$dir/state/transcript.jsonl" rate_limit "limit" "$(( $(date +%s) + 1 ))"
+  out=$(run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/transcript.jsonl" rate_limit "limit")"); status=$?
+  expect_code 0 "$status" "the StopFailure hook must stand down while the away daemon owns supervision"
+  [ -z "$out" ] || fail "an away-mode stand-down produced output: $out"
+  assert_absent "$dir/state/.claude-autoarm-epoch" "an away-mode stand-down must not claim the ledger"
+
+  dir=$(make_primary_dir "$TMP_ROOT/sf-afk-mid")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" rate_limit "limit" "$(( $(date +%s) + 20 ))"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" rate_limit "limit")" > "$dir/state/sf-payload"
+  out=$(run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
+    sf=$!
+    n=0
+    while [ "$n" -lt 100 ] && ! grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+    : > "$FM_HOME/state/.afk"
+    wait "$sf"
+    printf "sf_rc=%s\n" "$?"')
+  assert_contains "$out" "sf_rc=0" "away mode entered mid-wait must stand the recovery down"
+  [ ! -s "$dir/state/sf.out" ] || fail "an away-mode stand-down mid-wait produced output: $(cat "$dir/state/sf.out")"
+  [ "$(epoch_outcome "$dir")" = stopfailure-standdown ] || fail "the stand-down must close its own claim, got: $(epoch_outcome "$dir")"
+  [ "$(sf_record_field "$dir" reason)" = afk ] || fail "the record must name away mode as the reason"
+  pass "StopFailure: stands down under away mode, at the failure and when away mode starts mid-wait"
+}
+
+test_stopfailure_halts_on_errors_a_retry_cannot_fix() {
+  local dir out status error started
+  for error in authentication_failed billing_error model_not_found invalid_request; do
+    dir=$(make_primary_dir "$TMP_ROOT/sf-halt-$error")
+    : > "$dir/state/task.meta"
+    write_failure_transcript "$dir/state/transcript.jsonl" "$error" "auth"
+    started=$(date +%s)
+    out=$(run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/transcript.jsonl" "$error" "auth")"); status=$?
+    expect_code 0 "$status" "$error must not start a recovery turn that can only fail again"
+    [ $(( $(date +%s) - started )) -le 2 ] || fail "$error must stand down at once, not wait"
+    [ -z "$out" ] || fail "$error stand-down produced output: $out"
+    assert_absent "$dir/state/.claude-autoarm-epoch" "$error must not claim the ledger"
+    [ "$(sf_record_field "$dir" decision)" = halt ] || fail "$error must be recorded as a halt decision"
+  done
+  pass "StopFailure: errors only the captain can fix are recorded and never looped"
+}
+
+test_stopfailure_defers_to_live_continuity() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/sf-open-claim")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  sleep 60 &
+  pid=$!
+  record_autoarm_v2_claim "$dir" 464 "$pid" arming "$pid" || fail "could not record a v2 claim"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")"); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a live Stop-owned cycle already owns continuity"
+  [ -z "$out" ] || fail "deferring to a live cycle produced output: $out"
+  [ "$(epoch_field "$dir" epoch)" = 464 ] || fail "the StopFailure hook superseded a live open Stop-owned claim"
+
+  dir=$(make_primary_dir "$TMP_ROOT/sf-healthy-watcher")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the live watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")"); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a healthy watcher already owns continuity"
+  [ -z "$out" ] || fail "deferring to a healthy watcher produced output: $out"
+  assert_absent "$dir/state/.claude-autoarm-epoch" "a healthy watcher must leave the ledger untouched"
+
+  dir=$(make_primary_dir "$TMP_ROOT/sf-alarmed")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  out=$(run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")"); status=$?
+  expect_code 0 "$status" "the attended fail-open alarm suppresses automatic continuation"
+  assert_absent "$dir/state/.claude-autoarm-epoch" "an alarmed episode must leave the ledger untouched"
+  pass "StopFailure: defers to a live Stop cycle, a healthy watcher, and the attended alarm"
+}
+
+test_stopfailure_superseded_by_ordinary_stop_goes_silent() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/sf-superseded-by-stop")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/sf-payload"
+  out=$(SF_BASE=30 SF_BACKOFF_MAX=30 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
+    sf=$!
+    n=0
+    while [ "$n" -lt 100 ] && ! grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+    printf "%s\n" "{\"session_id\":\"s\",\"stop_hook_active\":false}" | $SF_STOP > "$FM_HOME/state/stop.out" 2>&1
+    printf "stop_rc=%s\n" "$?"
+    wait "$sf"
+    printf "sf_rc=%s\n" "$?"')
+  assert_contains "$out" "stop_rc=2" "an ordinary Stop during the wait must arm and translate its own wake"
+  assert_contains "$out" "sf_rc=0" "the superseded StopFailure generation must exit 0"
+  assert_present "$dir/state/arm-ran" "an ordinary Stop must never defer to a waiting StopFailure claim"
+  [ ! -s "$dir/state/sf.out" ] || fail "a superseded StopFailure generation produced output: $(cat "$dir/state/sf.out")"
+  assert_contains "$(cat "$dir/state/stop.out")" "firstmate watcher wake" "the ordinary Stop must deliver its wake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the ledger must end on the ordinary Stop's own rewake"
+  [ "$(epoch_field "$dir" epoch)" = 2 ] || fail "the ordinary Stop must have taken the next generation"
+  pass "StopFailure: an ordinary Stop supersedes a waiting recovery, which then stays silent"
+}
+
+test_stopfailure_newer_failure_supersedes_older_waiter() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/sf-superseded-by-failure")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/sf-payload"
+  out=$(SF_BASE=30 SF_BACKOFF_MAX=30 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf1.out" 2>&1 &
+    sf1=$!
+    n=0
+    while [ "$n" -lt 100 ] && ! grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+    FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=1 $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf2.out" 2>&1
+    printf "sf2_rc=%s\n" "$?"
+    wait "$sf1"
+    printf "sf1_rc=%s\n" "$?"')
+  assert_contains "$out" "sf2_rc=2" "the newer failure must own the one recovery"
+  assert_contains "$out" "sf1_rc=0" "the older waiter must stand down"
+  [ ! -s "$dir/state/sf1.out" ] || fail "the superseded waiter produced output: $(cat "$dir/state/sf1.out")"
+  [ "$(grep -c '^firstmate recovery turn' "$dir/state/sf2.out")" -eq 1 ] || fail "the newer failure must emit one banner"
+  pass "StopFailure: a newer failure supersedes an older waiter, so two failures still yield one recovery turn"
+}
+
+test_stopfailure_turn_in_progress_stands_down() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/sf-turn-started")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/sf-payload"
+  out=$(SF_BASE=30 SF_BACKOFF_MAX=30 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
+    sf=$!
+    n=0
+    while [ "$n" -lt 100 ] && ! grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+    printf "%s\n" "{\"type\":\"user\",\"origin\":{\"kind\":\"human\"},\"message\":{\"role\":\"user\",\"content\":\"status?\"}}" >> "$FM_HOME/state/transcript.jsonl"
+    wait "$sf"
+    printf "sf_rc=%s\n" "$?"')
+  assert_contains "$out" "sf_rc=0" "a turn that began after the failure must stand the recovery down"
+  [ ! -s "$dir/state/sf.out" ] || fail "a recovery landed on a turn in progress: $(cat "$dir/state/sf.out")"
+  [ "$(sf_record_field "$dir" reason)" = turn_started ] || fail "the record must name the turn in progress"
+
+  # Control: entries that are not a new turn (the failure's own bookkeeping, a
+  # local command's output) must not stand the recovery down.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-turn-control")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/sf-payload"
+  out=$(SF_BASE=2 SF_BACKOFF_MAX=2 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
+    sf=$!
+    n=0
+    while [ "$n" -lt 100 ] && ! grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+    printf "%s\n" "{\"type\":\"system\",\"subtype\":\"local_command\",\"content\":\"<local-command-stdout></local-command-stdout>\"}" >> "$FM_HOME/state/transcript.jsonl"
+    printf "%s\n" "{\"type\":\"assistant\",\"isApiErrorMessage\":true,\"error\":\"overloaded\",\"message\":{\"content\":[]}}" >> "$FM_HOME/state/transcript.jsonl"
+    printf "%s\n" "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\"}]}}" >> "$FM_HOME/state/transcript.jsonl"
+    wait "$sf"
+    printf "sf_rc=%s\n" "$?"')
+  assert_contains "$out" "sf_rc=2" "entries that start no turn must not suppress the recovery"
+  [ "$(grep -c '^firstmate recovery turn' "$dir/state/sf.out")" -eq 1 ] || fail "the control recovery must emit one banner"
+  pass "StopFailure: a turn that began after the failure stands the recovery down, other transcript entries do not"
+}
+
+test_stopfailure_reset_text_and_bounded_fallbacks() {
+  local dir out status now hour minute h12 suffix reset
+  # The error text alone names the reset: "resets h:mmam|pm (<zone>)", here two
+  # hours ahead in UTC. The cap keeps the case short and must say so.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-text")
+  : > "$dir/state/task.meta"
+  now=$(date +%s)
+  hour=$(( (10#$(date -u +%H) + 2) % 24 ))
+  minute=$(date -u +%M)
+  suffix=am
+  [ "$hour" -lt 12 ] || suffix=pm
+  h12=$(( hour % 12 ))
+  [ "$h12" -ne 0 ] || h12=12
+  out=$(SF_CAP=1 run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/none.jsonl" rate_limit "You've hit your session limit · resets ${h12}:${minute}${suffix} (UTC)")"); status=$?
+  expect_code 2 "$status" "a reset read from the error text must still recover once"
+  [ "$(sf_record_field "$dir" basis)" = message ] || fail "the wait must come from the error text, got: $(sf_record_field "$dir" basis)"
+  reset=$(sf_record_field "$dir" reset)
+  [ "$reset" -ge $(( now + 7200 - 120 )) ] && [ "$reset" -le $(( now + 7200 + 5 )) ] \
+    || fail "the parsed reset $reset is not two hours after $now"
+  [ "$(sf_record_field "$dir" wait)" = 1 ] || fail "the wait must be capped"
+  assert_contains "$out" "as long as one wait may last although the usage limit resets at" "a capped wait must say the turn may be rejected again"
+
+  # A dated reset is more than a day away: wait the cap.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-text-far")
+  : > "$dir/state/task.meta"
+  out=$(SF_CAP=1 run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/none.jsonl" rate_limit "You've hit your weekly limit · resets Sep 23, 5am (America/New_York)")"); status=$?
+  expect_code 2 "$status" "a far reset must still recover once per cap window"
+  [ "$(sf_record_field "$dir" basis)" = far ] || fail "a dated reset must be read as more than a day away"
+  [ "$(sf_record_field "$dir" wait)" = 1 ] || fail "a far reset must wait the cap"
+
+  # No readable reset at all, and a transient error: the bounded backoff.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-no-reset")
+  : > "$dir/state/task.meta"
+  out=$(SF_BASE=2 run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/none.jsonl" rate_limit "Request rejected (429)")"); status=$?
+  expect_code 2 "$status" "an unreadable reset must fall back to a bounded backoff"
+  [ "$(sf_record_field "$dir" basis)" = backoff ] || fail "an unreadable reset must use the backoff"
+  [ "$(sf_record_field "$dir" wait)" = 2 ] || fail "the first backoff must be the base"
+  dir=$(make_primary_dir "$TMP_ROOT/sf-transient")
+  : > "$dir/state/task.meta"
+  out=$(SF_BASE=2 run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/none.jsonl" some_future_error "?")"); status=$?
+  expect_code 2 "$status" "an unrecognized error must be treated as transient"
+  [ "$(sf_record_field "$dir" error)" = some_future_error ] || fail "the record must keep the error name"
+  [ "$(sf_record_field "$dir" basis)" = backoff ] || fail "a transient error must use the backoff"
+  pass "StopFailure: reads the reset from the error text, waits the cap for a far reset, and backs off when unreadable"
+}
+
+test_stopfailure_signal_fires_recovery() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/sf-signal")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/sf-payload"
+  out=$(SF_BASE=30 SF_BACKOFF_MAX=30 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
+    sf=$!
+    n=0
+    while [ "$n" -lt 100 ] && ! grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+    kill -TERM "$sf"
+    wait "$sf"
+    printf "sf_rc=%s\n" "$?"')
+  assert_contains "$out" "sf_rc=2" "a host signal mid-wait must hand off one recovery rather than go blind"
+  assert_contains "$(cat "$dir/state/sf.out")" "was interrupted by TERM" "the banner must say the wait was interrupted"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the interrupted wait must commit its rewake"
+  pass "StopFailure: HUP/TERM/INT mid-wait hand off the one recovery turn"
+}
+
+test_stopfailure_inert_outside_the_owning_primary() {
+  local base dir out status
+  base="$TMP_ROOT/sf-crew-base"
+  dir="$TMP_ROOT/sf-crew-wt"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  : > "$dir/state/task.meta"
+  out=$(run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/none.jsonl" rate_limit "limit")"); status=$?
+  expect_code 0 "$status" "a child worktree's StopFailure must stay inert"
+  assert_absent "$dir/state/.claude-autoarm-epoch" "a child worktree must not claim"
+
+  dir=$(make_primary_dir "$TMP_ROOT/sf-idle")
+  out=$(run_stopfailure "$dir" "$(stopfailure_payload "$dir/state/none.jsonl" rate_limit "limit")"); status=$?
+  expect_code 0 "$status" "an idle home needs no recovery turn"
+  assert_absent "$dir/state/.claude-autoarm-epoch" "an idle home must not claim"
+
+  dir=$(make_primary_dir "$TMP_ROOT/sf-no-lock")
+  : > "$dir/state/task.meta"
+  out=$(printf '%s\n' "$(stopfailure_payload "$dir/state/none.jsonl" rate_limit "limit")" \
+    | FM_HOME="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" --stop-failure 2>&1); status=$?
+  expect_code 0 "$status" "a session that does not own the home lock must stay inert"
+  assert_absent "$dir/state/.claude-autoarm-epoch" "a non-owning session must not claim"
+  pass "StopFailure: inert in child worktrees, idle homes, and sessions that do not own the home"
+}
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
@@ -1275,3 +1755,15 @@ test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
 test_fm_lock_status_still_works_with_shared_lib
+test_stopfailure_tracked_registration_routes_one_recovery
+test_stopfailure_waits_for_reset_then_rewakes_once
+test_stopfailure_failed_recovery_waits_again
+test_stopfailure_stands_down_under_afk
+test_stopfailure_halts_on_errors_a_retry_cannot_fix
+test_stopfailure_defers_to_live_continuity
+test_stopfailure_superseded_by_ordinary_stop_goes_silent
+test_stopfailure_newer_failure_supersedes_older_waiter
+test_stopfailure_turn_in_progress_stands_down
+test_stopfailure_reset_text_and_bounded_fallbacks
+test_stopfailure_signal_fires_recovery
+test_stopfailure_inert_outside_the_owning_primary

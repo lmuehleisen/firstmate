@@ -535,6 +535,34 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+### Claude StopFailure recovery, 2026-09-21
+
+The `StopFailure` registration of `bin/fm-claude-stop-autoarm.sh --stop-failure` was verified live against Claude Code 2.1.278 with no credentials and no model tokens.
+The guard runs an interactive session in an isolated tmux server and `CLAUDE_CONFIG_DIR`, with the real tracked `.claude/settings.json`, against a local fake Messages API that answers 429 until a reset named in its error text and answers normally afterward.
+
+```sh
+claude --version
+FM_CLAUDE_STOPFAILURE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-claude-stopfailure-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+2.1.278 (Claude Code)
+ok - Claude 2.1.278 (Claude Code) live: an API-error turn end fired only StopFailure, the hook waited for the reset named in the error text, one asyncRewake recovery turn followed, and its Stop re-armed
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=42601
+```
+
+Observed guarantee: the rejected turn fired only `StopFailure`, with `error` set to `rate_limit` and the API's error text in `last_assistant_message`.
+Every rejected request fell inside that one turn, and the first accepted request came at or after the named reset.
+The hook's `asyncRewake` exit 2 started exactly one recovery turn, although Claude Code describes `StopFailure` as fire-and-forget, and that turn fired only `Stop`, whose auto-arm took the next ledger generation and re-armed.
+The dead prior session owner was reclaimed.
+With the `StopFailure` registration removed, the same run fired only `StopFailure` and no turn ran within 90 seconds after the reset, which reproduces the blind window.
+Print mode runs async hooks synchronously, so only an interactive session shows the rewake.
+Under API-key billing Claude Code shows the API's own error text, so the live pass exercises the reset-from-text path.
+The subscriber `quotaLimits.resetsAt` path, backoff and repeated failures, away-mode, halt, and live-continuity stand-downs, supersession, and a turn already in progress are verified only by `tests/fm-claude-stop-autoarm.test.sh`, from the transcript shape a real seven-day limit recorded on 2.1.278.
+A real subscriber usage limit and an hours-long wait were not reproduced live.
+
 Deterministic entry points:
 
 ```sh

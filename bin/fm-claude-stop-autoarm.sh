@@ -69,7 +69,69 @@
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
 # the model.
+#
+# StopFailure mode (--stop-failure): the same script is also registered as the
+# StopFailure asyncRewake hook beside the two Stop hooks. Claude Code fires
+# StopFailure INSTEAD of Stop when a turn ends on an API error (a usage limit,
+# an overload, an auth failure), so neither Stop hook runs and nothing re-arms
+# the watcher; that blinded a home for 8 hours after a weekly usage limit. After
+# the unchanged foreign-host, scope, identity, AFK, and need gates above, this
+# mode starts at most ONE recovery turn per failure:
+#   - Classify the payload's "error". Errors a retry cannot fix
+#     (authentication_failed, oauth_org_not_allowed, account_on_hold,
+#     verification_required, billing_error, cloud_credential_error,
+#     invalid_request, model_not_found) record a halt decision and stand down:
+#     the captain must act, and a recovery turn would only fail again.
+#     rate_limit waits for the limit reset; every other error, including any
+#     error name a later Claude Code adds, is transient and backs off.
+#   - Stand down while a live open Stop-owned claim or a healthy watcher already
+#     owns continuity (that watcher's next wake rewakes normally), and after the
+#     attended fail-open alarm, exactly as the Stop path suppresses continuation.
+#   - Claim the next epoch-ledger generation with outcome "stopfailure-wait",
+#     which is never open: an ordinary Stop never defers to it and supersedes
+#     it by taking the next generation, and a newer StopFailure supersedes it
+#     the same way, so sleepers never stack and a superseded one goes silent.
+#     No lock is held while waiting.
+#   - Wait. For rate_limit: until the reset plus FM_CLAUDE_STOPFAILURE_RESET_SLACK
+#     (default 60s), preferring quotaLimits.resetsAt from the transcript's
+#     fresh API-error entry, then the "resets <h[:mm]am|pm> (<zone>)" text of
+#     the error message; a dated "resets <Mon> <d>, ..." text names a reset more
+#     than a day away and waits the cap. Otherwise, and whenever the reset time
+#     cannot be read: a capped exponential backoff from
+#     FM_CLAUDE_STOPFAILURE_BACKOFF_BASE (default 300s) to
+#     FM_CLAUDE_STOPFAILURE_BACKOFF_MAX (default 1800s). The attempt number
+#     grows only while the ledger still ends on this mode's own rewake, meaning
+#     the recovery turn itself failed again; from the second attempt the wait
+#     is at least the backoff even when a reset time is known. Every wait is
+#     capped at FM_CLAUDE_STOPFAILURE_MAX_WAIT (default 28500s), below the
+#     28800s hook timeout, so a limit that outlasts the cap costs one rejected
+#     recovery turn per cap window and the next StopFailure starts a new wait:
+#     never an unbounded wait and never a tight loop.
+#   - Every FM_CLAUDE_STOPFAILURE_POLL seconds (default 30), and again before
+#     firing, stand down on supersession, AFK, lost session-lock identity,
+#     vanished need, a healthy watcher, the attended alarm, or transcript
+#     evidence that another turn began after the failure (a new prompt or
+#     task-notification user entry, a dequeued prompt, or real assistant
+#     output), so a recovery turn never lands on a turn in progress. The wait
+#     uses the wall clock, so machine sleep shortens rather than extends it.
+#   - Fire: print the recovery banner, commit outcome=rewake bound to the
+#     session-lock pid and watcher recovery generation (the same binding an
+#     ordinary rewake carries, so the mid-turn pull guard stays quiet), and exit
+#     2. That recovery turn ends normally, and its Stop auto-arm resumes the
+#     watcher. HUP, TERM, and INT fire the same way after the same rechecks.
+# state/.claude-stopfailure holds the latest decision on one line (epoch,
+# attempt, error, decision, wait, reset, reason); it carries the attempt count
+# and is read only by this mode. A print-mode (-p) session runs async hooks
+# synchronously and ignores StopFailure exit codes, so there this mode only
+# holds that session for its wait; only the lock-owning session reaches it.
 set -u
+
+MODE=stop
+case "${1:-}" in
+  '') : ;;
+  --stop-failure) MODE=stop-failure ;;
+  *) exit 0 ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -152,6 +214,344 @@ if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
+
+# --- StopFailure mode: one recovery turn after an API-error turn end ---------
+# The header's "StopFailure mode" paragraph owns this contract. Everything in
+# this section runs only under --stop-failure and always exits.
+SF_RECORD="$STATE/.claude-stopfailure"
+SF_TRANSCRIPT=
+SF_TRANSCRIPT_LINES=
+SF_FAILURE_ENTRY=
+SF_REASON=
+
+sf_int() {  # <value> <default>: a positive integer, or the default
+  case "$1" in
+    ''|*[!0-9]*|0) printf '%s\n' "$2" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+sf_error_class() {  # <error>
+  case "$1" in
+    rate_limit) printf 'rate-limit\n' ;;
+    authentication_failed|oauth_org_not_allowed|account_on_hold|verification_required) printf 'halt\n' ;;
+    billing_error|cloud_credential_error|invalid_request|model_not_found) printf 'halt\n' ;;
+    *) printf 'transient\n' ;;
+  esac
+}
+
+# The latest decision, one line of key=value tokens. Best effort, never fatal.
+sf_record() {  # <epoch> <attempt> <error> <decision> <basis> <wait> <reset> <reason>
+  local tmp="$SF_RECORD.tmp.${BASHPID:-$$}"
+  if printf 'epoch=%s attempt=%s error=%s decision=%s basis=%s wait=%s reset=%s reason=%s updated_at=%s\n' \
+      "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$(date +%s)" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$SF_RECORD" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+
+# Find this failure's own transcript entry: the last API-error entry among the
+# final lines, accepted only when fresh, so an older failure is never read as
+# this one. Claude may flush it just after the hook starts, so allow a short
+# settle. SF_TRANSCRIPT_LINES is the transcript length once the failure is on
+# disk; evidence of a later turn must come after it.
+sf_locate_failure() {
+  local entry ts tries=0
+  SF_TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+  if [ -z "$SF_TRANSCRIPT" ] || [ ! -f "$SF_TRANSCRIPT" ] || [ ! -r "$SF_TRANSCRIPT" ]; then
+    SF_TRANSCRIPT=
+    return 0
+  fi
+  while :; do
+    entry=$(tail -n 64 "$SF_TRANSCRIPT" 2>/dev/null \
+      | jq -Rc 'fromjson? | select(type == "object" and .isApiErrorMessage == true)' 2>/dev/null \
+      | tail -n 1)
+    if [ -n "$entry" ]; then
+      ts=$(printf '%s' "$entry" \
+        | jq -r '(.timestamp // "") | sub("\\.[0-9]+Z$"; "Z") | (fromdateiso8601? // empty)' 2>/dev/null || true)
+      case "$ts" in
+        ''|*[!0-9]*) : ;;
+        *)
+          if [ "$ts" -ge $((SF_STARTED - 600)) ]; then
+            SF_FAILURE_ENTRY=$entry
+            break
+          fi
+          ;;
+      esac
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt 6 ] || break
+    sleep 0.5
+  done
+  SF_TRANSCRIPT_LINES=$(wc -l < "$SF_TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')
+  case "$SF_TRANSCRIPT_LINES" in
+    ''|*[!0-9]*) SF_TRANSCRIPT_LINES= ;;
+  esac
+}
+
+# Positive evidence that another turn began after the failure: a delivered
+# prompt or task notification, a dequeued prompt, or real model output. No
+# transcript, or no such entry, is not evidence.
+sf_turn_started_since() {
+  [ -n "$SF_TRANSCRIPT" ] && [ -n "$SF_TRANSCRIPT_LINES" ] || return 1
+  tail -n "+$((SF_TRANSCRIPT_LINES + 1))" "$SF_TRANSCRIPT" 2>/dev/null \
+    | jq -Rce 'fromjson? | select(type == "object")
+        | select((.type == "user" and .origin != null)
+          or (.type == "queue-operation" and .operation == "dequeue")
+          or (.type == "assistant" and .isApiErrorMessage != true))' >/dev/null 2>&1
+}
+
+sf_reset_from_transcript() {
+  [ -n "$SF_FAILURE_ENTRY" ] || return 1
+  printf '%s' "$SF_FAILURE_ENTRY" \
+    | jq -r 'select(.error == "rate_limit") | .quotaLimits.resetsAt // empty | numbers | floor' 2>/dev/null
+}
+
+# Claude Code words a usage-limit reset as "resets 5am (America/New_York)" or
+# "resets 6:20am (...)", the next such wall-clock time in that zone (a DST
+# change can skew it by an hour, and the next failure corrects it), or as a
+# dated "resets Sep 23, 5am (...)" when the reset is more than a day away.
+sf_reset_from_message() {  # <message>
+  local msg=$1 re hour minute zone h m s delta
+  re='resets [A-Z][a-z][a-z] [0-9]{1,2}(, [0-9]{4})?, [0-9]{1,2}(:[0-9]{2})?(am|pm)'
+  if [[ $msg =~ $re ]]; then
+    printf 'far\n'
+    return 0
+  fi
+  re='resets ([0-9]{1,2})(:([0-9]{2}))?(am|pm) \(([A-Za-z0-9_+/-]+)\)'
+  [[ $msg =~ $re ]] || return 1
+  hour=$((10#${BASH_REMATCH[1]} % 12))
+  minute=$((10#${BASH_REMATCH[3]:-0}))
+  [ "${BASH_REMATCH[4]}" = pm ] && hour=$((hour + 12))
+  zone=${BASH_REMATCH[5]}
+  case "$zone" in
+    *..*) return 1 ;;
+  esac
+  [ -f "${TZDIR:-/usr/share/zoneinfo}/$zone" ] || return 1
+  read -r h m s < <(TZ="$zone" date '+%H %M %S' 2>/dev/null) || return 1
+  delta=$(( hour * 3600 + minute * 60 - (10#$h * 3600 + 10#$m * 60 + 10#$s) ))
+  [ "$delta" -gt 0 ] || delta=$((delta + 86400))
+  printf '%s\n' "$(( $(date +%s) + delta ))"
+}
+
+sf_backoff() {  # <attempt>
+  local k=$1 wait=$SF_BACKOFF_BASE
+  while [ "$k" -gt 1 ] && [ "$wait" -lt "$SF_BACKOFF_MAX" ]; do
+    wait=$((wait * 2))
+    k=$((k - 1))
+  done
+  [ "$wait" -le "$SF_BACKOFF_MAX" ] || wait=$SF_BACKOFF_MAX
+  printf '%s\n' "$wait"
+}
+
+# The attempt grows only while the ledger still ends on this mode's own rewake,
+# that is, when the recovery turn itself failed again. A failure that replaces
+# a still-waiting generation keeps its level; anything else starts over.
+sf_next_attempt() {
+  local epoch attempt decision
+  fm_autoarm_ledger_read "$STATE" || { printf '1\n'; return 0; }
+  epoch=$(_fm_autoarm_epoch_field "$SF_RECORD" epoch 2>/dev/null || true)
+  attempt=$(_fm_autoarm_epoch_field "$SF_RECORD" attempt 2>/dev/null || true)
+  decision=$(_fm_autoarm_epoch_field "$SF_RECORD" decision 2>/dev/null || true)
+  case "$attempt" in
+    ''|*[!0-9]*|0) attempt=1 ;;
+  esac
+  if [ -n "$epoch" ] && [ "$epoch" = "$FM_AUTOARM_GEN" ]; then
+    case "$FM_AUTOARM_OUTCOME:$decision" in
+      rewake:rewake) printf '%s\n' "$((attempt + 1))"; return 0 ;;
+      stopfailure-wait:wait) printf '%s\n' "$attempt"; return 0 ;;
+    esac
+  fi
+  printf '1\n'
+}
+
+# Sets SF_REASON and succeeds when this generation must not start a turn.
+sf_stand_down_reason() {
+  SF_REASON=
+  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    SF_REASON=superseded
+  elif [ -e "$STATE/.afk" ]; then
+    SF_REASON=afk
+  elif [ -e "$FAILURE_ALARM" ]; then
+    SF_REASON=alarmed
+  elif ! fm_session_lock_owned_by_self "$STATE"; then
+    SF_REASON=lock_lost
+  elif ! need_supervision; then
+    SF_REASON=no_need
+  elif fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+    SF_REASON=watcher_healthy
+  elif sf_turn_started_since; then
+    SF_REASON=turn_started
+  fi
+  [ -n "$SF_REASON" ]
+}
+
+# A superseded generation goes silent; any other stand-down closes its own
+# claim so the ledger never keeps a waiting entry for a finished process.
+sf_stand_down() {
+  [ "$SF_REASON" = superseded ] && exit 0
+  fm_autoarm_write_owned "$STATE" "$MY_GEN" stopfailure-standdown >/dev/null 2>&1 || exit 0
+  sf_record "$MY_GEN" "$SF_ATTEMPT" "$SF_ERROR" standdown "$SF_BASIS" "$SF_WAIT" "$SF_RESET_DESC" "$SF_REASON"
+  exit 0
+}
+
+# Commit the recovery rewake with the same session-lock and watcher recovery
+# binding an ordinary rewake carries; without a downtime marker it commits
+# unbound rather than leaving the home without a recovery turn.
+sf_commit_rewake() {
+  local session_pid recovery=
+  fm_session_lock_owned_by_self "$STATE" || return 2
+  session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
+  if fm_recovery_marker_snapshot "$STATE/.watcher-down"; then
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*|announced:downtime:*) recovery=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
+    esac
+  fi
+  fm_autoarm_write_owned "$STATE" "$MY_GEN" rewake "" "$session_pid" "$recovery"
+}
+
+sf_fire() {  # <what-happened> <reason-token>
+  local basis reset_at
+  sf_stand_down_reason && sf_stand_down
+  case "$SF_BASIS" in
+    resetsAt|message)
+      reset_at=$(jq -rn --argjson t "$SF_RESET_DESC" '$t | todate' 2>/dev/null || printf '%s' "$SF_RESET_DESC")
+      if [ "$SF_CAPPED" -eq 1 ]; then
+        basis="as long as one wait may last although the usage limit resets at $reset_at, so this turn may be rejected again"
+      else
+        basis="for the usage limit to reset at $reset_at"
+      fi
+      ;;
+    far) basis='as long as one wait may last because the usage limit resets more than a day after the failure, so this turn may be rejected again' ;;
+    *) basis="a bounded backoff for recovery attempt $SF_ATTEMPT" ;;
+  esac
+  {
+    printf 'firstmate recovery turn - the previous turn ended on a Claude API error (%s), so no Stop hook ran and no watcher is supervising this home.\n' "$SF_ERROR"
+    printf 'The StopFailure hook %s, waiting %s, before starting this single recovery turn.\n' "$1" "$basis"
+    printf 'Run bin/fm-wake-drain.sh first, handle any presented wakes, then run its exact WAKE_ACK_REQUIRED --ack-through command. When this turn ends normally, the Stop hook re-arms the watcher automatically - do NOT run bin/fm-watch-arm.sh. If this turn also ends on an API error, the StopFailure hook waits again before any further recovery.\n'
+  } >&2
+  if sf_commit_rewake; then
+    sf_record "$MY_GEN" "$SF_ATTEMPT" "$SF_ERROR" rewake "$SF_BASIS" "$SF_WAIT" "$SF_RESET_DESC" "$2"
+    exit 2
+  fi
+  exit 0
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
+sf_on_signal() {
+  trap - HUP TERM INT
+  sf_fire "was interrupted by $1 after $(( $(date +%s) - SF_STARTED ))s" "signal-$1"
+}
+
+stopfailure_recover() {
+  local now reset msg rc i remaining nap floor
+  SF_STARTED=$(date +%s)
+  SF_MAX_WAIT=$(sf_int "${FM_CLAUDE_STOPFAILURE_MAX_WAIT:-}" 28500)
+  SF_BACKOFF_BASE=$(sf_int "${FM_CLAUDE_STOPFAILURE_BACKOFF_BASE:-}" 300)
+  SF_BACKOFF_MAX=$(sf_int "${FM_CLAUDE_STOPFAILURE_BACKOFF_MAX:-}" 1800)
+  SF_RESET_SLACK=$(sf_int "${FM_CLAUDE_STOPFAILURE_RESET_SLACK:-}" 60)
+  SF_POLL=$(sf_int "${FM_CLAUDE_STOPFAILURE_POLL:-}" 30)
+  SF_ATTEMPT=0
+  SF_BASIS=none
+  SF_WAIT=0
+  SF_RESET_DESC=none
+  SF_CAPPED=0
+
+  SF_ERROR=$(printf '%s' "$PAYLOAD" | jq -r '.error // empty' 2>/dev/null || true)
+  case "$SF_ERROR" in
+    ''|*[!a-z0-9_]*) SF_ERROR=unknown ;;
+  esac
+  if [ "$(sf_error_class "$SF_ERROR")" = halt ]; then
+    fm_autoarm_ledger_read "$STATE" || FM_AUTOARM_GEN=0
+    sf_record "${FM_AUTOARM_GEN:-0}" 0 "$SF_ERROR" halt none 0 none needs-captain
+    exit 0
+  fi
+
+  # A live Stop-owned cycle or a healthy watcher already owns continuity: that
+  # watcher's next wake rewakes normally, and a failure of that turn fires this
+  # hook again once its claim is terminal.
+  fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
+  fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" && exit 0
+  [ -e "$FAILURE_ALARM" ] && exit 0
+
+  sf_locate_failure
+  SF_ATTEMPT=$(sf_next_attempt)
+  reset=
+  if [ "$SF_ERROR" = rate_limit ]; then
+    reset=$(sf_reset_from_transcript || true)
+    if [ -n "$reset" ]; then
+      SF_BASIS=resetsAt
+    else
+      msg=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)
+      [ -n "$msg" ] || msg=$(printf '%s' "$SF_FAILURE_ENTRY" \
+        | jq -r '[.message.content[]? | select(.type == "text") | .text] | join(" ")' 2>/dev/null || true)
+      reset=$(sf_reset_from_message "$msg" || true)
+      SF_BASIS=message
+    fi
+  fi
+  now=$(date +%s)
+  case "$reset" in
+    far)
+      SF_BASIS=far
+      SF_RESET_DESC=far
+      SF_WAIT=$SF_MAX_WAIT
+      ;;
+    ''|*[!0-9]*)
+      SF_BASIS=backoff
+      SF_WAIT=$(sf_backoff "$SF_ATTEMPT")
+      ;;
+    *)
+      if [ "$reset" -gt "$now" ]; then
+        SF_RESET_DESC=$reset
+        SF_WAIT=$((reset - now + SF_RESET_SLACK))
+        if [ "$SF_ATTEMPT" -gt 1 ]; then
+          floor=$(sf_backoff "$SF_ATTEMPT")
+          [ "$SF_WAIT" -ge "$floor" ] || SF_WAIT=$floor
+        fi
+      else
+        SF_BASIS=backoff
+        SF_WAIT=$(sf_backoff "$SF_ATTEMPT")
+      fi
+      ;;
+  esac
+  if [ "$SF_WAIT" -gt "$SF_MAX_WAIT" ]; then
+    SF_WAIT=$SF_MAX_WAIT
+    SF_CAPPED=1
+  fi
+
+  # Claim with the never-open outcome; a competing open claim (rc 2) owns
+  # continuity, and micro-mutex contention (rc 1) is retried briefly.
+  i=0
+  while :; do
+    fm_autoarm_claim_next "$STATE" "$GRACE" stopfailure-wait
+    rc=$?
+    [ "$rc" -eq 0 ] && break
+    [ "$rc" -eq 2 ] && exit 0
+    i=$((i + 1))
+    [ "$i" -lt 50 ] || exit 0
+    sleep 0.1
+  done
+  MY_GEN=$FM_AUTOARM_MY_GEN
+  [ -n "$MY_GEN" ] || exit 0
+  sf_record "$MY_GEN" "$SF_ATTEMPT" "$SF_ERROR" wait "$SF_BASIS" "$SF_WAIT" "$SF_RESET_DESC" waiting
+  trap 'sf_on_signal HUP' HUP
+  trap 'sf_on_signal TERM' TERM
+  trap 'sf_on_signal INT' INT
+
+  SF_DEADLINE=$((now + SF_WAIT))
+  while :; do
+    sf_stand_down_reason && sf_stand_down
+    remaining=$((SF_DEADLINE - $(date +%s)))
+    [ "$remaining" -gt 0 ] || break
+    nap=$SF_POLL
+    [ "$nap" -le "$remaining" ] || nap=$remaining
+    sleep "$nap"
+  done
+  sf_fire "waited ${SF_WAIT}s" waited
+}
+
+[ "$MODE" = stop-failure ] && stopfailure_recover
 
 # --- single-flight generation claim --------------------------------------------
 # Claude runs one background process per firing with no dedupe. Exactly one
