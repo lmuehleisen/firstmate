@@ -1489,10 +1489,38 @@ test_stopfailure_halts_on_errors_a_retry_cannot_fix() {
     expect_code 0 "$status" "$error must not start a recovery turn that can only fail again"
     [ $(( $(date +%s) - started )) -le 2 ] || fail "$error must stand down at once, not wait"
     [ -z "$out" ] || fail "$error stand-down produced output: $out"
-    assert_absent "$dir/state/.claude-autoarm-epoch" "$error must not claim the ledger"
+    [ "$(epoch_outcome "$dir")" = stopfailure-halt ] || fail "$error must close the ledger on a terminal halt generation, got: $(epoch_outcome "$dir")"
     [ "$(sf_record_field "$dir" decision)" = halt ] || fail "$error must be recorded as a halt decision"
   done
   pass "StopFailure: errors only the captain can fix are recorded and never looped"
+}
+
+# A transient failure's recovery is already waiting when a later turn fails on
+# an error only the captain can fix: that waiter must never start its turn.
+test_stopfailure_halt_supersedes_a_waiting_recovery() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/sf-halt-supersedes")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/sf-payload"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/none.jsonl" authentication_failed "Please run /login")" > "$dir/state/halt-payload"
+  out=$(SF_BASE=4 SF_BACKOFF_MAX=4 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
+    sf=$!
+    n=0
+    while [ "$n" -lt 100 ] && ! grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+    $SF_HOOK < "$FM_HOME/state/halt-payload" > "$FM_HOME/state/halt.out" 2>&1
+    printf "halt_rc=%s\n" "$?"
+    wait "$sf"
+    printf "sf_rc=%s\n" "$?"')
+  assert_contains "$out" "halt_rc=0" "the halt must stand down"
+  assert_contains "$out" "sf_rc=0" "the earlier waiter must stand down instead of recovering"
+  [ ! -s "$dir/state/sf.out" ] || fail "the superseded waiter started a recovery turn: $(cat "$dir/state/sf.out")"
+  [ ! -s "$dir/state/halt.out" ] || fail "the halt produced output: $(cat "$dir/state/halt.out")"
+  [ "$(epoch_outcome "$dir")" = stopfailure-halt ] || fail "the ledger must end on the halt, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_field "$dir" epoch)" = 2 ] || fail "the halt must take the generation after the waiter's"
+  [ "$(sf_record_field "$dir" decision)" = halt ] || fail "the record must end on the halt decision"
+  pass "StopFailure: a halt-class failure supersedes a waiting recovery, so no recovery turn starts"
 }
 
 test_stopfailure_defers_to_live_continuity() {
@@ -1689,6 +1717,48 @@ test_stopfailure_signal_fires_recovery() {
   pass "StopFailure: HUP/TERM/INT mid-wait hand off the one recovery turn"
 }
 
+# The traps are live before the waiting claim is published: a signal that lands
+# before the claim, or the instant it appears, still ends in the one recovery.
+test_stopfailure_signal_around_the_claim_still_recovers() {
+  local dir out
+  # Before the claim: the failure's entry is not in the transcript yet, so the
+  # hook is still settling (sleeping in half-second steps) when TERM arrives.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-signal-before-claim")
+  : > "$dir/state/task.meta"
+  printf '%s\n' '{"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"wake"}}' > "$dir/state/transcript.jsonl"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/sf-payload"
+  out=$(SF_BASE=30 SF_BACKOFF_MAX=30 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
+    sf=$!
+    n=0
+    while [ "$n" -lt 200 ] && ! pgrep -P "$sf" -f "sleep 0.5" >/dev/null 2>&1; do sleep 0.02; n=$((n + 1)); done
+    [ -e "$FM_HOME/state/.claude-autoarm-epoch" ] && printf "claimed-before-signal\n"
+    kill -TERM "$sf"
+    wait "$sf"
+    printf "sf_rc=%s\n" "$?"')
+  assert_not_contains "$out" "claimed-before-signal" "the case must signal before the claim is published"
+  assert_contains "$out" "sf_rc=2" "a signal before the claim must still end in one recovery"
+  assert_contains "$(cat "$dir/state/sf.out")" "was interrupted by TERM" "the banner must say the wait was interrupted"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "a signal before the claim must still commit a rewake, got: $(epoch_outcome "$dir")"
+
+  # The instant the claim appears.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-signal-at-claim")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/sf-payload"
+  out=$(SF_BASE=30 SF_BACKOFF_MAX=30 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/sf-payload" > "$FM_HOME/state/sf.out" 2>&1 &
+    sf=$!
+    until grep -q "outcome=stopfailure-wait" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null; do :; done
+    kill -TERM "$sf"
+    wait "$sf"
+    printf "sf_rc=%s\n" "$?"')
+  assert_contains "$out" "sf_rc=2" "a signal delivered immediately after the claim must still end in one recovery"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "a signal right after the claim must commit the rewake, got: $(epoch_outcome "$dir")"
+  [ "$(grep -c '^firstmate recovery turn' "$dir/state/sf.out")" -eq 1 ] || fail "expected exactly one recovery banner"
+  pass "StopFailure: a signal before the claim or the instant it is published still commits the one recovery"
+}
+
 test_stopfailure_inert_outside_the_owning_primary() {
   local base dir out status
   base="$TMP_ROOT/sf-crew-base"
@@ -1760,10 +1830,12 @@ test_stopfailure_waits_for_reset_then_rewakes_once
 test_stopfailure_failed_recovery_waits_again
 test_stopfailure_stands_down_under_afk
 test_stopfailure_halts_on_errors_a_retry_cannot_fix
+test_stopfailure_halt_supersedes_a_waiting_recovery
 test_stopfailure_defers_to_live_continuity
 test_stopfailure_superseded_by_ordinary_stop_goes_silent
 test_stopfailure_newer_failure_supersedes_older_waiter
 test_stopfailure_turn_in_progress_stands_down
 test_stopfailure_reset_text_and_bounded_fallbacks
 test_stopfailure_signal_fires_recovery
+test_stopfailure_signal_around_the_claim_still_recovers
 test_stopfailure_inert_outside_the_owning_primary

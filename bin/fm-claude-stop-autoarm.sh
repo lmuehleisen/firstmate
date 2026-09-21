@@ -81,7 +81,10 @@
 #     (authentication_failed, oauth_org_not_allowed, account_on_hold,
 #     verification_required, billing_error, cloud_credential_error,
 #     invalid_request, model_not_found) record a halt decision and stand down:
-#     the captain must act, and a recovery turn would only fail again.
+#     the captain must act, and a recovery turn would only fail again. The halt
+#     first claims the next ledger generation with the terminal outcome
+#     "stopfailure-halt", so a waiter from an earlier transient failure is
+#     superseded and never starts the turn this error rules out.
 #     rate_limit waits for the limit reset; every other error, including any
 #     error name a later Claude Code adds, is transient and backs off.
 #   - Stand down while a live open Stop-owned claim or a healthy watcher already
@@ -118,7 +121,11 @@
 #     session-lock pid and watcher recovery generation (the same binding an
 #     ordinary rewake carries, so the mid-turn pull guard stays quiet), and exit
 #     2. That recovery turn ends normally, and its Stop auto-arm resumes the
-#     watcher. HUP, TERM, and INT fire the same way after the same rechecks.
+#     watcher. HUP, TERM, and INT are trapped before the claim is published and
+#     only mark the signal, so a signal can never interrupt a ledger write or
+#     land between publishing the wait and trapping; the first safe point after
+#     the claim (at once, or when the current poll's sleep ends) fires the same
+#     way after the same rechecks.
 # state/.claude-stopfailure holds the latest decision on one line (epoch,
 # attempt, error, decision, wait, reset, reason); it carries the attempt count
 # and is read only by this mode. A print-mode (-p) session runs async hooks
@@ -438,14 +445,43 @@ sf_fire() {  # <what-happened> <reason-token>
   exit 0
 }
 
+# Claim the next generation with <outcome>. Returns 0 with MY_GEN set, 2 when
+# a live open Stop-owned claim owns continuity, and 1 when bounded micro-mutex
+# contention or a write failure persists.
+sf_claim() {  # <outcome>
+  local rc i=0
+  MY_GEN=
+  while :; do
+    fm_autoarm_claim_next "$STATE" "$GRACE" "$1"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      MY_GEN=$FM_AUTOARM_MY_GEN
+      [ -n "$MY_GEN" ] || return 1
+      return 0
+    fi
+    [ "$rc" -eq 2 ] && return 2
+    i=$((i + 1))
+    [ "$i" -lt 50 ] || return 1
+    sleep 0.1
+  done
+}
+
+# The traps only mark the signal, so a signal can never cut a ledger write
+# short; sf_act_on_signal acts on it at the next safe point after the claim.
+SF_SIGNAL=
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 sf_on_signal() {
+  SF_SIGNAL=$1
+}
+
+sf_act_on_signal() {
+  [ -n "$SF_SIGNAL" ] || return 0
   trap - HUP TERM INT
-  sf_fire "was interrupted by $1 after $(( $(date +%s) - SF_STARTED ))s" "signal-$1"
+  sf_fire "was interrupted by $SF_SIGNAL after $(( $(date +%s) - SF_STARTED ))s" "signal-$SF_SIGNAL"
 }
 
 stopfailure_recover() {
-  local now reset msg rc i remaining nap floor
+  local now reset msg remaining nap floor
   SF_STARTED=$(date +%s)
   SF_MAX_WAIT=$(sf_int "${FM_CLAUDE_STOPFAILURE_MAX_WAIT:-}" 28500)
   SF_BACKOFF_BASE=$(sf_int "${FM_CLAUDE_STOPFAILURE_BACKOFF_BASE:-}" 300)
@@ -463,8 +499,15 @@ stopfailure_recover() {
     ''|*[!a-z0-9_]*) SF_ERROR=unknown ;;
   esac
   if [ "$(sf_error_class "$SF_ERROR")" = halt ]; then
-    fm_autoarm_ledger_read "$STATE" || FM_AUTOARM_GEN=0
-    sf_record "${FM_AUTOARM_GEN:-0}" 0 "$SF_ERROR" halt none 0 none needs-captain
+    # Supersede any waiter from an earlier transient failure, so it can never
+    # start the recovery turn this error rules out. A live open Stop-owned
+    # claim is left alone.
+    if sf_claim stopfailure-halt; then
+      sf_record "$MY_GEN" 0 "$SF_ERROR" halt none 0 none needs-captain
+    else
+      fm_autoarm_ledger_read "$STATE" || FM_AUTOARM_GEN=0
+      sf_record "${FM_AUTOARM_GEN:-0}" 0 "$SF_ERROR" halt none 0 none needs-captain
+    fi
     exit 0
   fi
 
@@ -474,6 +517,12 @@ stopfailure_recover() {
   fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
   fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" && exit 0
   [ -e "$FAILURE_ALARM" ] && exit 0
+
+  # Trap before anything is published, so no signal can leave a waiting claim
+  # behind without its recovery.
+  trap 'sf_on_signal HUP' HUP
+  trap 'sf_on_signal TERM' TERM
+  trap 'sf_on_signal INT' INT
 
   sf_locate_failure
   SF_ATTEMPT=$(sf_next_attempt)
@@ -520,27 +569,13 @@ stopfailure_recover() {
     SF_CAPPED=1
   fi
 
-  # Claim with the never-open outcome; a competing open claim (rc 2) owns
-  # continuity, and micro-mutex contention (rc 1) is retried briefly.
-  i=0
-  while :; do
-    fm_autoarm_claim_next "$STATE" "$GRACE" stopfailure-wait
-    rc=$?
-    [ "$rc" -eq 0 ] && break
-    [ "$rc" -eq 2 ] && exit 0
-    i=$((i + 1))
-    [ "$i" -lt 50 ] || exit 0
-    sleep 0.1
-  done
-  MY_GEN=$FM_AUTOARM_MY_GEN
-  [ -n "$MY_GEN" ] || exit 0
+  # Claim with the never-open outcome; a competing open claim owns continuity.
+  sf_claim stopfailure-wait || exit 0
   sf_record "$MY_GEN" "$SF_ATTEMPT" "$SF_ERROR" wait "$SF_BASIS" "$SF_WAIT" "$SF_RESET_DESC" waiting
-  trap 'sf_on_signal HUP' HUP
-  trap 'sf_on_signal TERM' TERM
-  trap 'sf_on_signal INT' INT
 
   SF_DEADLINE=$((now + SF_WAIT))
   while :; do
+    sf_act_on_signal
     sf_stand_down_reason && sf_stand_down
     remaining=$((SF_DEADLINE - $(date +%s)))
     [ "$remaining" -gt 0 ] || break
