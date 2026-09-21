@@ -1467,21 +1467,28 @@ fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
 
 # Atomically publish this process as the owner of generation N+1, under one
 # short micro-mutex hold. Returns 0 with FM_AUTOARM_MY_GEN set on success, 2
-# when a competing claimant won the race (the ledger holds an open claim), and
+# when a competing claimant won the race (the ledger holds an open claim), 3
+# when an expected generation was given and the ledger has moved past it, and
 # 1 when the micro-mutex is contended, the mandatory identity cannot be
-# computed, the outcome is malformed, or the write failed.
+# computed, an argument is malformed, or the write failed.
 #
 # The optional outcome defaults to "arming", the only outcome that is ever
 # open. The StopFailure recovery claims with "stopfailure-wait" instead, so its
 # hours-long wait can never make a Stop firing or the turn-end guard defer to
 # it: any ordinary Stop simply supersedes it by taking the next generation.
-fm_autoarm_claim_next() {  # <state-dir> [grace] [outcome]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} outcome=${3:-arming} lock epoch pid gen identity tmp
+# The StopFailure recovery also passes the generation it observed when it
+# started (0 for no ledger), making the claim a compare-and-swap: anything
+# written since then supersedes it before it can claim.
+fm_autoarm_claim_next() {  # <state-dir> [grace] [outcome] [expected-generation]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} outcome=${3:-arming} expected=${4:-} lock epoch pid gen identity tmp
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_MY_GEN=
   case "$outcome" in
     ''|*[!a-z-]*) return 1 ;;
+  esac
+  case "$expected" in
+    *[!0-9]*) return 1 ;;
   esac
   # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside a
   # command substitution would resolve it in that subshell, recording the
@@ -1498,6 +1505,10 @@ fm_autoarm_claim_next() {  # <state-dir> [grace] [outcome]
   case "$gen" in
     ''|*[!0-9]*) gen=0 ;;
   esac
+  if [ -n "$expected" ] && [ "$gen" != "$expected" ]; then
+    fm_lock_release "$lock"
+    return 3
+  fi
   gen=$((gen + 1))
   tmp="$epoch.tmp.$pid"
   if ! printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n%s\n' \

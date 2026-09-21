@@ -1495,6 +1495,101 @@ test_stopfailure_halts_on_errors_a_retry_cannot_fix() {
   pass "StopFailure: errors only the captain can fix are recorded and never looped"
 }
 
+# Hooks are ordered by when they started: each claims only by compare-and-swap
+# against the ledger generation it saw at its start. An older hook still
+# settling, before its claim, is superseded by anything published meanwhile.
+# Its settle is held open by a transcript whose failure entry has not landed.
+write_settling_payload() {  # <dir> <name> <error>
+  printf '%s\n' '{"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"wake"}}' \
+    > "$1/state/$2.jsonl"
+  printf '%s\n' "$(stopfailure_payload "$1/state/$2.jsonl" "$3" "$3")" > "$1/state/$2-payload"
+}
+
+# The session-script prelude: start the older hook and wait until it is
+# settling, which is before it could have claimed anything.
+SF_OLDER_SETTLING='
+    $SF_HOOK < "$FM_HOME/state/old-payload" > "$FM_HOME/state/old.out" 2>&1 &
+    old=$!
+    n=0
+    while [ "$n" -lt 200 ] && ! pgrep -P "$old" -f "sleep 0.5" >/dev/null 2>&1; do sleep 0.02; n=$((n + 1)); done
+    [ -e "$FM_HOME/state/.claude-autoarm-epoch" ] && printf "older-claimed-early\n"
+'
+
+test_stopfailure_claims_only_from_the_generation_it_started_on() {
+  local dir out
+  # The reported interleaving: an older transient hook is still before its
+  # claim when a newer halt is published; it must never start a recovery turn.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-cas-halt")
+  : > "$dir/state/task.meta"
+  write_settling_payload "$dir" old overloaded
+  printf '%s\n' "$(stopfailure_payload "$dir/state/none.jsonl" authentication_failed "Please run /login")" > "$dir/state/halt-payload"
+  out=$(SF_BASE=1 SF_BACKOFF_MAX=1 run_session "$dir" "$SF_OLDER_SETTLING"'
+    $SF_HOOK < "$FM_HOME/state/halt-payload" > "$FM_HOME/state/halt.out" 2>&1
+    printf "halt_rc=%s\n" "$?"
+    wait "$old"
+    printf "old_rc=%s\n" "$?"')
+  assert_not_contains "$out" "older-claimed-early" "the older hook must still be before its claim when the halt lands"
+  assert_contains "$out" "halt_rc=0" "the halt must stand down"
+  assert_contains "$out" "old_rc=0" "an older hook must not start a recovery turn after a newer halt"
+  [ ! -s "$dir/state/old.out" ] || fail "the older hook started a recovery turn after a newer halt: $(cat "$dir/state/old.out")"
+  [ "$(epoch_outcome "$dir")" = stopfailure-halt ] || fail "the ledger must end on the halt, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_field "$dir" epoch)" = 1 ] || fail "the older hook must not claim past the halt"
+
+  # The reverse order: a transient failure that starts after the halt is its
+  # own event and recovers once.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-cas-halt-then-transient")
+  : > "$dir/state/task.meta"
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/none.jsonl" authentication_failed "Please run /login")" > "$dir/state/halt-payload"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/new-payload"
+  out=$(SF_BASE=1 SF_BACKOFF_MAX=1 run_session "$dir" '
+    $SF_HOOK < "$FM_HOME/state/halt-payload" > "$FM_HOME/state/halt.out" 2>&1
+    printf "halt_rc=%s\n" "$?"
+    $SF_HOOK < "$FM_HOME/state/new-payload" > "$FM_HOME/state/new.out" 2>&1
+    printf "new_rc=%s\n" "$?"')
+  assert_contains "$out" "halt_rc=0" "the halt must stand down"
+  assert_contains "$out" "new_rc=2" "a failure that starts after the halt must still recover once"
+  [ "$(grep -c '^firstmate recovery turn' "$dir/state/new.out")" -eq 1 ] || fail "the later failure must emit one banner"
+  [ "$(epoch_outcome "$dir")" = rewake ] && [ "$(epoch_field "$dir" epoch)" = 2 ] \
+    || fail "the later failure must claim past the halt and commit its rewake, got: $(sed -n 1p "$dir/state/.claude-autoarm-epoch")"
+
+  # A newer waiter published while the older hook is still before its claim:
+  # exactly one recovery, the newer one.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-cas-newer-waiter")
+  : > "$dir/state/task.meta"
+  write_settling_payload "$dir" old overloaded
+  write_failure_transcript "$dir/state/transcript.jsonl" overloaded "overloaded"
+  printf '%s\n' "$(stopfailure_payload "$dir/state/transcript.jsonl" overloaded "overloaded")" > "$dir/state/new-payload"
+  out=$(SF_BASE=1 SF_BACKOFF_MAX=1 run_session "$dir" "$SF_OLDER_SETTLING"'
+    $SF_HOOK < "$FM_HOME/state/new-payload" > "$FM_HOME/state/new.out" 2>&1
+    printf "new_rc=%s\n" "$?"
+    wait "$old"
+    printf "old_rc=%s\n" "$?"')
+  assert_not_contains "$out" "older-claimed-early" "the older hook must still be before its claim when the newer one claims"
+  assert_contains "$out" "new_rc=2" "the newer failure must own the one recovery"
+  assert_contains "$out" "old_rc=0" "the older hook must stand down at its claim"
+  [ ! -s "$dir/state/old.out" ] || fail "the older hook started a second recovery turn: $(cat "$dir/state/old.out")"
+  [ "$(epoch_field "$dir" epoch)" = 1 ] || fail "the older hook must not claim past the newer waiter"
+
+  # A Stop-owned cycle completing while the older hook is still before its claim.
+  dir=$(make_primary_dir "$TMP_ROOT/sf-cas-stop-cycle")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_settling_payload "$dir" old overloaded
+  out=$(SF_BASE=1 SF_BACKOFF_MAX=1 run_session "$dir" "$SF_OLDER_SETTLING"'
+    printf "%s\n" "{\"session_id\":\"s\",\"stop_hook_active\":false}" | $SF_STOP > "$FM_HOME/state/stop.out" 2>&1
+    printf "stop_rc=%s\n" "$?"
+    wait "$old"
+    printf "old_rc=%s\n" "$?"')
+  assert_not_contains "$out" "older-claimed-early" "the older hook must still be before its claim when the Stop cycle completes"
+  assert_contains "$out" "stop_rc=2" "the ordinary Stop must translate its own wake"
+  assert_contains "$out" "old_rc=0" "the older hook must stand down after a completed Stop cycle"
+  [ ! -s "$dir/state/old.out" ] || fail "the older hook started a recovery turn after a Stop cycle: $(cat "$dir/state/old.out")"
+  [ "$(epoch_outcome "$dir")" = rewake ] && [ "$(epoch_field "$dir" epoch)" = 1 ] \
+    || fail "the ledger must end on the Stop cycle's own rewake, got: $(sed -n 1p "$dir/state/.claude-autoarm-epoch")"
+  pass "StopFailure: a hook claims only from the generation it started on, so a newer halt, waiter, or Stop cycle supersedes it"
+}
+
 # A transient failure's recovery is already waiting when a later turn fails on
 # an error only the captain can fix: that waiter must never start its turn.
 test_stopfailure_halt_supersedes_a_waiting_recovery() {
@@ -1831,6 +1926,7 @@ test_stopfailure_failed_recovery_waits_again
 test_stopfailure_stands_down_under_afk
 test_stopfailure_halts_on_errors_a_retry_cannot_fix
 test_stopfailure_halt_supersedes_a_waiting_recovery
+test_stopfailure_claims_only_from_the_generation_it_started_on
 test_stopfailure_defers_to_live_continuity
 test_stopfailure_superseded_by_ordinary_stop_goes_silent
 test_stopfailure_newer_failure_supersedes_older_waiter

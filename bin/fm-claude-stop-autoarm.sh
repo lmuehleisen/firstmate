@@ -83,8 +83,9 @@
 #     invalid_request, model_not_found) record a halt decision and stand down:
 #     the captain must act, and a recovery turn would only fail again. The halt
 #     first claims the next ledger generation with the terminal outcome
-#     "stopfailure-halt", so a waiter from an earlier transient failure is
-#     superseded and never starts the turn this error rules out.
+#     "stopfailure-halt", so a waiter from an earlier transient failure, claimed
+#     or not yet claimed, is superseded and never starts the turn this error
+#     rules out.
 #     rate_limit waits for the limit reset; every other error, including any
 #     error name a later Claude Code adds, is transient and backs off.
 #   - Stand down while a live open Stop-owned claim or a healthy watcher already
@@ -95,6 +96,13 @@
 #     it by taking the next generation, and a newer StopFailure supersedes it
 #     the same way, so sleepers never stack and a superseded one goes silent.
 #     No lock is held while waiting.
+#   - Order hooks by when they started. Before any gate or settling work, each
+#     hook notes the ledger generation it sees, and every claim it makes, wait
+#     or halt, is a compare-and-swap against exactly that generation. A hook
+#     that anything newer was written after - a halt, another hook's claim, or
+#     a Stop-owned cycle - is superseded and exits without claiming, so a halt
+#     is terminal for every hook that started before it, while a failure that
+#     starts after the halt is handled on its own.
 #   - Wait. For rate_limit: until the reset plus FM_CLAUDE_STOPFAILURE_RESET_SLACK
 #     (default 60s), preferring quotaLimits.resetsAt from the transcript's
 #     fresh API-error entry, then the "resets <h[:mm]am|pm> (<zone>)" text of
@@ -171,6 +179,19 @@ esac
 # poll cadence"). fm_poll_derived_grace (bin/fm-wake-lib.sh) is the single
 # owner of that max(300, poll+60) derivation.
 GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+
+# StopFailure mode notes the ledger generation first, before the payload,
+# gates, or settling, so its claim can be a compare-and-swap against the state
+# it started from. The read matches fm_autoarm_claim_next's own: 0 when absent.
+SF_OBSERVED_GEN=
+SF_OBSERVED_OUTCOME=
+if [ "$MODE" = stop-failure ]; then
+  SF_OBSERVED_GEN=$(_fm_autoarm_epoch_field "$STATE/.claude-autoarm-epoch" epoch 2>/dev/null || true)
+  case "$SF_OBSERVED_GEN" in
+    ''|*[!0-9]*) SF_OBSERVED_GEN=0 ;;
+  esac
+  SF_OBSERVED_OUTCOME=$(_fm_autoarm_epoch_field "$STATE/.claude-autoarm-epoch" outcome 2>/dev/null || true)
+fi
 
 # Consume the Stop payload once. The decisions below are state-based; the
 # payload is read so a slow writer can never wedge on a full pipe, and its host
@@ -357,15 +378,14 @@ sf_backoff() {  # <attempt>
 # a still-waiting generation keeps its level; anything else starts over.
 sf_next_attempt() {
   local epoch attempt decision
-  fm_autoarm_ledger_read "$STATE" || { printf '1\n'; return 0; }
   epoch=$(_fm_autoarm_epoch_field "$SF_RECORD" epoch 2>/dev/null || true)
   attempt=$(_fm_autoarm_epoch_field "$SF_RECORD" attempt 2>/dev/null || true)
   decision=$(_fm_autoarm_epoch_field "$SF_RECORD" decision 2>/dev/null || true)
   case "$attempt" in
     ''|*[!0-9]*|0) attempt=1 ;;
   esac
-  if [ -n "$epoch" ] && [ "$epoch" = "$FM_AUTOARM_GEN" ]; then
-    case "$FM_AUTOARM_OUTCOME:$decision" in
+  if [ -n "$epoch" ] && [ "$epoch" = "$SF_OBSERVED_GEN" ]; then
+    case "$SF_OBSERVED_OUTCOME:$decision" in
       rewake:rewake) printf '%s\n' "$((attempt + 1))"; return 0 ;;
       stopfailure-wait:wait) printf '%s\n' "$attempt"; return 0 ;;
     esac
@@ -445,14 +465,16 @@ sf_fire() {  # <what-happened> <reason-token>
   exit 0
 }
 
-# Claim the next generation with <outcome>. Returns 0 with MY_GEN set, 2 when
-# a live open Stop-owned claim owns continuity, and 1 when bounded micro-mutex
-# contention or a write failure persists.
+# Claim the next generation with <outcome>, by compare-and-swap against the
+# generation this hook observed when it started. Returns 0 with MY_GEN set, 2
+# when a live open Stop-owned claim owns continuity, 3 when anything newer was
+# written since this hook started, and 1 when bounded micro-mutex contention or
+# a write failure persists.
 sf_claim() {  # <outcome>
   local rc i=0
   MY_GEN=
   while :; do
-    fm_autoarm_claim_next "$STATE" "$GRACE" "$1"
+    fm_autoarm_claim_next "$STATE" "$GRACE" "$1" "$SF_OBSERVED_GEN"
     rc=$?
     if [ "$rc" -eq 0 ]; then
       MY_GEN=$FM_AUTOARM_MY_GEN
@@ -460,6 +482,7 @@ sf_claim() {  # <outcome>
       return 0
     fi
     [ "$rc" -eq 2 ] && return 2
+    [ "$rc" -eq 3 ] && return 3
     i=$((i + 1))
     [ "$i" -lt 50 ] || return 1
     sleep 0.1
@@ -501,13 +524,17 @@ stopfailure_recover() {
   if [ "$(sf_error_class "$SF_ERROR")" = halt ]; then
     # Supersede any waiter from an earlier transient failure, so it can never
     # start the recovery turn this error rules out. A live open Stop-owned
-    # claim is left alone.
-    if sf_claim stopfailure-halt; then
-      sf_record "$MY_GEN" 0 "$SF_ERROR" halt none 0 none needs-captain
-    else
-      fm_autoarm_ledger_read "$STATE" || FM_AUTOARM_GEN=0
-      sf_record "${FM_AUTOARM_GEN:-0}" 0 "$SF_ERROR" halt none 0 none needs-captain
-    fi
+    # claim is left alone, and a hook that started after this one owns the
+    # ledger outright, so this halt then leaves no trace.
+    sf_claim stopfailure-halt
+    case "$?" in
+      0) sf_record "$MY_GEN" 0 "$SF_ERROR" halt none 0 none needs-captain ;;
+      3) : ;;
+      *)
+        fm_autoarm_ledger_read "$STATE" || FM_AUTOARM_GEN=0
+        sf_record "${FM_AUTOARM_GEN:-0}" 0 "$SF_ERROR" halt none 0 none needs-captain
+        ;;
+    esac
     exit 0
   fi
 
@@ -569,7 +596,8 @@ stopfailure_recover() {
     SF_CAPPED=1
   fi
 
-  # Claim with the never-open outcome; a competing open claim owns continuity.
+  # Claim with the never-open outcome. A competing open claim owns continuity,
+  # and anything written since this hook started supersedes it.
   sf_claim stopfailure-wait || exit 0
   sf_record "$MY_GEN" "$SF_ATTEMPT" "$SF_ERROR" wait "$SF_BASIS" "$SF_WAIT" "$SF_RESET_DESC" waiting
 
