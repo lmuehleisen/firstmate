@@ -22,6 +22,9 @@ A cycle-end failure is benign when that live-watcher predicate is true, and the 
 Only an exhausted failure with no verified watcher commits one last-resort notice for the continuous failure episode; a refused notice commit stays silent for a later retry, and after a successful notice later Stop cycles exit 2 without repeating it until the turn-end guard consumes the attended fail-open.
 The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
+A turn that ends on an API error, such as a usage limit, fires `StopFailure` instead of `Stop`, so no `Stop` hook re-arms after it.
+The same script's `--stop-failure` mode, registered beside the `Stop` hooks, owns that edge: it waits for the limit's reset or a bounded backoff, then starts one recovery turn whose normal `Stop` resumes this cycle.
+[`turnend-guard.md`](turnend-guard.md#harness-integrations) names the registration, and the script header owns the contract.
 
 ## Actionable wake ordering
 
@@ -35,6 +38,7 @@ After the configured retry bound is exhausted, it delivers the original wake wit
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi, omp, and OpenCode do.
+A handling turn that ends on an API error produces no Stop, so the `StopFailure` recovery turn described above supplies that next Stop.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding, so a finished, hung, or identity-mismatched claim cannot suppress it ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce; it enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
@@ -122,6 +126,9 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, exit-2 translation, and host-timeout HUP/TERM/INT translation into the same durable failure handoff.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
+The `StopFailure` cases of `tests/fm-claude-stop-autoarm.test.sh` dispatch the tracked registrations by event, so an API-error turn end yields exactly one recovery and the next normal turn end runs only the `Stop` hooks.
+They also cover the reset-time and backoff waits, a failed recovery waiting again, away-mode, halt, and live-continuity stand-downs, supersession by an ordinary `Stop` or a newer failure, including a hook that had not claimed yet because each claims only against the whole ledger record it started on, a stand-down that must not block a newer failure, and a turn already in progress.
+`tests/fm-claude-stopfailure-live-e2e.test.sh` proves the vendor half against the installed Claude Code with no credentials or model tokens: an API-error turn end fires only `StopFailure`, the hook's `asyncRewake` exit 2 starts one recovery turn, and that turn's `Stop` re-arms.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset; [`turnend-guard.md`](turnend-guard.md#regression-coverage) lists that suite's full generation and legacy claim coverage.
 
 ## Active limits and verification
@@ -129,6 +136,6 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 The goal is continuity without a Pi, omp, or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+Claude depends on the `Stop` and `StopFailure` `asyncRewake` rewakes, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

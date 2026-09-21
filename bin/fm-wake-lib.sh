@@ -1465,16 +1465,44 @@ fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
   [ "$epoch_mtime" -ge "$beacon_mtime" ]
 }
 
+# The whole ledger record as one comparable token: "absent" with no ledger,
+# otherwise "record:" and the file's exact bytes, both lines. Every ledger
+# writer changes those bytes - a claim writes a new epoch, an owned write a new
+# outcome and updated_at, and the legacy graft the identity line - so comparing
+# tokens sees every write, where comparing one field would not.
+fm_autoarm_ledger_token() {  # <state-dir>
+  local epoch="$1/.claude-autoarm-epoch" content
+  if [ ! -e "$epoch" ] && [ ! -L "$epoch" ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  content=$(cat "$epoch" 2>/dev/null) || content='unreadable'
+  printf 'record:%s\n' "$content"
+}
+
 # Atomically publish this process as the owner of generation N+1, under one
 # short micro-mutex hold. Returns 0 with FM_AUTOARM_MY_GEN set on success, 2
-# when a competing claimant won the race (the ledger holds an open claim), and
+# when a competing claimant won the race (the ledger holds an open claim), 3
+# when an expected record was given and the ledger no longer matches it, and
 # 1 when the micro-mutex is contended, the mandatory identity cannot be
-# computed, or the write failed.
-fm_autoarm_claim_next() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock epoch pid gen identity tmp
+# computed, the outcome is malformed, or the write failed.
+#
+# The optional outcome defaults to "arming", the only outcome that is ever
+# open. The StopFailure recovery claims with "stopfailure-wait" instead, so its
+# hours-long wait can never make a Stop firing or the turn-end guard defer to
+# it: any ordinary Stop simply supersedes it by taking the next generation.
+# The StopFailure recovery also passes the fm_autoarm_ledger_token it observed
+# when it started, making the claim a compare-and-swap on the whole record:
+# any write at all since then supersedes it before it can claim. A Stop
+# claim passes none, because an ordinary Stop always supersedes.
+fm_autoarm_claim_next() {  # <state-dir> [grace] [outcome] [expected-token]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} outcome=${3:-arming} expected=${4:-} lock epoch pid gen identity tmp
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_MY_GEN=
+  case "$outcome" in
+    ''|*[!a-z-]*) return 1 ;;
+  esac
   # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside a
   # command substitution would resolve it in that subshell, recording the
   # identity of a process that exits immediately.
@@ -1490,10 +1518,14 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   case "$gen" in
     ''|*[!0-9]*) gen=0 ;;
   esac
+  if [ -n "$expected" ] && [ "$(fm_autoarm_ledger_token "$state")" != "$expected" ]; then
+    fm_lock_release "$lock"
+    return 3
+  fi
   gen=$((gen + 1))
   tmp="$epoch.tmp.$pid"
-  if ! printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
-      "$gen" "$pid" "$(date +%s)" "$identity" > "$tmp" 2>/dev/null \
+  if ! printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n%s\n' \
+      "$gen" "$pid" "$outcome" "$(date +%s)" "$identity" > "$tmp" 2>/dev/null \
     || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$lock"
