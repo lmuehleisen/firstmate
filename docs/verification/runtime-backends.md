@@ -610,6 +610,7 @@ ok - Claude Code 2.1.276 (Claude Code) with the flag on: the mod auto-loads from
 ```
 
 Both versions also passed the flag-off and resume sections.
+Refreshed on 2026-09-23 on macOS with tmux 3.7c against Claude Code 2.1.280: all three sections passed, with the away-mode escalation arriving without its U+2063 mark and classifying as away-supervisor.
 Run with the mark-only parser on 2.1.278, the same guard fails with `not ok - the operational user row drew while Calm was on`.
 The Claude Code debug log names a loaded hooks module by plugin name through 2.1.276 and by its `plugin@source` label from 2.1.277, which the guard accepts in both forms.
 This guard is the refresh command after a Claude Code upgrade.

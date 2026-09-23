@@ -78,13 +78,15 @@ unset_inherited() {
   done < <(env | grep -E '^(CLAUDECODE|CLAUDE_CODE_[A-Z_]+|CLAUDE_CONFIG_DIR)=' | cut -d= -f1 | sort -u)
 }
 
+# skipDangerousModePermissionPrompt keeps a machine that never accepted bypass mode from
+# opening its one-time acceptance dialog, whose cursor starts on "No, exit".
 launch() {  # <debug-log> <flag: 1|0> [claude args...]
   local log=$1 flag=$2 flag_env=''
   shift 2
   [ "$flag" = 1 ] && flag_env="CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1"
   tmux -L "$SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
   tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 160 -y 44 -c "$PROJECT" \
-    "env $(unset_inherited) $flag_env FM_HOME='$FM_HOME_DIR' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --model haiku --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --debug-file '$log' $*; printf '\nCLAUDE_EXIT=%s\n' \"\$?\"; sleep 30"
+    "env $(unset_inherited) $flag_env FM_HOME='$FM_HOME_DIR' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --model haiku --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"skipDangerousModePermissionPrompt\":true}' --debug-file '$log' $*; printf '\nCLAUDE_EXIT=%s\n' \"\$?\"; sleep 30"
 }
 
 screen() {
@@ -415,8 +417,12 @@ esac
 # confirmed delivered, draws at zero height, and reaches the transcript as input the
 # canonical owner classifies as away-supervisor, with or without its U+2063 mark.
 wait_settled 'the operational turn'
+# The daemon addresses the supervisor by pane id, as it does from $TMUX_PANE: its
+# tmux presence check refuses a bare session name.
+supervisor_pane=$(tmux -L "$SOCKET" display-message -p -t "$SESSION" '#{pane_id}') \
+  || fail "could not read the lab session's pane id"
 (
-  export PATH="$LAB/bin:$PATH" FM_HOME="$FM_HOME_DIR" FM_SUPERVISOR_TARGET="$SESSION" FM_SUPERVISOR_BACKEND=tmux
+  export PATH="$LAB/bin:$PATH" FM_HOME="$FM_HOME_DIR" FM_SUPERVISOR_TARGET="$supervisor_pane" FM_SUPERVISOR_BACKEND=tmux
   # shellcheck source=bin/fm-supervise-daemon.sh
   . "$ROOT/bin/fm-supervise-daemon.sh"
   afk_enter "$FM_HOME_DIR/state"
