@@ -1434,6 +1434,46 @@ test_escalate_batches_into_one_digest() {
   pass "multiple escalations flush as a single batched digest"
 }
 
+test_escalate_long_digest_types_a_pointer() {
+  local dir state fakebin sent capture i long typed file n
+  dir=$(make_supercase long-digest)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  long=$(printf 'x%.0s' $(seq 1 300))
+  for i in 1 2 3 4 5 6 7 8; do escalate_add "$state" "task-$i.status: blocked: event $i $long"; done
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "long escalate_flush failed"
+  typed=$(grep -v '\[ENTER\]' "$sent")
+  case "$typed" in
+    *'FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (8 event(s)): '*) : ;;
+    *) fail "long digest pointer lacks the away-supervisor header and event count: $typed" ;;
+  esac
+  [ "${#typed}" -le "$INJECT_INLINE_MAX_DEFAULT" ] \
+    || fail "long digest typed ${#typed} characters, over the inline max"
+  case "$typed" in *"$long"*) fail "long digest events were typed instead of written to a file" ;; esac
+  file=${typed#*read it from }; file=${file%% (pre-read*}
+  case "$file" in "$state/.subsuper-digests/"*.txt) : ;; *) fail "pointer does not name a digest file: $file" ;; esac
+  for i in 1 2 3 4 5 6 7 8; do
+    grep -F -- "- task-$i.status: blocked: event $i $long" "$file" >/dev/null \
+      || fail "digest file is missing event $i"
+  done
+  [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after pointer flush"
+  n=$(grep -c '\[ENTER\]' "$sent")
+  [ "$n" -eq 1 ] || fail "expected one pointer submit, got $n"
+  : > "$sent"
+  escalate_add "$state" "task-9.status: blocked: short event"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "short escalate_flush failed"
+  grep -F 'Supervisor escalate (1 event(s)): task-9.status: blocked: short event (pre-read' "$sent" >/dev/null \
+    || fail "short digest was not typed inline"
+  pass "a digest over the inline max types a short pointer to a file holding every event"
+}
+
 test_escalate_batch_age_uses_first_append() {
   local dir state fakebin sent capture
   dir=$(make_supercase batch-age)
@@ -2835,6 +2875,7 @@ test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
+test_escalate_long_digest_types_a_pointer
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
