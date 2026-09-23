@@ -312,6 +312,14 @@ close_unobserved_cycle() {
 attach_and_wait() {
   local attached_pid=$1
   while :; do
+    # The attached watcher is not ours to close, so a passed hook deadline
+    # (fm_watch_deadline_passed in bin/fm-wake-lib.sh) closes only this arm.
+    if fm_watch_deadline_passed; then
+      fm_wake_append check autoarm-deadline "$FM_WATCH_DEADLINE_REASON" || return 1
+      cycle_log_append unknown unknown attached-deadline none
+      printf '%s\n' "$FM_WATCH_DEADLINE_REASON"
+      return 0
+    fi
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"

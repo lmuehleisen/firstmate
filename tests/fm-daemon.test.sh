@@ -598,11 +598,13 @@ test_classify_check_and_unknown_escalate() {
   local out
   out=$(classify_check "check: /s/c.check.sh: merged: https://x")
   case "$out" in escalate\|*) ;; *) fail "check did not escalate: $out" ;; esac
+  out=$(classify_check "check: autoarm-deadline - the Stop hook closed its watcher cycle")
+  case "$out" in self\|*) ;; *) fail "the Stop hook's pre-timeout close did not self-handle: $out" ;; esac
   out=$(classify_unknown "frobnicate: weird")
   case "$out" in escalate\|*) ;; *) fail "unknown did not fail-safe escalate: $out" ;; esac
   out=$(classify_heartbeat)
   case "$out" in self\|*) ;; *) fail "heartbeat did not self-handle: $out" ;; esac
-  pass "check + unknown escalate; heartbeat self-handles"
+  pass "check + unknown escalate; heartbeat and the Stop hook's pre-timeout close self-handle"
 }
 
 test_stale_transient_self_records_marker() {

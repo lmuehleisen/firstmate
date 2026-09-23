@@ -34,8 +34,14 @@
 #     pre-generation lock).
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
-#     group, so its timeout/session teardown kills arm and watcher together.
-#     HUP, TERM, and INT are translated through the ordinary durable failure
+#     group, so its timeout/session teardown kills arm and watcher together,
+#     and a killed hook's rewake is never delivered. The cycle therefore closes
+#     itself first: the hook passes FM_WATCH_DEADLINE, derived from its own
+#     declared timeout by autoarm_hook_deadline_secs below, to the arm, so a
+#     cycle with nothing to report ends before the timeout with one no-op
+#     "check: autoarm-deadline" wake, translated like any other actionable
+#     close; the rewake turn's own Stop re-arms with a fresh timeout. HUP,
+#     TERM, and INT are translated through the ordinary durable failure
 #     handoff instead of leaving the generation frozen at arming.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
@@ -46,13 +52,16 @@
 #     ledger write; the failure notice additionally requires its marker write.
 #     A refused generation exits 0 silently even after printing. A close that
 #     reports no actionable reason is benign when a live identity-matched
-#     watcher still has a fresh beacon.
+#     watcher still has a fresh beacon. An actionable close is itself positive
+#     watcher recovery: it clears any leftover failure episode and always
+#     rewakes, whoever left that episode behind.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
 #     last-resort notice per failure episode; later consecutive failures still
 #     exit 2 to guarantee the next Stop-owned retry without repeating notice,
-#     until the synchronous guard has consumed its attended fail-open.
+#     until the synchronous guard has consumed its attended fail-open, after
+#     which failures stay silent until positive recovery.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, and binds rewake outcomes to the session-lock pid and
@@ -62,7 +71,7 @@
 # epoch. The failure marker
 # state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
-# suppresses any later automatic continuation in that unresolved episode.
+# suppresses any later failure continuation in that unresolved episode.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
@@ -120,8 +129,9 @@
 #     grows only while the ledger still ends on this mode's own rewake, meaning
 #     the recovery turn itself failed again; from the second attempt the wait
 #     is at least the backoff even when a reset time is known. Every wait is
-#     capped at FM_CLAUDE_STOPFAILURE_MAX_WAIT (default 28500s), below the
-#     28800s hook timeout, so a limit that outlasts the cap costs one rejected
+#     capped at FM_CLAUDE_STOPFAILURE_MAX_WAIT (default: the deadline
+#     autoarm_hook_deadline_secs derives from this hook's own declared
+#     StopFailure timeout), so a limit that outlasts the cap costs one rejected
 #     recovery turn per cap window and the next StopFailure starts a new wait:
 #     never an unbounded wait and never a tight loop.
 #   - Every FM_CLAUDE_STOPFAILURE_POLL seconds (default 30), and again before
@@ -185,6 +195,34 @@ esac
 # poll cadence"). fm_poll_derived_grace (bin/fm-wake-lib.sh) is the single
 # owner of that max(300, poll+60) derivation.
 GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+
+# Claude kills this hook's whole process tree at the timeout declared for it
+# in the tracked .claude/settings.json and delivers nothing from a killed
+# hook. This is the one owner of how far below that timeout the hook finishes
+# on its own: the declared timeout of this script's <event> entry, less a
+# quarter of it capped at 600s, which covers the watcher's poll and check
+# sweep; an unreadable declaration falls back to 600s. It is wall-clock time,
+# so a machine sleep only brings the deadline closer.
+HOOK_STARTED=$(date +%s)
+autoarm_hook_deadline_secs() {  # <Stop|StopFailure>
+  local timeout margin
+  timeout=$(jq -r --arg event "$1" '
+      [.hooks[$event][]?.hooks[]?
+        | select((.command // "") | contains("fm-claude-stop-autoarm.sh"))
+        | .timeout | numbers | floor] | first // empty' \
+    "$FM_ROOT/.claude/settings.json" 2>/dev/null || true)
+  case "$timeout" in
+    ''|*[!0-9]*|0) timeout=600 ;;
+  esac
+  margin=$((timeout / 4))
+  [ "$margin" -le 600 ] || margin=600
+  [ "$margin" -ge 1 ] || margin=1
+  if [ "$timeout" -gt "$margin" ]; then
+    printf '%s\n' "$((timeout - margin))"
+  else
+    printf '1\n'
+  fi
+}
 
 # StopFailure mode notes the whole ledger record first, before the payload,
 # gates, or settling, so its claim can be a compare-and-swap against the state
@@ -517,7 +555,7 @@ sf_act_on_signal() {
 stopfailure_recover() {
   local now reset msg remaining nap floor
   SF_STARTED=$(date +%s)
-  SF_MAX_WAIT=$(sf_int "${FM_CLAUDE_STOPFAILURE_MAX_WAIT:-}" 28500)
+  SF_MAX_WAIT=$(sf_int "${FM_CLAUDE_STOPFAILURE_MAX_WAIT:-}" "$(autoarm_hook_deadline_secs StopFailure)")
   SF_BACKOFF_BASE=$(sf_int "${FM_CLAUDE_STOPFAILURE_BACKOFF_BASE:-}" 300)
   SF_BACKOFF_MAX=$(sf_int "${FM_CLAUDE_STOPFAILURE_BACKOFF_MAX:-}" 1800)
   SF_RESET_SLACK=$(sf_int "${FM_CLAUDE_STOPFAILURE_RESET_SLACK:-}" 180)
@@ -684,10 +722,10 @@ autoarm_record() {  # <outcome>
 }
 
 # Claude terminates the complete async-hook process tree when the configured
-# hook timeout expires. The arm is intentionally allowed to follow a healthy
-# watcher until its next wake, so that wait cannot be shortened without adding
-# artificial turns. Translate a host interruption through the ordinary durable
-# failure protocol instead: the winning generation records a terminal outcome,
+# hook timeout expires, which the FM_WATCH_DEADLINE close exists to pre-empt;
+# session teardown or another host signal can still interrupt the arm.
+# Translate a host interruption through the ordinary durable failure
+# protocol: the winning generation records a terminal outcome,
 # creates the episode marker, and exits 2 so Claude delivers a recovery turn.
 # A superseded generation remains silent, and an episode whose attended
 # fail-open was already consumed must not restart automatic continuation.
@@ -730,6 +768,7 @@ OUT=
 ACTIONABLE=0
 HEALTHY=0
 attempt=0
+WATCH_DEADLINE=$((HOOK_STARTED + $(autoarm_hook_deadline_secs Stop)))
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
   # watcher/wake state: re-verify generation ownership before every arm
@@ -741,9 +780,9 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   attempt=$((attempt + 1))
   OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
   if [ -n "$OUT" ]; then
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
+    FM_GUARD_GRACE="$GRACE" FM_WATCH_DEADLINE="$WATCH_DEADLINE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
+    FM_GUARD_GRACE="$GRACE" FM_WATCH_DEADLINE="$WATCH_DEADLINE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
   fi
 
   # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
@@ -800,14 +839,6 @@ if [ "$HEALTHY" -eq 1 ]; then
   exit 0
 fi
 
-# After the synchronous guard has consumed the episode's attended fail-open,
-# do not create another exit-2 continuation that could defeat it.
-if [ -e "$FAILURE_ALARM" ]; then
-  autoarm_record failed-suppressed
-  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 0
-fi
-
 if [ "$ACTIONABLE" -eq 1 ]; then
   # Cheap early-out before composing the banner; the real commit decision is
   # the owned terminal write below.
@@ -815,6 +846,12 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
+  # A real wake proves the watcher armed and ran, so it ends any failure
+  # episode still on disk - one a host timeout kill left, or the attended
+  # fail-open another session consumed - and it rewakes regardless: the
+  # attended-alarm suppression below bounds failure continuations only. A
+  # contended reset leaves the episode for the next positive recovery.
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN" || true
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
@@ -824,6 +861,14 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+
+# After the synchronous guard has consumed the episode's attended fail-open,
+# do not create another failure continuation that could defeat it.
+if [ -e "$FAILURE_ALARM" ]; then
+  autoarm_record failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi

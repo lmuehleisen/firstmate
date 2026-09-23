@@ -116,6 +116,11 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   check: autoarm-deadline - ...
+#                          FM_WATCH_DEADLINE passed: the Claude Stop hook that
+#                          started this cycle is close to its host timeout, so
+#                          the cycle closes with this no-op wake for the hook to
+#                          deliver (fm_watch_deadline_passed in fm-wake-lib.sh)
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -2180,6 +2185,13 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # A hook-owned cycle closes before its host's timeout kills it
+  # (fm_watch_deadline_passed in bin/fm-wake-lib.sh).
+  if fm_watch_deadline_passed; then
+    fm_wake_append check autoarm-deadline "$FM_WATCH_DEADLINE_REASON" || exit 1
+    wake "$FM_WATCH_DEADLINE_REASON"
+  fi
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached

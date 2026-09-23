@@ -457,7 +457,11 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
 }
 
 classify_check() {  # <full reason>  — check scripts print only when firstmate should wake
-  printf 'escalate|%s' "$1"
+  case "$1" in
+    # The Stop hook's own pre-timeout close (fm_watch_deadline_passed).
+    'check: autoarm-deadline'*) printf 'self|Stop hook watcher cycle closed before its timeout' ;;
+    *) printf 'escalate|%s' "$1" ;;
+  esac
 }
 
 classify_heartbeat() {

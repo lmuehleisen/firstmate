@@ -187,6 +187,34 @@ test_attached_arm_reports_the_delivered_wake() {
   pass "watch-arm: an attached arm reports the wake its cycle delivered instead of a false failure"
 }
 
+# An arm attached to a watcher it does not own honors the Stop hook's
+# FM_WATCH_DEADLINE by closing itself with the queued no-op wake, and leaves
+# that watcher running.
+test_attached_arm_closes_at_its_deadline() {
+  local dir state fakebin out armout status
+  dir=$(make_case attached-deadline)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  FM_WATCH_DEADLINE=$(( $(date +%s) + 2 )) start_attached_arm "$state" "$fakebin" "$armout" 1
+
+  wait_for_exit "$ARM_PID" 100
+  status=$?
+  expect_code 0 "$status" "an attached arm past its deadline must close successfully"
+  grep -q '^check: autoarm-deadline' "$armout" \
+    || fail "attached arm did not report the deadline wake: $(cat "$armout")"
+  grep -q "$(printf '\tcheck\tautoarm-deadline\t')" "$state/.wake-queue" \
+    || fail "the deadline wake was not queued for the drain"
+  is_live_non_zombie "$SEED_PID" || fail "the deadline close stopped a watcher the arm did not own"
+  grep -q 'reason=attached-deadline' "$state/.watch-cycle-exits.log" \
+    || fail "the deadline close was not classified in the lifecycle ledger"
+  kill "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
+  pass "watch-arm: an attached arm closes at the hook deadline with one queued no-op wake and leaves the watcher alone"
+}
+
 test_attached_arm_reports_the_delivered_wake_after_drain() {
   local dir state fakebin out armout status
   dir=$(make_case attached-drained-wake)
@@ -843,6 +871,7 @@ test_arm_refuses_an_unusable_launch_confirm_window() {
 
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
+test_attached_arm_closes_at_its_deadline
 test_arm_refuses_an_unusable_launch_confirm_window
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
