@@ -119,7 +119,7 @@ A legacy build's lock-holding claim (recognizable by its `autoarm` role file) st
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 The foreground arm legitimately follows a healthy watcher until its next wake, but Claude kills the hook's whole process tree at its declared timeout and delivers nothing from a killed hook, so a quiet night once left the home unwatched after the eighth hour (2026-09-22).
-The hook therefore passes the arm a deadline comfortably below that timeout, and a cycle with nothing to report closes itself there with one queued `check: autoarm-deadline` wake that the rewake turn acknowledges as a no-op; that turn's own Stop re-arms with a fresh timeout.
+The hook therefore passes the arm a deadline comfortably below that timeout, and an independent timer in the arm closes a cycle with nothing to report there, whatever the watcher is doing, with one queued `check: autoarm-deadline` wake that the rewake turn acknowledges as a no-op; that turn's own Stop re-arms with a fresh timeout.
 The hook still catches HUP, TERM, and INT from teardown or an unexpected host kill and commits the ordinary durable failed outcome and failure-notice marker before exiting 2 for a recovery turn.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).

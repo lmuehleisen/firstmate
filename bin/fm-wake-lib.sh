@@ -123,23 +123,6 @@ fm_poll_derived_grace() {
   printf '%s\n' "$derived"
 }
 
-# Watcher-cycle deadline for a host that kills the arm's process tree at a fixed
-# timeout. bin/fm-claude-stop-autoarm.sh owns the value: it derives it from its
-# own declared hook timeout and passes it as FM_WATCH_DEADLINE (epoch seconds)
-# to bin/fm-watch-arm.sh, whose started watcher inherits it. Once it passes,
-# the watcher (or an arm attached to another watcher) queues this one no-op
-# check wake and closes, so the host delivers an ordinary wake before it kills
-# the tree. Unset or malformed means no deadline, the default for every other
-# arm owner.
-# shellcheck disable=SC2034 # Consumed by bin/fm-watch.sh and bin/fm-watch-arm.sh.
-FM_WATCH_DEADLINE_REASON='check: autoarm-deadline - the Stop hook closed its watcher cycle before the hook timeout; nothing needs handling, acknowledge it and end the turn so the next turn end re-arms'
-fm_watch_deadline_passed() {
-  case "${FM_WATCH_DEADLINE:-}" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  [ "$(date +%s)" -ge "$FM_WATCH_DEADLINE" ]
-}
-
 # fm_watcher_lock_unheld <state>
 # True when the watcher lock or its symlinked owner directory is absent, or when
 # the existing lock records no pid at all. Any non-empty pid remains held here;

@@ -579,7 +579,7 @@ test_arm_deadline_derives_from_declared_timeout() {
     case "$deadline" in
       ''|*[!0-9]*) fail "$case_name: the arm received no FM_WATCH_DEADLINE, got: '$deadline'" ;;
     esac
-    [ "$((deadline - before))" -ge "$((expected - 2))" ] && [ "$((deadline - before))" -le "$expected" ] \
+    [ "$((deadline - before))" -ge "$expected" ] && [ "$((deadline - before))" -le "$((expected + 3))" ] \
       || fail "$case_name: deadline is $((deadline - before))s after the hook started, expected about ${expected}s"
   done
   pass "auto-arm: the arm deadline derives from this hook's own declared Stop timeout, with a 600s fallback"
@@ -597,14 +597,14 @@ test_real_cycle_closes_before_declared_timeout() {
   : > "$dir/state/task.meta"
   mkdir -p "$dir/.claude"
   jq -n '{hooks: {Stop: [{hooks: [
-      {type: "command", command: "bin/fm-claude-stop-autoarm.sh", asyncRewake: true, timeout: 20}]}]}}' \
+      {type: "command", command: "bin/fm-claude-stop-autoarm.sh", asyncRewake: true, timeout: 24}]}]}}' \
     > "$dir/.claude/settings.json"
   out="$dir/hook.out"
   start=$(date +%s)
   FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 run_autoarm_bg "$dir" "$out"
   hook_pid=$RUN_AUTOARM_BG_PID
   i=0
-  while kill -0 "$hook_pid" 2>/dev/null && [ "$i" -lt 250 ]; do
+  while kill -0 "$hook_pid" 2>/dev/null && [ "$i" -lt 290 ]; do
     sleep 0.1
     i=$((i + 1))
   done
@@ -614,11 +614,11 @@ test_real_cycle_closes_before_declared_timeout() {
     pkill -KILL -f "$dir/bin/fm-" 2>/dev/null || true
     kill -KILL "$hook_pid" 2>/dev/null || true
     wait "$hook_pid" 2>/dev/null || true
-    fail "the hook-owned cycle was still running ${elapsed}s after start, past its 20s declared timeout"
+    fail "the hook-owned cycle was still running ${elapsed}s after start, past its 24s declared timeout"
   fi
   wait "$hook_pid"; status=$?
   expect_code 2 "$status" "the pre-timeout close must rewake"
-  [ "$elapsed" -lt 20 ] || fail "the cycle closed after ${elapsed}s, not before its 20s declared timeout"
+  [ "$elapsed" -lt 24 ] || fail "the cycle closed after ${elapsed}s, not before its 24s declared timeout"
   assert_contains "$(cat "$out")" "check: autoarm-deadline" "the rewake did not carry the deadline wake"
   grep -q "$(printf '\tcheck\tautoarm-deadline\t')" "$dir/state/.wake-queue" \
     || fail "the deadline wake was not queued for the drain: $(cat "$dir/state/.wake-queue" 2>/dev/null)"
