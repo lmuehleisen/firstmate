@@ -77,6 +77,7 @@ Every other direct `FM_GUARD_GRACE` reader (`bin/fm-guard.sh`, the strict-watche
 - Agy registers native `Stop` in `.agents/hooks.json`; `bin/fm-agy-hook.sh` maps `executionNum > 0` to the shared loop guard and translates exit 2 into `decision: "continue"` with the recovery reason.
   Native background-command completion begins a fresh execution, so normal watcher wakes do not consume the one-recovery-continuation budget of a prior execution.
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
+  The auto-arm reads that declared timeout back to set its own earlier deadline instead of keeping a second copy of the number, and the script header owns the derivation.
   Beside them it registers one `StopFailure` hook, `bin/fm-claude-stop-autoarm.sh --stop-failure`, with the same `asyncRewake` and timeout, because Claude Code fires `StopFailure` instead of `Stop` when a turn ends on an API error, so neither `Stop` hook runs for that turn.
   After a usage limit it waits for the reset, after another transient error it waits a bounded backoff, and then it starts one recovery turn whose normal `Stop` re-arms; it stands down in away mode, and the script header owns the full contract.
   A manual Escape interrupt fires neither `Stop` nor `StopFailure`, so an interrupted turn remains unguarded; a person is present by definition there.
@@ -117,7 +118,9 @@ Two bounded residuals are accepted intent, each costing at most one extra contin
 A legacy build's lock-holding claim (recognizable by its `autoarm` role file) still defers or reclaims under the legacy abandonment proof, with a live identity-verified stuck owner retired via TERM before its lock is removed and an unverified pid never signalled, so an upgrade mid-session can neither double-arm nor deadlock, and a failed reclaim re-blocks rather than allowing a blind stop.
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
-The foreground arm legitimately follows a healthy watcher until its next wake, so the hook catches HUP, TERM, and INT from host timeout or teardown and commits the ordinary durable failed outcome and failure-notice marker before exiting 2 for a recovery turn.
+The foreground arm legitimately follows a healthy watcher until its next wake, but Claude kills the hook's whole process tree at its declared timeout and delivers nothing from a killed hook, so a quiet night once left the home unwatched after the eighth hour (2026-09-22).
+The hook therefore passes the arm a deadline comfortably below that timeout, and an independent timer in the arm closes a cycle with nothing to report there, whatever the watcher is doing, with one queued `check: autoarm-deadline` wake that the rewake turn acknowledges as a no-op; that turn's own Stop re-arms with a fresh timeout.
+The hook still catches HUP, TERM, and INT from teardown or an unexpected host kill and commits the ordinary durable failed outcome and failure-notice marker before exiting 2 for a recovery turn.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).
 In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
@@ -127,9 +130,10 @@ That second rule still bounds an inert auto-arm when a hook never fires or fails
 A verified live foreign session-lock owner takes the earlier diagnostic safe exit instead and never reaches this budget path.
 Charging only epoch changes let the count freeze with that ledger, so the remaining inert-hook cases could re-block without limit and make the attended fail-open unreachable; `budget_account_current_epoch` in `bin/fm-turnend-guard.sh` owns the rule.
 Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
-After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
+After that alarm, the Stop auto-arm suppresses further failure continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
-A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
+A positively verified healthy watcher or an actionable arm close clears the failure notice, alarm, and block budget for a future independent episode.
+An actionable close always rewakes, so an episode left by a host kill or by another session's attended fail-open never silences a real wake in the live session.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.

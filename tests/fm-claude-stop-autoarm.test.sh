@@ -186,6 +186,15 @@ printf 'stale: fixture-win actionable\n'
 exit 0
 SH
       ;;
+    records-deadline)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf '%s\n' "${FM_WATCH_DEADLINE:-unset}" > "$FM_HOME/state/arm-received-deadline"
+printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+exit 0
+SH
+      ;;
     records-grace)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -517,20 +526,104 @@ test_unverified_clean_close_exhausts_retries() {
   pass "auto-arm: unverified clean close exhausts retries and fails closed"
 }
 
-test_post_alarm_actionable_close_is_suppressed() {
+# 2026-09-22: a host-timeout kill left the failure notice, a later read-only
+# session's attended fail-open added the alarm, and every actionable wake of the
+# next live session was then recorded failed-suppressed without a rewake.
+test_leftover_failure_episode_never_suppresses_actionable_wake() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/post-alarm-actionable")
   : > "$dir/state/task.meta"
+  printf 'epoch=7 owner_pid=999 outcome=failed updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  printf 'session=sess-other\ncount=4\nepoch=7\n' > "$dir/state/.turnend-claude-blocks"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" actionable
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "an actionable result after attended fail-open must not continue"
-  [ -z "$out" ] || fail "post-alarm actionable result produced continuation output: $out"
-  assert_present "$dir/state/.claude-autoarm-failure-notified" "post-alarm actionable result cleared the failure notice"
-  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "post-alarm actionable result cleared the attended alarm"
-  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "post-alarm actionable result must record failed-suppressed"
-  pass "auto-arm: post-alarm actionable outcomes cannot continue or reset failure state"
+  expect_code 2 "$status" "a real wake must rewake even when an earlier failure episode left its alarm"
+  assert_contains "$out" "firstmate watcher wake" "the leftover episode swallowed the wake banner"
+  assert_contains "$out" "stale: fixture-win actionable" "the leftover episode swallowed the wake reason"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the actionable close must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "a real wake left the stale failure notice"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "a real wake left the stale attended alarm"
+  assert_absent "$dir/state/.turnend-claude-blocks" "a real wake left the stale block budget"
+  pass "auto-arm: a leftover failure episode never suppresses an actionable wake, and the wake ends that episode"
+}
+
+# The deadline passed to the arm is the declared hook timeout less
+# min(600s, a quarter of it), counted from when the hook started.
+test_arm_deadline_derives_from_declared_timeout() {
+  local dir case_name timeout expected before deadline status
+  for case_name in declared short absent; do
+    dir=$(make_primary_dir "$TMP_ROOT/deadline-$case_name")
+    : > "$dir/state/task.meta"
+    write_arm_fixture "$dir" records-deadline
+    case "$case_name" in
+      declared) timeout=28800; expected=28200 ;;
+      short) timeout=40; expected=30 ;;
+      absent) timeout=; expected=450 ;;
+    esac
+    if [ -n "$timeout" ]; then
+      mkdir -p "$dir/.claude"
+      jq -n --argjson t "$timeout" '{hooks: {
+          Stop: [{hooks: [
+            {type: "command", command: "bin/fm-turnend-guard.sh --claude"},
+            {type: "command", command: "bin/fm-claude-stop-autoarm.sh", asyncRewake: true, timeout: $t}]}],
+          StopFailure: [{hooks: [
+            {type: "command", command: "bin/fm-claude-stop-autoarm.sh --stop-failure", asyncRewake: true, timeout: 5}]}]}}' \
+        > "$dir/.claude/settings.json"
+    fi
+    before=$(date +%s)
+    run_autoarm "$dir" >/dev/null 2>&1; status=$?
+    expect_code 2 "$status" "$case_name: the recording fixture's unverified close must still fail closed"
+    deadline=$(cat "$dir/state/arm-received-deadline" 2>/dev/null || true)
+    case "$deadline" in
+      ''|*[!0-9]*) fail "$case_name: the arm received no FM_WATCH_DEADLINE, got: '$deadline'" ;;
+    esac
+    [ "$((deadline - before))" -ge "$expected" ] && [ "$((deadline - before))" -le "$((expected + 3))" ] \
+      || fail "$case_name: deadline is $((deadline - before))s after the hook started, expected about ${expected}s"
+  done
+  pass "auto-arm: the arm deadline derives from this hook's own declared Stop timeout, with a 600s fallback"
+}
+
+# The real arm and watcher, with nothing to report, close before a short
+# declared timeout through one no-op check wake that the hook translates into
+# an ordinary rewake. On a build without the deadline the cycle outlives the
+# timeout, which is what a host kill turns into a lost rewake.
+test_real_cycle_closes_before_declared_timeout() {
+  local dir out start elapsed hook_pid status i
+  dir=$(make_primary_dir "$TMP_ROOT/deadline-real-cycle")
+  rm -rf "${dir:?}/bin"
+  cp -R "$ROOT/bin" "$dir/bin"
+  : > "$dir/state/task.meta"
+  mkdir -p "$dir/.claude"
+  jq -n '{hooks: {Stop: [{hooks: [
+      {type: "command", command: "bin/fm-claude-stop-autoarm.sh", asyncRewake: true, timeout: 24}]}]}}' \
+    > "$dir/.claude/settings.json"
+  out="$dir/hook.out"
+  start=$(date +%s)
+  FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 run_autoarm_bg "$dir" "$out"
+  hook_pid=$RUN_AUTOARM_BG_PID
+  i=0
+  while kill -0 "$hook_pid" 2>/dev/null && [ "$i" -lt 290 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  elapsed=$(( $(date +%s) - start ))
+  if kill -0 "$hook_pid" 2>/dev/null; then
+    # Only this fixture's own processes match its unique temporary path.
+    pkill -KILL -f "$dir/bin/fm-" 2>/dev/null || true
+    kill -KILL "$hook_pid" 2>/dev/null || true
+    wait "$hook_pid" 2>/dev/null || true
+    fail "the hook-owned cycle was still running ${elapsed}s after start, past its 24s declared timeout"
+  fi
+  wait "$hook_pid"; status=$?
+  expect_code 2 "$status" "the pre-timeout close must rewake"
+  [ "$elapsed" -lt 24 ] || fail "the cycle closed after ${elapsed}s, not before its 24s declared timeout"
+  assert_contains "$(cat "$out")" "check: autoarm-deadline" "the rewake did not carry the deadline wake"
+  grep -q "$(printf '\tcheck\tautoarm-deadline\t')" "$dir/state/.wake-queue" \
+    || fail "the deadline wake was not queued for the drain: $(cat "$dir/state/.wake-queue" 2>/dev/null)"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the deadline close must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: a real quiet cycle closes before the declared hook timeout with one queued no-op wake and a rewake"
 }
 
 test_benign_cycle_end_with_live_watcher_is_silent() {
@@ -2008,7 +2101,9 @@ test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
-test_post_alarm_actionable_close_is_suppressed
+test_leftover_failure_episode_never_suppresses_actionable_wake
+test_arm_deadline_derives_from_declared_timeout
+test_real_cycle_closes_before_declared_timeout
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_owner_mutex_contention_preserves_failure_episode_reset
