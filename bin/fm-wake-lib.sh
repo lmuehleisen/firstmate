@@ -131,6 +131,7 @@ fm_poll_derived_grace() {
 # check wake and closes, so the host delivers an ordinary wake before it kills
 # the tree. Unset or malformed means no deadline, the default for every other
 # arm owner.
+# shellcheck disable=SC2034 # Consumed by bin/fm-watch.sh and bin/fm-watch-arm.sh.
 FM_WATCH_DEADLINE_REASON='check: autoarm-deadline - the Stop hook closed its watcher cycle before the hook timeout; nothing needs handling, acknowledge it and end the turn so the next turn end re-arms'
 fm_watch_deadline_passed() {
   case "${FM_WATCH_DEADLINE:-}" in

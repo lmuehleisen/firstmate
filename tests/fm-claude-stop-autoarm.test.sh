@@ -592,7 +592,7 @@ test_arm_deadline_derives_from_declared_timeout() {
 test_real_cycle_closes_before_declared_timeout() {
   local dir out start elapsed hook_pid status i
   dir=$(make_primary_dir "$TMP_ROOT/deadline-real-cycle")
-  rm -rf "$dir/bin"
+  rm -rf "${dir:?}/bin"
   cp -R "$ROOT/bin" "$dir/bin"
   : > "$dir/state/task.meta"
   mkdir -p "$dir/.claude"
