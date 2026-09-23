@@ -232,10 +232,10 @@ INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 # Longest typed envelope, in characters, before escalate_flush types a pointer to
-# a digest file instead. Measured live on Claude Code 2.1.281: a 501-character
-# line arrived intact mid-turn, while a ~950-character line was folded as pasted
-# content even on an idle pane. Digest files older than DIGEST_RETAIN_DAYS are
-# pruned at the next long flush.
+# a digest file instead. It sits below the length at which Claude Code folds a
+# typed burst (docs/verification/runtime-backends.md "Claude Code operational
+# input"; tests/fm-afk-claude-long-digest-live-e2e.test.sh re-measures it).
+# Digest files older than DIGEST_RETAIN_DAYS are pruned at the next long flush.
 INJECT_INLINE_MAX_DEFAULT=480
 DIGEST_RETAIN_DAYS=7
 CRASH_THRESHOLD_DEFAULT=10
@@ -726,11 +726,10 @@ escalate_add() {  # <state> <distilled-item>
 #
 # A digest whose typed envelope would exceed FM_INJECT_INLINE_MAX is written to
 # a durable file under state/.subsuper-digests/ and only a short pointer line is
-# typed. A long literal burst is folded as pasted content by the primary's
-# composer: Claude Code 2.1.280+ wraps it in <pasted_content> so the operational
-# header no longer starts the message, and mid-turn it can submit only the tail.
-# Either way the escalation reads as the captain returning. A line well under
-# that threshold arrives intact, idle or mid-turn.
+# typed. The primary's composer folds a long literal burst: Claude Code wraps it
+# in <pasted_content> or submits only its tail, so the operational header no
+# longer starts the message and the escalation reads as the captain returning.
+# A line well under that threshold arrives intact, idle or mid-turn.
 escalate_flush() {  # <state>
   local state=$1 buf n msg dir file max encoded
   buf="$state/.subsuper-escalations"

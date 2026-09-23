@@ -613,6 +613,25 @@ Both versions also passed the flag-off and resume sections.
 Refreshed on 2026-09-23 on macOS with tmux 3.7c against Claude Code 2.1.280: all three sections passed, with the away-mode escalation arriving without its U+2063 mark and classifying as away-supervisor.
 Run with the mark-only parser on 2.1.278, the same guard fails with `not ok - the operational user row drew while Calm was on`.
 The Claude Code debug log names a loaded hooks module by plugin name through 2.1.276 and by its `plugin@source` label from 2.1.277, which the guard accepts in both forms.
+
+Claude Code folds a long typed burst, so an away-mode digest typed inline loses its header from the first character: it arrives wrapped as `<pasted_content>` or cut to its tail, and either shape reads as the captain returning.
+`escalate_flush` in `bin/fm-supervise-daemon.sh` therefore types any digest over `INJECT_INLINE_MAX_DEFAULT` (480 characters) as a pointer line naming a digest file.
+On 2.1.281 a 501-character line typed mid-turn arrived intact, while a line of about 1,300 characters was folded mid-turn and lines of 2,800 to 3,200 characters were folded on an idle pane; on 2.1.280 folding began at about 950 characters on an idle pane.
+The daemon's Claude busy guard reads a Claude turn only when the daemon knows the primary harness, which the detached launch hands over as `FM_DAEMON_PRIMARY_HARNESS`.
+
+Verified on 2026-09-23 on macOS with tmux 3.7c on a private socket, against Claude Code 2.1.281 with a tool-less Haiku stand-in:
+
+```sh
+FM_AFK_CLAUDE_DIGEST_LIVE_E2E=1 tests/fm-afk-claude-long-digest-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Claude Code 2.1.281 (Claude Code): a digest of more than 2,000 characters typed inline arrives cut to its last 383 characters and classifies as none
+ok - Claude Code 2.1.281 (Claude Code): a long digest arrives as a 336-character pointer line that classifies as away-supervisor, with every event in its file
+ok - Claude Code 2.1.281 (Claude Code): a mid-turn escalation defers on the Claude busy guard and arrives intact after the turn
+```
 This guard is the refresh command after a Claude Code upgrade.
 
 ## Codex hook trust

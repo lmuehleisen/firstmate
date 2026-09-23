@@ -183,7 +183,7 @@ operational prefix, carrying pre-read status summaries and a recommended action.
 The single-line format makes the submission unambiguous across harnesses, and
 the operational prefix lets firstmate distinguish it from a real captain message.
 A digest longer than `FM_INJECT_INLINE_MAX` (default 480 characters) is written to a file under `state/.subsuper-digests/`, and the typed line names that file instead of carrying the events; read the named file before acting, because it holds the whole escalation.
-A long typed burst is folded as pasted content, which moves the header off the first character or, mid-turn, submits only its tail, and either way reads as the captain returning.
+A long typed burst is folded, either wrapped as pasted content or cut to its tail, which moves the header off the first character and reads as the captain returning.
 
 ### Injection hardening
 
