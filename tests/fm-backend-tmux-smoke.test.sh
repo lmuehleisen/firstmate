@@ -212,6 +212,19 @@ for submit_shell in /bin/bash /bin/zsh; do
   sleep 0.3
   pass "real $submit_shell process confirms wrapped launch after first Enter is dropped"
 
+  # Keep the foreground process a shell while its builtin read delays the
+  # postcondition. Accepted Enter leaves the cursor on an empty row meanwhile.
+  submit_test_enters=0
+  submit_test_drop=none
+  submit_line="read -r -t 2 submit_unused; touch '$SHIM_DIR/executed'"
+  fm_backend_tmux_send_literal "$submit_test_target" "$submit_line"
+  sleep 0.3
+  fm_tmux_shell_submit_enter "$submit_test_target" "$submit_line" submit_test_file \
+    || fail "real $submit_shell delayed execution was not confirmed"
+  [ "$submit_test_enters" = 1 ] || fail "accepted Enter was retried into the shell builtin"
+  rm "$SHIM_DIR/executed"
+  pass "real $submit_shell accepted Enter waits on a blank cursor without retrying"
+
   submit_test_enters=0
   submit_test_drop=all
   submit_line="touch '$SHIM_DIR/executed'"

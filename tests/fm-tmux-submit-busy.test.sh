@@ -360,6 +360,7 @@ test_shell_submit_unowned_input() (
   local_mode=$1
   shell_keys="$TMP_ROOT/shell-keys-$local_mode"
   : > "$shell_keys"
+  # shellcheck disable=SC2329 # Invoked by the sourced submit helper.
   tmux() {
     case "$1" in
       display-message)
@@ -373,7 +374,9 @@ test_shell_submit_unowned_input() (
       send-keys) printf '%s\n' "$4" >> "$shell_keys" ;;
     esac
   }
+  # shellcheck disable=SC2329 # Invoked by the sourced submit helper.
   sleep() { :; }
+  # shellcheck disable=SC2329 # Passed as the execution-postcondition callback.
   shell_not_executed() { return 1; }
   if fm_tmux_shell_submit_enter fake owned-command shell_not_executed 2>/dev/null; then
     fail "unproven shell execution succeeded"
@@ -383,3 +386,37 @@ test_shell_submit_unowned_input() (
 )
 test_shell_submit_unowned_input transcript
 test_shell_submit_unowned_input unreadable
+
+# Accepted Enter moves the cursor below the echoed command before the execution
+# postcondition settles. Preserve that empty row instead of retrying transcript.
+test_shell_submit_blank_cursor() (
+  cursor_contents=$1
+  shell_keys="$TMP_ROOT/blank-cursor-keys"
+  : > "$shell_keys"
+  verification_polls=0
+  # shellcheck disable=SC2329 # Invoked by the sourced submit helper.
+  tmux() {
+    case "$1" in
+      display-message)
+        case "$*" in
+          *pane_current_command*) printf 'bash\n' ;;
+          *cursor_y*) printf '1\n' ;;
+        esac ;;
+      capture-pane) printf '$ owned-command\n%s\n' "$cursor_contents" ;;
+      send-keys) printf '%s\n' "$4" >> "$shell_keys" ;;
+    esac
+  }
+  # shellcheck disable=SC2329 # Invoked by the sourced submit helper.
+  sleep() { :; }
+  # shellcheck disable=SC2329 # Passed as the execution-postcondition callback.
+  shell_eventually_executed() {
+    verification_polls=$((verification_polls + 1))
+    [ "$verification_polls" -ge 4 ]
+  }
+  fm_tmux_shell_submit_enter fake owned-command shell_eventually_executed \
+    || fail "accepted command was not confirmed after its delayed postcondition"
+  [ "$(cat "$shell_keys")" = Enter ] || fail "blank cursor received retry or cleanup keys"
+  pass "accepted Enter with a blank cursor waits for execution without further keys"
+)
+test_shell_submit_blank_cursor ''
+test_shell_submit_blank_cursor '   '

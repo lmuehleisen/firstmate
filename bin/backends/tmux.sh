@@ -119,12 +119,15 @@ fm_backend_tmux_current_path() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
 }
 
-# fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
-# composer verification - used for the fixed spawn-time commands
-# (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
-# inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
-fm_backend_tmux_send_text_line() {  # <target> <text>
-  tmux send-keys -t "$1" "$2" Enter
+# fm_backend_tmux_send_text_line: shell TEXT followed by Enter by default.
+# --defer-enter preserves the shell-text transport while letting the caller
+# settle and use fm_backend_tmux_submit_shell_enter for execution verification.
+fm_backend_tmux_send_text_line() { # <target> <text> [--defer-enter]
+  case "${3:-}" in
+    '') tmux send-keys -t "$1" "$2" Enter ;;
+    --defer-enter) tmux send-keys -t "$1" "$2" ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_backend_tmux_send_literal: send TEXT as literal bytes with no

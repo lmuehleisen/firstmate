@@ -4083,7 +4083,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       seen=$(spawn_current_path "$WT_TARGET" || true)
       [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$acquired_wt_real" ]
     }
-    spawn_send_literal "$WT_TARGET" "$lease_command"
+    fm_backend_tmux_send_text_line "$WT_TARGET" "$lease_command" --defer-enter
     sleep 0.3
     if ! fm_backend_tmux_submit_shell_enter "$WT_TARGET" "$lease_command" spawn_lease_entered; then
       seen=$(spawn_current_path "$WT_TARGET" || true)

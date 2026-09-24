@@ -194,6 +194,7 @@ The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, 
 
 Verified on 2026-09-23 with tmux 3.7c, Bash 3.2.57, and Zsh 5.9 on macOS.
 The existing private-socket smoke fixture drops the first Enter while leaving the shell, cwd, and process reads real.
+A shell builtin also delays the execution postcondition after an accepted Enter, proving that a blank cursor row receives no retry keys.
 Its wrapped command also exercises Zsh's explicit row redraws, which need normalization beyond tmux's automatic-wrap joining.
 Run:
 
@@ -206,9 +207,11 @@ Relevant output:
 ```text
 ok - real /bin/bash cwd confirms shell submit after first Enter is dropped
 ok - real /bin/bash process confirms wrapped launch after first Enter is dropped
+ok - real /bin/bash accepted Enter waits on a blank cursor without retrying
 ok - real /bin/bash exhausted submit clears its owned input
 ok - real /bin/zsh cwd confirms shell submit after first Enter is dropped
 ok - real /bin/zsh process confirms wrapped launch after first Enter is dropped
+ok - real /bin/zsh accepted Enter waits on a blank cursor without retrying
 ok - real /bin/zsh exhausted submit clears its owned input
 ```
 

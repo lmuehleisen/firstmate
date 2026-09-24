@@ -297,12 +297,19 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
 # above the cursor or another foreground program never authorizes a retry.
 # Returns 0 for owned pending input, 1 for another line, 2 for unreadable input.
 fm_tmux_shell_line_pending() { # <target> <text>
-  local target=$1 text=$2 command cursor screen line
+  local target=$1 text=$2 command cursor screen cursor_line line
   command=$(tmux display-message -p -t "$target" '#{pane_current_command}') || return 2
   case "$command" in bash|zsh|sh|dash|ksh|fish|-bash|-zsh|-sh) ;; *) return 2 ;; esac
   cursor=$(tmux display-message -p -t "$target" '#{cursor_y}') || return 2
   case "$cursor" in ''|*[!0-9]*) return 2 ;; esac
-  screen=$(tmux capture-pane -p -J -t "$target" -S - -E "$cursor") || return 2
+  # Preserve terminal row endings across command substitution. Remove only
+  # capture-pane's final terminator, so a blank cursor row stays distinguishable
+  # from the submitted command echoed immediately above it.
+  screen=$(tmux capture-pane -p -J -t "$target" -S - -E "$cursor" && printf '.') || return 2
+  screen=${screen%.}
+  screen=${screen%$'\n'}
+  cursor_line=${screen##*$'\n'}
+  [[ "$cursor_line" == *[![:space:]]* ]] || return 1
   # ZLE can redraw a wrapped command with explicit row moves rather than
   # terminal autowrap, so tmux -J alone may retain newlines inside the input.
   # Require the full command as the suffix ending at the cursor row either way.
@@ -317,7 +324,7 @@ fm_tmux_shell_line_pending() { # <target> <text>
 # clear only proven owned input and report whether cleanup could be confirmed.
 # Callers must stop on failure, never append another command to uncertain input.
 fm_tmux_shell_submit_enter() {
-  local target=$1 text=$2 verify=$3 poll attempt=1 pending
+  local target=$1 text=$2 verify=$3 poll attempt=1 pending_status
   shift 3
   tmux send-keys -t "$target" Enter 2>/dev/null || true
   for ((poll=0; poll<20; poll++)); do
@@ -331,9 +338,9 @@ fm_tmux_shell_submit_enter() {
   if fm_tmux_shell_line_pending "$target" "$text"; then
     tmux send-keys -t "$target" C-u 2>/dev/null || true
     sleep 0.3
-    pending=0
-    fm_tmux_shell_line_pending "$target" "$text" || pending=$?
-    if [ "$pending" = 1 ]; then
+    pending_status=0
+    fm_tmux_shell_line_pending "$target" "$text" || pending_status=$?
+    if [ "$pending_status" = 1 ]; then
       echo "error: shell command did not run in $target after $attempt Enter attempts; cleared owned input" >&2
     else
       echo "error: shell command did not run in $target after $attempt Enter attempts; owned input cleanup could not be confirmed" >&2
