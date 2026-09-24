@@ -353,3 +353,33 @@ test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
+
+# Shell retries must not borrow ownership from transcript text or unreadable
+# input, even though the execution postcondition has not yet appeared.
+test_shell_submit_unowned_input() (
+  local_mode=$1
+  shell_keys="$TMP_ROOT/shell-keys-$local_mode"
+  : > "$shell_keys"
+  tmux() {
+    case "$1" in
+      display-message)
+        case "$*" in
+          *pane_current_command*) printf 'bash\n' ;;
+          *cursor_y*) printf '2\n' ;;
+        esac ;;
+      capture-pane)
+        [ "$local_mode" != unreadable ] || return 1
+        printf '$ owned-command\ncompleted\n$ someone-else-draft\n' ;;
+      send-keys) printf '%s\n' "$4" >> "$shell_keys" ;;
+    esac
+  }
+  sleep() { :; }
+  shell_not_executed() { return 1; }
+  if fm_tmux_shell_submit_enter fake owned-command shell_not_executed 2>/dev/null; then
+    fail "unproven shell execution succeeded"
+  fi
+  [ "$(cat "$shell_keys")" = Enter ] || fail "unowned input received retry or cleanup keys"
+  pass "shell submit preserves $local_mode input without retrying or clearing it"
+)
+test_shell_submit_unowned_input transcript
+test_shell_submit_unowned_input unreadable

@@ -22,7 +22,7 @@
 set -u
 
 # shellcheck source=tests/fixtures.sh
-. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh" || exit 1
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
@@ -47,7 +47,13 @@ make_settle_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
+  *"#{pane_current_command}"*) printf 'bash\n'; exit 0 ;;
+  *"#{cursor_y}"*) printf '1\n'; exit 0 ;;
   *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_DROP_CD_ENTER:-}" ] && [ ! -f "$FM_FAKE_PANE_COUNTFILE.ran" ]; then
+      printf '%s\n' "$FM_FAKE_PROJECT_PATH"
+      exit 0
+    fi
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
     n=0
     [ -f "$countfile" ] && n=$(cat "$countfile")
@@ -65,7 +71,29 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
+  capture-pane)
+    printf '$ %s\n' "$(cat "$FM_FAKE_PANE_COUNTFILE.pending" 2>/dev/null)"
+    exit 0 ;;
   send-keys)
+    if [ -n "${FM_FAKE_DROP_CD_ENTER:-}" ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          '(cd -- '*)
+            printf '%s' "$arg" > "$FM_FAKE_PANE_COUNTFILE.pending"
+            echo typed >> "$FM_FAKE_PANE_COUNTFILE.types" ;;
+          Enter)
+            if [ -s "$FM_FAKE_PANE_COUNTFILE.pending" ]; then
+              n=0; [ ! -f "$FM_FAKE_PANE_COUNTFILE.enters" ] || n=$(cat "$FM_FAKE_PANE_COUNTFILE.enters")
+              n=$((n + 1)); printf '%s' "$n" > "$FM_FAKE_PANE_COUNTFILE.enters"
+              if [ "$FM_FAKE_DROP_CD_ENTER" != all ] && [ "$n" -gt 1 ]; then
+                : > "$FM_FAKE_PANE_COUNTFILE.ran"
+                : > "$FM_FAKE_PANE_COUNTFILE.pending"
+              fi
+            fi ;;
+          C-u) : > "$FM_FAKE_PANE_COUNTFILE.pending" ;;
+        esac
+      done
+    fi
     if [ -n "${FM_FAKE_LEASE_ENV_LOG:-}" ]; then
       for arg in "$@"; do
         case "$arg" in
@@ -140,6 +168,34 @@ run_settle_spawn() {
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
+test_dropped_cd_enter() {
+  local rec id=lost-cd-s1 out rc
+  rec=$(make_settle_case lost-cd "$id" 0)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(FM_FAKE_DROP_CD_ENTER=first run_settle_spawn "$id"); rc=$?
+  expect_code 0 "$rc" "lost cd Enter spawn failed: $out"
+  [ "$(cat "$COUNTFILE.enters")" = 2 ] || fail "cd did not retry Enter exactly once"
+  [ "$(wc -l < "$COUNTFILE.types" | tr -d ' ')" = 1 ] || fail "cd was retyped"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "spawn never confirmed leased cwd"
+  pass "spawn retries a lost cd Enter, types once, and confirms leased cwd"
+}
+
+test_exhausted_cd_enter() {
+  local rec id=lost-cd-s2 out rc
+  rec=$(make_settle_case lost-all-cd "$id" 0)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(FM_FAKE_DROP_CD_ENTER=all run_settle_spawn "$id"); rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted an unsubmitted cd"
+  [ "$(cat "$COUNTFILE.enters")" = 3 ] || fail "cd retries unbounded"
+  [ ! -s "$COUNTFILE.pending" ] || fail "cd text left pending"
+  assert_contains "$out" 'cleared owned input' "cleanup not reported"
+  assert_present "$HOME_DIR/state/$id.treehouse-lease" "failure lost lease receipt"
+  assert_absent "$HOME_DIR/state/$id.meta" "failed cd published metadata"
+  pass "spawn clears an exhausted cd submit while retaining its lease receipt"
+}
+
 # A single stale first read (the exact incident) must not be accepted: the
 # loop should keep polling until two consecutive reads agree, landing on the
 # real settled worktree instead.
@@ -181,8 +237,8 @@ test_already_settled_pane_costs_one_confirm_read() {
   [ "$(sed -n '2p' "$HOME_DIR/lease-env")" = "$WT_DIR" ] || fail "lease child shell did not enter its worktree"
   [ "$(sed -n '3p' "$HOME_DIR/lease-env")" = "$PROJ_DIR" ] || fail "lease launch moved the outer shell into the worktree"
   reads=$(cat "$COUNTFILE")
-  [ "$reads" -eq 2 ] || fail "already-settled pane took $reads reads to confirm - expected the first read plus one confirmation"
-  pass "an already-settled pane confirms on the next read, not a whole extra cycle"
+  [ "$reads" -eq 3 ] || fail "already-settled pane took $reads reads to confirm - expected submit verification plus two settled reads"
+  pass "an already-settled pane uses one submit check and two isolation reads"
 }
 
 test_real_pane_survives_lease_child_exit() {
@@ -428,6 +484,8 @@ test_real_treehouse_lease_preserves_process_free_detached_work() {
   pass "real Treehouse excludes a process-free durable lease containing clean detached unlanded work"
 }
 
+test_dropped_cd_enter
+test_exhausted_cd_enter
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_real_pane_survives_lease_child_exit

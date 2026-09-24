@@ -32,6 +32,8 @@
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#   tmux lease entry and replacement launch verify execution with the bounded
+#   shell-submit owner in bin/fm-tmux-lib.sh; failure stops before further input.
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -4074,7 +4076,24 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # close; cd in the outer shell would kill the pane before that guard runs.
   # Exiting this child never returns/resets the lease. Also bind TREEHOUSE_DIR:
   # Treehouse return without an explicit path prefers it over cwd.
-  spawn_send_text_line "$WT_TARGET" "(cd -- $(shell_quote "$WT") && export TREEHOUSE_DIR=$(shell_quote "$WT") && exec \"\${SHELL:-/bin/sh}\")"
+  lease_command="(cd -- $(shell_quote "$WT") && export TREEHOUSE_DIR=$(shell_quote "$WT") && exec \"\${SHELL:-/bin/sh}\")"
+  if [ "$BACKEND" = tmux ]; then
+    spawn_lease_entered() {
+      local seen
+      seen=$(spawn_current_path "$WT_TARGET" || true)
+      [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$acquired_wt_real" ]
+    }
+    spawn_send_literal "$WT_TARGET" "$lease_command"
+    sleep 0.3
+    if ! fm_backend_tmux_submit_shell_enter "$WT_TARGET" "$lease_command" spawn_lease_entered; then
+      seen=$(spawn_current_path "$WT_TARGET" || true)
+      spawn_worktree_isolated "$seen" || true
+      echo "error: treehouse get did not enter an isolated worktree matching its lease (last seen '$seen': ${SPAWN_WT_REASON:-unconfirmed}); lease retained; inspect window $T" >&2
+      exit 1
+    fi
+  else
+    spawn_send_text_line "$WT_TARGET" "$lease_command"
+  fi
 
   # Verify the pane entered the exact leased path, using its stable endpoint.
   # Two consecutive isolated reads must agree with the provider's result: tmux
@@ -5125,13 +5144,29 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
 sleep 0.3
+LAUNCH_SHELL_COMMAND=
+if [ "$BACKEND" = tmux ] && [ "$RELAUNCH" -eq 1 ]; then
+  LAUNCH_SHELL_COMMAND=$(fm_backend_tmux_current_command "$T" || true)
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+if [ "$BACKEND" = tmux ] && [ "$RELAUNCH" -eq 1 ]; then
+  spawn_launch_running() {
+    local current
+    [ "$(fm_backend_agent_state tmux "$T")" != alive ] || return 0
+    # A launcher may run before its agent is identifiable. Prove the shell
+    # command started without replacing fm-control's longer agent-start wait.
+    current=$(fm_backend_tmux_current_command "$T" || true)
+    [ -n "$LAUNCH_SHELL_COMMAND" ] && [ -n "$current" ] && [ "$current" != "$LAUNCH_SHELL_COMMAND" ]
+  }
+  fm_backend_tmux_submit_shell_enter "$T" "$LAUNCH" spawn_launch_running || exit 1
+else
+  spawn_send_key "$T" Enter
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

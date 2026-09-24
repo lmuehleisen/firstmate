@@ -66,6 +66,12 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# Shell execution verification is separate from agent-composer submission.
+# The shared owner takes already-typed text and a caller execution postcondition.
+fm_backend_tmux_submit_shell_enter() { # <target> <text> <postcondition> [args...]
+  fm_tmux_shell_submit_enter "$@"
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
