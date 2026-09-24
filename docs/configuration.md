@@ -238,10 +238,11 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 The optional local, gitignored `config/no-mistakes` presence flag lets this home run the real no-mistakes pipeline for an experiment without making the CLI a required tool.
 With the flag absent, a `no-mistakes` mode token ships exactly as `direct-PR`, and bootstrap stays silent about no-mistakes whether or not the CLI is installed.
+The brief and a scout promotion then render the `direct-PR` contract, whose `Delivery contract:` line records `mode=direct-PR` and which ends with a note naming the `no-mistakes` token, while the task record keeps `mode=no-mistakes` beside `effective_mode=direct-PR`; the ready-report gate judges the task by that effective mode on every forge, including Gerrit, and judges a record without the field by its recorded mode ([`bin/fm-dod-lib.sh`](../bin/fm-dod-lib.sh) owns the resolution).
 With the flag present, a ship task firstmate explicitly resolves to `--mode no-mistakes` gets the pipeline contract: its brief carries the doctor-and-init setup step, the shared-daemon rule, the ask-user escalation format, and the pipeline definition of done, a scout promotion to that mode delivers the same contract, and the spawn adds the captain-intent overlay for `--intent`.
 A `[no-mistakes]` or `[no-mistakes-prod-only]` token in `data/projects.md` still maps to `direct-PR` with the flag present, so no registered project moves onto the pipeline by default, and secondmate seeding never initializes a gate.
 When the flag is present and no `no-mistakes` binary is on PATH, bootstrap prints one non-blocking `BOOTSTRAP_INFO: no-mistakes pipeline unavailable` line, and a pipeline spawn or promotion refuses rather than falling back to `direct-PR`.
-A pipeline brief records a `Delivery pipeline: no-mistakes` line; with the flag present the spawn refuses a brief whose pipeline contract disagrees with its mode, and with the flag absent every launch, including a relaunch, supersedes that contract with `direct-PR` delivery.
+A pipeline brief records a `Delivery pipeline: no-mistakes` line; with the flag present the spawn refuses a brief whose pipeline contract disagrees with its mode, and with the flag absent every launch, including a relaunch, of a brief whose contract line still says `mode=no-mistakes` supersedes that contract with `direct-PR` delivery.
 The flag is not inherited by secondmate homes.
 `bin/fm-dod-lib.sh` owns the resolver and the pipeline contract text.
 

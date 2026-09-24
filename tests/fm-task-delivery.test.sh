@@ -309,7 +309,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod
+  local home meta out sendroot payload mode effective id brief_dod delivered_dod
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -340,8 +340,13 @@ STUB
       || fail "$mode: promotion's delivery command did not run"
     assert_present "$payload" "$mode: promotion delivered no message to the worker"
 
-    grep -qx "Delivery contract: mode=$mode" "$payload" \
+    # Without config/no-mistakes the no-mistakes token records its effective mode.
+    effective=$mode
+    [ "$mode" != no-mistakes ] || effective=direct-PR
+    grep -qx "Delivery contract: mode=$effective" "$payload" \
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
+    grep -qx "mode=$mode" "$meta" || fail "$mode: promotion did not record the task's mode token"
+    grep -qx "effective_mode=$effective" "$meta" || fail "$mode: promotion did not record the effective mode"
     assert_grep "# Definition of done" "$payload" \
       "$mode: promoted worker did not receive a Definition of done"
     assert_grep "pwd -P" "$payload" \
@@ -598,6 +603,43 @@ EOF
   assert_no_grep "# Current no-mistakes intent contract" "$home/data/pipeline-e3/launch-brief.md" \
     "flag-absent launch still carried the pipeline --intent overlay"
   pass "fm-spawn: config/no-mistakes runs only an agreeing, installed pipeline ship and never falls back"
+}
+
+# Without config/no-mistakes a no-mistakes ship is scaffolded and promoted on its
+# effective direct-PR contract, so the brief's contract line agrees with spawn's
+# mismatch check, launches without a second superseding contract, and the task
+# record keeps the no-mistakes token beside the effective mode the gate reads.
+test_no_mistakes_token_launches_on_its_effective_mode() {
+  local case_dir home proj wt fakebin id out status brief meta
+  # shellcheck source=tests/fixtures.sh
+  . "$ROOT/tests/fixtures.sh"
+  case_dir="$TMP_ROOT/effective-mode"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  fm_git_worktree "$proj" "$wt" wt-effective-mode
+  id="effective-mode-e1"
+  FM_HOME="$home" "$BRIEF" "$id" project --mode no-mistakes >/dev/null 2>&1 \
+    || fail "a no-mistakes brief without the opt-in should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "Ship the remapped change." "Keep it small."
+  brief="$home/data/$id/brief.md"
+  grep -qx 'Delivery contract: mode=direct-PR' "$brief" || fail "the remapped brief did not record its effective contract"
+  assert_grep 'Do NOT run /no-mistakes' "$brief" "the remapped brief did not carry direct-PR delivery"
+  assert_no_grep 'invoke the no-mistakes skill' "$brief" "the remapped brief instructed the worker to run the pipeline"
+  assert_grep 'recorded mode is no-mistakes' "$brief" "the remapped brief did not say why no pipeline runs"
+
+  out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a remapped no-mistakes spawn should launch: $out"
+  assert_not_contains "$out" "delivery mismatch" "the effective contract line disagreed with spawn's mismatch check"
+  assert_no_grep '# Current delivery instructions' "$home/data/$id/launch-brief.md" \
+    "a brief already on its effective contract was superseded a second time"
+  meta="$home/state/$id.meta"
+  grep -qx 'mode=no-mistakes' "$meta" || fail "the task record lost the recorded no-mistakes token"
+  grep -qx 'effective_mode=direct-PR' "$meta" || fail "the task record did not record the effective mode"
+  pass "fm-spawn: a no-mistakes token launches on its effective direct-PR contract and records both modes"
 }
 
 # The pipeline contract is rendered before any harness is chosen, so it must name
@@ -1738,6 +1780,7 @@ test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
 test_project_mode_maps_the_conditional_policy
 test_no_mistakes_pipeline_opt_in_spawn
+test_no_mistakes_token_launches_on_its_effective_mode
 test_no_mistakes_pipeline_opt_in_promote
 test_no_mistakes_pipeline_contract_is_harness_neutral
 test_pipeline_marker_is_read_only_from_the_definition_of_done

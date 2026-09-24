@@ -7,9 +7,9 @@
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
-# [pipeline] prints the block on stdout with no trailing blank line. The caller
-# validates the mode; an unknown mode is refused rather than silently rendered as
-# the pipeline contract.
+# prints the block on stdout with no trailing blank line. The caller validates the
+# mode; an unknown mode is refused rather than silently rendered as the pipeline
+# contract.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -66,19 +66,13 @@
 # Every block that publishes or readies work without the pipeline tells the
 # worker to run the project's relevant tests and lint checks and report them.
 # no-mistakes remains a compatibility token and delivers through direct-PR
-# unless this home opts in with config/no-mistakes (docs/configuration.md).
-# fm_no_mistakes_pipeline_state <config-dir> is that opt-in's one resolver:
-# `off` when the presence flag is absent, `available` when it is present and a
-# no-mistakes binary is on PATH, `unavailable` otherwise. Only the explicit
-# trailing `pipeline` argument renders the no-mistakes pipeline contract, which
-# also carries the fixed "Delivery pipeline: no-mistakes" line bin/fm-spawn.sh
-# reads; without it a no-mistakes token renders its direct-PR equivalent on the
-# same forge. That contract names the no-mistakes skill without a harness
+# unless this home opts in with config/no-mistakes (docs/configuration.md); the
+# fork helpers at the end of this file own that remap, so callers hand the
+# functions above an already-resolved effective mode. The no-mistakes pipeline
+# contract carries the fixed "Delivery pipeline: no-mistakes" line
+# bin/fm-spawn.sh reads, and names the no-mistakes skill without a harness
 # prefix, because a brief or promotion is rendered before any harness is chosen;
 # each harness's invocation form is owned by .agents/skills/harness-adapters.
-# fm_dod_pipeline_recorded <brief> reads that line only from the brief's last
-# `# Definition of done` section, the machine-owned block this file renders, so
-# the same text inside Task prose or an example never counts.
 # This file is the one owner of the no-mistakes `--intent` contract for that
 # pipeline: only the brief's `## Captain's intent` subsection plus later captain
 # words, never `## Firstmate spec` and never the worker's own tradeoffs.
@@ -108,8 +102,7 @@
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
-# a worker off a remote is exactly the rule that changes when the forge does,
-# and the same trailing `pipeline` argument as fm_dod_block.
+# a worker off a remote is exactly the rule that changes when the forge does.
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
@@ -155,13 +148,10 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   return 0
 }
 
-fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [pipeline]
-  local mode=$1 id=$2 forge=${4:-none} pipeline=${5:-}
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+  local mode=$1 id=$2 forge=${4:-none}
   local branch=${3:-fm/$id}
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
-  # Without the explicit pipeline argument a no-mistakes token ships direct-PR,
-  # exactly as fm_dod_block renders it.
-  [ "$mode" != no-mistakes ] || [ "$pipeline" = pipeline ] || mode=direct-PR
   if [ "$forge" = gerrit ]; then
     printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
     return 0
@@ -247,25 +237,6 @@ fm_brief_intent_address_line() {  # <file>
   '
 }
 
-fm_no_mistakes_pipeline_state() {  # <config-dir>
-  if [ ! -f "$1/no-mistakes" ]; then
-    echo off
-  elif command -v no-mistakes >/dev/null 2>&1; then
-    echo available
-  else
-    echo unavailable
-  fi
-}
-
-fm_dod_pipeline_recorded() {  # <brief>
-  awk '
-    /^# Definition of done$/ { in_dod = 1; pipeline = 0; next }
-    /^# / { in_dod = 0; next }
-    in_dod && $0 == "Delivery pipeline: no-mistakes" { pipeline = 1 }
-    END { exit !pipeline }
-  ' "$1"
-}
-
 # The `nm-<run>-<step>` decision key this block mandates is load-bearing beyond
 # the brief itself: the watcher binds an open `needs-decision` to the run a
 # crew's current state reports by matching exactly that shape
@@ -345,52 +316,10 @@ There is no pull request, no \`gh\` call, and no forge CI result to report: a hu
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [pipeline]
-  local mode=$1 id=$2 forge=${4:-none} pipeline=${5:-}
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
+  local mode=$1 id=$2 forge=${4:-none}
   local branch=${3:-fm/$id}
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
-  # Without config/no-mistakes a no-mistakes token keeps its recorded contract
-  # line but ships exactly like direct-PR on the same forge.
-  if [ "$mode" = no-mistakes ] && [ "$pipeline" != pipeline ]; then
-    case "$forge" in
-      gerrit)
-        cat <<EOF
-# Definition of done
-Delivery contract: mode=no-mistakes forge=gerrit shape=squash
-Ship branch: $branch
-This home does not run the no-mistakes pipeline.
-Ship the same way as direct-PR to a Gerrit review server: you publish the change yourself.
-Gerrit has no pull requests, so there is nothing to open; publishing creates the change.
-The task is complete only when committed on your branch.
-Run the project's relevant tests and lint checks before reporting ready; report the commands, results, and anything you could not verify.
-When it is implemented and committed, publish it.
-EOF
-        fm_gerrit_publish_block
-        cat <<EOF
-Do NOT run /no-mistakes.
-EOF
-        ;;
-      *)
-        cat <<EOF
-# Definition of done
-Delivery contract: mode=no-mistakes
-Ship branch: $branch
-This home does not run the no-mistakes pipeline.
-Ship the same way as direct-PR: you raise the PR yourself with \`gh\`.
-The task is complete only when committed on your branch.
-Run the project's relevant tests and lint checks before reporting ready; report the commands, results, and anything you could not verify.
-When it is implemented and committed, push your branch and open a PR with \`gh\` that is ready for review, not a draft.
-Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh pr view <url> --json isDraft\` must print false); if it is a draft, mark it ready with \`gh pr ready\`.
-A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
-That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
-If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-EOF
-        ;;
-    esac
-    return 0
-  fi
   case "$mode:$forge" in
     direct-PR:gerrit)
       cat <<EOF
@@ -722,4 +651,68 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   fi
   printf '%s\n' "named head $sha is unreachable outside the worker copy"
   return 1
+}
+
+# --- Fork: config/no-mistakes remap ------------------------------------------
+# This fork ships a no-mistakes task through direct-PR unless this home opts in
+# with config/no-mistakes (docs/configuration.md). The recorded token stays
+# no-mistakes in the registry and in the task's mode= meta; every renderer and
+# gate works on the effective mode these helpers resolve, so the upstream
+# functions above stay unchanged.
+# fm_no_mistakes_pipeline_state <config-dir> is the opt-in's one resolver:
+# `off` when the presence flag is absent, `available` when it is present and a
+# no-mistakes binary is on PATH, `unavailable` otherwise.
+# fm_effective_delivery_mode <mode> <config-dir> prints direct-PR for a
+# no-mistakes token when that state is off, and the mode unchanged otherwise;
+# bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh call it before
+# fm_dod_block and fm_ship_rule_one, and the latter two refuse `unavailable`.
+# fm_no_mistakes_remap_note prints the line a remapped Definition of done ends
+# with, so the worker learns why no pipeline runs.
+# fm_dod_pipeline_recorded <brief> reads the "Delivery pipeline: no-mistakes"
+# line only from the brief's last `# Definition of done` section, the
+# machine-owned block this file renders, so the same text inside Task prose or
+# an example never counts.
+# fm_dod_task_mode <meta> is the mode the named-head gate judges a task by: the
+# effective_mode= bin/fm-spawn.sh and bin/fm-promote.sh record beside mode=, or
+# the recorded mode for a record written before that field existed. A remapped
+# no-mistakes task is therefore judged as direct-PR on every forge, including
+# Gerrit, where the no-mistakes gate would demand a passed pipeline run that
+# never happens.
+
+fm_no_mistakes_pipeline_state() {  # <config-dir>
+  if [ ! -f "$1/no-mistakes" ]; then
+    echo off
+  elif command -v no-mistakes >/dev/null 2>&1; then
+    echo available
+  else
+    echo unavailable
+  fi
+}
+
+fm_effective_delivery_mode() {  # <mode> <config-dir>
+  if [ "$1" = no-mistakes ] && [ "$(fm_no_mistakes_pipeline_state "$2")" = off ]; then
+    echo direct-PR
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+fm_no_mistakes_remap_note() {
+  printf '%s\n' "This task's recorded mode is no-mistakes, but this home does not run the no-mistakes pipeline (config/no-mistakes is absent), so it ships through the direct-PR contract above."
+}
+
+fm_dod_pipeline_recorded() {  # <brief>
+  awk '
+    /^# Definition of done$/ { in_dod = 1; pipeline = 0; next }
+    /^# / { in_dod = 0; next }
+    in_dod && $0 == "Delivery pipeline: no-mistakes" { pipeline = 1 }
+    END { exit !pipeline }
+  ' "$1"
+}
+
+fm_dod_task_mode() {  # <meta>
+  local effective
+  effective=$(fm_dod_meta_value "$1" effective_mode)
+  [ -n "$effective" ] || effective=$(fm_dod_meta_value "$1" mode)
+  printf '%s\n' "$effective"
 }

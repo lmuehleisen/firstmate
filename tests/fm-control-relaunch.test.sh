@@ -1166,7 +1166,7 @@ test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch() {
 }
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
-  local dir home id brief launch out mode rule
+  local dir home id brief launch out mode effective rule
   for mode in no-mistakes direct-PR local-only; do
     id="rl-promoted-${mode}"
     dir=$(new_case "promoted-scout-$mode" "$id")
@@ -1226,7 +1226,10 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       "$mode: the replacement launch did not receive the scratch-state inventory step"
     assert_grep 'Carry over only the intended fix changes' "$launch" \
       "$mode: the replacement launch did not receive the carry-over boundary"
-    assert_grep "Delivery contract: mode=$mode" "$launch" \
+    # Without config/no-mistakes the no-mistakes token records its effective mode.
+    effective=$mode
+    [ "$mode" != no-mistakes ] || effective=direct-PR
+    assert_grep "Delivery contract: mode=$effective" "$launch" \
       "$mode: the replacement launch did not receive the actual ship delivery mode"
   done
   pass "fm-promote/fm-spawn --relaunch: the current ship contract supersedes stale scout delivery text"

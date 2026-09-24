@@ -45,8 +45,10 @@
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
-#   no-mistakes  ships like direct-PR; with config/no-mistakes present (this home's
-#                opt-in, docs/configuration.md) it renders the real pipeline contract:
+#   no-mistakes  renders the direct-PR contract, whose Delivery contract line says
+#                mode=direct-PR and which ends with a note naming the no-mistakes token;
+#                with config/no-mistakes present (this home's opt-in,
+#                docs/configuration.md) it renders the real pipeline contract:
 #                implement -> no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
@@ -318,12 +320,13 @@ BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
 
+# The rendered contract follows the effective mode (bin/fm-dod-lib.sh), so a
+# no-mistakes token ships direct-PR unless config/no-mistakes opts this home in.
 ASK_USER_BLOCK=
-DOD_PIPELINE=
-if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
-  && [ "$(fm_no_mistakes_pipeline_state "$CONFIG")" != off ]; then
-  DOD_PIPELINE=pipeline
-  ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
+EFFECTIVE_MODE=
+if [ "$KIND" = ship ]; then
+  EFFECTIVE_MODE=$(fm_effective_delivery_mode "$MODE" "$CONFIG")
+  [ "$EFFECTIVE_MODE" != no-mistakes ] || ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
 fi
 
 shell_quote() {
@@ -558,19 +561,17 @@ fi
 # bin/fm-spawn.sh checks against its own explicit --mode and the project's
 # registered forge before launching.
 RULE7='7. Do not install or invoke no-mistakes, gh-axi, chrome-devtools-axi, or lavish-axi.'
-case "$MODE" in
+case "$EFFECTIVE_MODE" in
   direct-PR)
     SETUP2=""
     ;;
   local-only)
     SETUP2=""
     ;;
-  *)  # no-mistakes (ships like direct-PR unless config/no-mistakes opts in)
-    SETUP2=""
-    if [ -n "$DOD_PIPELINE" ]; then
-      SETUP2="
+  *)  # no-mistakes, only when config/no-mistakes opts this home in
+    SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-      RULE7="7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
+    RULE7="7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
    manages the daemon.
    Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
@@ -583,11 +584,11 @@ case "$MODE" in
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
    Do not install no-mistakes, gh-axi, chrome-devtools-axi, or lavish-axi, and do not invoke gh-axi, chrome-devtools-axi, or lavish-axi."
-    fi
     ;;
 esac
-RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$DOD_PIPELINE") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$DOD_PIPELINE") || exit 1
+RULE1=$(fm_ship_rule_one "$EFFECTIVE_MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
+DOD=$(fm_dod_block "$EFFECTIVE_MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
+[ "$EFFECTIVE_MODE" = "$MODE" ] || DOD=$DOD$'\n'$(fm_no_mistakes_remap_note)
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
