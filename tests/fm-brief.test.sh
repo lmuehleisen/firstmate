@@ -954,6 +954,8 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
   assert_no_grep "host the Lavish review loop" "$brief" \
     "scout brief must not reinstate Lavish"
+  assert_grep "Lavish is not available to this fork's workers" "$brief" \
+    "scout brief must declare Lavish unavailable, so AGENTS.md's Lavish board line does not apply"
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
