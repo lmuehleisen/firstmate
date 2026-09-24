@@ -348,7 +348,7 @@ review_thread_query_id() {
 # the call keeps its never-approve escalation.
 own_pr_review_write() {
   local cmd=$1 k n w endpoint='' pattern repo num kind tid got
-  local body='' body_raw=0 nbody=0 reply='' nreply=0 query='' nquery=0 nfield=0
+  local text='' text_raw=0 nbody=0 reply='' nreply=0 query='' nquery=0 nfield=0
   OWN_PR_SHAPE=''
   # The tokenizer approximates ANSI-C quoting, so its words are not trusted.
   case "$cmd" in *"\$'"*) return 1 ;; esac
@@ -363,7 +363,7 @@ own_pr_review_write() {
   _field() {  # <raw-flag> <key=value>
     nfield=$((nfield + 1))
     case "$2" in
-      body=*) nbody=$((nbody + 1)) body=${2#body=} body_raw=$1 ;;
+      body=*) nbody=$((nbody + 1)) text=${2#body=} text_raw=$1 ;;
       in_reply_to=*) nreply=$((nreply + 1)) reply=${2#in_reply_to=} ;;
       query=*) [ "$1" = 1 ] && nquery=$((nquery + 1)) query=${2#query=} ;;
     esac
@@ -391,12 +391,12 @@ own_pr_review_write() {
     repo=$(lower "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}") kind=${BASH_REMATCH[3]} num=${BASH_REMATCH[4]}
     if [ "$kind" = pulls ]; then
       # -F reads a file for an @value, so a typed body must not start with @.
-      [ "$nfield" = 2 ] && [ "$nbody" = 1 ] && [ "$nreply" = 1 ] && [ -n "$body" ] \
+      [ "$nfield" = 2 ] && [ "$nbody" = 1 ] && [ "$nreply" = 1 ] && [ -n "$text" ] \
         && [[ $reply =~ ^[1-9][0-9]*$ ]] || return 1
-      [ "$body_raw" = 1 ] || [ "${body#@}" = "$body" ] || return 1
+      [ "$text_raw" = 1 ] || [ "${text#@}" = "$text" ] || return 1
       OWN_PR_SHAPE='a reply to a review comment'
     else
-      [ "$nfield" = 1 ] && [ "$nbody" = 1 ] && [ "$body_raw" = 1 ] && [ "$body" = '@codex review' ] || return 1
+      [ "$nfield" = 1 ] && [ "$nbody" = 1 ] && [ "$text_raw" = 1 ] && [ "$text" = '@codex review' ] || return 1
       OWN_PR_SHAPE='a Codex re-review request'
     fi
     own_pr && [ "$repo" = "$OWN_PR_REPO" ] && [ "$num" = "$OWN_PR_NUMBER" ] || { OWN_PR_SHAPE=''; return 1; }
@@ -406,6 +406,7 @@ own_pr_review_write() {
   tid=$(review_thread_query_id "$query") || return 1
   own_pr || return 1
   # Ownership is read back from the forge: the thread must sit on this PR.
+  # shellcheck disable=SC2016  # $id is a GraphQL variable, not a shell one.
   got=$(fm_run_timed 15 gh api graphql \
     -f query='query($id: ID!) { node(id: $id) { ... on PullRequestReviewThread { pullRequest { number repository { nameWithOwner } } } } }' \
     -f id="$tid" --jq '.data.node.pullRequest | "\(.repository.nameWithOwner) \(.number)"' 2>/dev/null) || return 1

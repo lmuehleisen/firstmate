@@ -883,8 +883,8 @@ gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body='Fixed.
 EOF
 
   wt=$(jq -r .worktree "$policy")
-  git -C "$wt" init -q -b fm/t1 && git -C "$wt" remote add origin https://github.com/Owner/Name.git \
-    || fail "cannot build the branch fixture"
+  git -C "$wt" init -q -b fm/t1 || fail "cannot build the branch fixture"
+  git -C "$wt" remote add origin https://github.com/Owner/Name.git || fail "cannot set the fixture's origin"
   printf 'window=x\nkind=ship\n' > "$dir/state/t1.meta"
   printf '41 Owner\n' > "$dir/gh-prlist"
   expect_own_pr_approved "$policy" "the task branch's open PR" <<'EOF'
