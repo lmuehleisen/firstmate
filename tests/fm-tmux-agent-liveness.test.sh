@@ -499,6 +499,10 @@ window_id=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "=$SESSION:=fm-prese
 [ "$(fm_backend_tmux_target_presence "no-such-session:fm-present")" = missing ] || fail "a missing session must read missing"
 [ "$(PATH=/nonexistent fm_backend_tmux_target_presence "$SESSION:fm-present")" = unreadable ] \
   || fail "a tmux that cannot be run must read unreadable, never missing"
+[ "$(set -e; fm_backend_tmux_target_presence "no-such-session:fm-present")" = missing ] \
+  || fail "a missing session must read missing under a caller's set -e"
+[ "$(set -e; PATH=/nonexistent fm_backend_tmux_target_presence "$SESSION:fm-present")" = unreadable ] \
+  || fail "an unrunnable tmux must read unreadable under a caller's set -e"
 pass "tmux presence: =session, window-id, and index targets keep their verdicts; an unrunnable tmux is unreadable"
 
 # fm-crew-state routes through the same probe: a gone window with a stale busy
