@@ -2,10 +2,11 @@
 # tests/fm-control-relaunch-bindings.test.sh - relaunch keeps a task's durable
 # bindings intact (bin/fm-control.sh relaunch and bin/fm-spawn.sh --relaunch).
 #
-# A relaunch that rewrites task metadata keeps an armed merge poll bound, and a
+# A relaunch that rewrites task metadata keeps an armed merge poll bound, a
 # relaunch reuses its own worktree claim while refusing another task's claim on
-# the same copy. The shared relaunch transaction cases live in
-# tests/fm-control-relaunch.test.sh.
+# the same copy, and a relaunch away from devin retires exactly the
+# firstmate-owned wiring while leaving project-owned .devin content. The shared
+# relaunch transaction cases live in tests/fm-control-relaunch.test.sh.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -140,7 +141,9 @@ run_control() {  # <case-dir> <args...>
   # fm-control.sh, so this runs against a throwaway HOME;
   # without it this suite would write the developer's real ~/.claude.json.
   mkdir -p "$dir/user-home"
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
@@ -153,7 +156,9 @@ run_spawn() {  # <case-dir> <args...>
   # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
   # without it this suite would write the developer's real ~/.claude.json.
   mkdir -p "$dir/user-home"
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
@@ -205,5 +210,123 @@ test_spawn_relaunch_refuses_another_tasks_worktree_claim() {
   pass "fm-spawn --relaunch: reuses its own claim but refuses a competing task's claim"
 }
 
+test_devin_pending_permission_escalation_is_retired_on_a_harness_switch() {
+  local dir state key=devin-permission-exec_1-dead
+  command -v jq >/dev/null 2>&1 || { printf 'skip - devin pending escalation retirement: jq not installed\n'; return 0; }
+  dir=$(new_case devinpending rl36)
+  add_ship_task "$dir" rl36 devin
+  state="$dir/home/state"
+  jq -n --arg s "$state" '{task:"rl36", status:($s+"/rl36.status"), log:($s+"/devin-permission-log.jsonl")}' \
+    > "$state/rl36.devin-permission.json"
+  # A Devin worker that died while waiting at an escalated permission prompt.
+  mkdir -p "$state/rl36.devin-permission-pending"
+  printf '%s\n%s\n' "$key" "npm install" > "$state/rl36.devin-permission-pending/exec_1-dead.pending"
+  printf 'needs-decision [key=%s]: Devin is waiting at a permission prompt for exec: npm install\n' "$key" \
+    > "$state/rl36.status"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl36 --relaunch --harness claude >/dev/null
+  [ ! -e "$state/rl36.devin-permission-pending" ] \
+    || fail "the retired devin incarnation's pending escalation markers must not outlive it"
+  [ ! -e "$state/rl36.devin-permission.json" ] || fail "the devin permission policy file must be retired"
+  grep -qF "resolved [key=$key]: " "$state/rl36.status" \
+    || fail "the orphaned escalation must be closed in the status log: $(cat "$state/rl36.status")"
+  [ "$(jq -r 'select(.decider == "prompt") | .decision' "$state/devin-permission-log.jsonl")" = not-run ] \
+    || fail "the orphaned escalation must be logged as not-run"
+  pass "fm-spawn --relaunch: switching away from devin closes and retires its pending permission escalations"
+}
+
+# A devin incarnation leaves two firstmate-owned files under the worktree's
+# .devin/; a pooled slot keeps them across reset/clean because both sit in git
+# info/exclude. Retiring the files without their directories still strands the
+# shell of the wiring - the next devin spawn into that slot then refuses on the
+# leftover - so the directories go too, but only while empty.
+test_devin_worktree_wiring_is_retired_on_a_harness_switch() {
+  local dir state
+  dir=$(new_case devinwiring rl37)
+  add_ship_task "$dir" rl37 devin
+  state="$dir/home/state"
+  mkdir -p "$dir/wt/.devin/rules"
+  printf '{"attribution":false}\n' > "$dir/wt/.devin/config.local.json"
+  printf 'no attribution\n' > "$dir/wt/.devin/rules/firstmate-attribution.md"
+  printf '{"task":"rl37","status":"%s","log":"%s"}\n' \
+    "$state/rl37.status" "$state/devin-permission-log.jsonl" \
+    > "$state/rl37.devin-permission.json"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl37 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunch away from devin should succeed"$'\n'"$out"
+  [ ! -e "$dir/wt/.devin/config.local.json" ] \
+    || fail "the retired devin incarnation's config.local.json must not outlive it"
+  [ ! -e "$dir/wt/.devin/rules/firstmate-attribution.md" ] \
+    || fail "the retired devin incarnation's attribution rule must not outlive it"
+  [ ! -e "$state/rl37.devin-permission.json" ] \
+    || fail "the retired devin incarnation's permission policy file must not outlive it"
+  [ ! -d "$dir/wt/.devin/rules" ] \
+    || fail "the emptied .devin/rules directory must not outlive the retired devin incarnation"
+  [ ! -d "$dir/wt/.devin" ] \
+    || fail "the emptied .devin directory must not outlive the retired devin incarnation"
+  pass "fm-spawn --relaunch: switching away from devin retires its worktree wiring and emptied directories"
+}
+
+test_devin_relaunch_keeps_project_owned_devin_content() {
+  local dir
+  dir=$(new_case devinkeep rl38)
+  add_ship_task "$dir" rl38 devin
+  mkdir -p "$dir/wt/.devin/rules"
+  printf '{"attribution":false}\n' > "$dir/wt/.devin/config.local.json"
+  printf 'no attribution\n' > "$dir/wt/.devin/rules/firstmate-attribution.md"
+  printf 'project rule\n' > "$dir/wt/.devin/rules/project-rule.md"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl38 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunch away from devin should succeed"$'\n'"$out"
+  [ ! -e "$dir/wt/.devin/config.local.json" ] \
+    || fail "the retired devin incarnation's config.local.json must not outlive it"
+  [ ! -e "$dir/wt/.devin/rules/firstmate-attribution.md" ] \
+    || fail "the retired devin incarnation's attribution rule must not outlive it"
+  [ -f "$dir/wt/.devin/rules/project-rule.md" ] \
+    || fail "a relaunch must not remove project-owned .devin content"
+  [ -d "$dir/wt/.devin/rules" ] && [ -d "$dir/wt/.devin" ] \
+    || fail ".devin directories that still hold project content must survive a relaunch away from devin"
+  pass "fm-spawn --relaunch: switching away from devin keeps project-owned .devin content and its directories"
+}
+
+# A devin worker can also make a managed path project-owned mid-task by
+# committing it (the Exec allowlist permits git add/commit). Once git tracks
+# the file it is the project's own, so the harness switch must leave it -
+# tearing it out would strand a dirty worktree missing a tracked file.
+test_devin_relaunch_keeps_a_tracked_attribution_rule() {
+  local dir state
+  dir=$(new_case devintracked rl39)
+  add_ship_task "$dir" rl39 devin
+  state="$dir/home/state"
+  mkdir -p "$dir/wt/.devin/rules"
+  printf '{"attribution":false}\n' > "$dir/wt/.devin/config.local.json"
+  printf 'no attribution\n' > "$dir/wt/.devin/rules/firstmate-attribution.md"
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    add .devin/rules/firstmate-attribution.md
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "Worker committed the attribution rule"
+  printf '{"task":"rl39","status":"%s","log":"%s"}\n' \
+    "$state/rl39.status" "$state/devin-permission-log.jsonl" \
+    > "$state/rl39.devin-permission.json"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl39 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunch away from devin should succeed"$'\n'"$out"
+  [ ! -e "$dir/wt/.devin/config.local.json" ] \
+    || fail "the retired devin incarnation's untracked config.local.json must not outlive it"
+  [ ! -e "$state/rl39.devin-permission.json" ] \
+    || fail "the retired devin incarnation's permission policy file must not outlive it"
+  [ -f "$dir/wt/.devin/rules/firstmate-attribution.md" ] \
+    || fail "a relaunch must never remove a git-tracked .devin/rules/firstmate-attribution.md"
+  [ -d "$dir/wt/.devin/rules" ] && [ -d "$dir/wt/.devin" ] \
+    || fail ".devin directories that still hold a tracked file must survive a relaunch away from devin"
+  [ -z "$(git -C "$dir/wt" status --porcelain)" ] \
+    || fail "a retained tracked file must leave the worktree clean: $(git -C "$dir/wt" status --porcelain)"
+  pass "fm-spawn --relaunch: switching away from devin keeps a git-tracked attribution rule"
+}
+
 test_relaunch_does_not_disarm_an_armed_merge_poll
 test_spawn_relaunch_refuses_another_tasks_worktree_claim
+test_devin_pending_permission_escalation_is_retired_on_a_harness_switch
+test_devin_worktree_wiring_is_retired_on_a_harness_switch
+test_devin_relaunch_keeps_project_owned_devin_content
+test_devin_relaunch_keeps_a_tracked_attribution_rule
