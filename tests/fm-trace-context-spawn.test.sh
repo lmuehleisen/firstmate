@@ -34,7 +34,9 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-  *"#{pane_current_command}"*) printf 'zsh\n'; exit 0 ;;
+  *"#{pane_current_command}"*)
+    if [ -s "$FM_FAKE_LAUNCH_LOG.command" ]; then cat "$FM_FAKE_LAUNCH_LOG.command"; else printf 'zsh\n'; fi
+    exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -44,6 +46,10 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    case "$*" in *'encode launch-brief'*) printf 'claude\n' > "$FM_FAKE_LAUNCH_LOG.pending-command" ;; esac
+    if [ "${*: -1}" = Enter ] && [ -f "$FM_FAKE_LAUNCH_LOG.pending-command" ]; then
+      mv "$FM_FAKE_LAUNCH_LOG.pending-command" "$FM_FAKE_LAUNCH_LOG.command"
+    fi
     if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
       for a in "$@"; do
         case "$a" in
@@ -433,7 +439,8 @@ test_relaunch_reuses_recorded_carrier() {
 
   # Relaunch the same task: the recorded carrier must be reused verbatim for both
   # the meta and the injected export, so an observer keeps one identity across
-  # restarts.
+  # restarts. Model the previous agent exiting to its shell first.
+  rm "$LAUNCH_LOG.command"
   out=$(FM_FAKE_DUPLICATE_WINDOW="fm-$CASE_ID" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" --relaunch)
   status=$?
@@ -569,6 +576,7 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
 
   # Same environment, same task: a relaunch must reuse task A's recorded
   # carrier verbatim, so the per-task boundary never costs recovery identity.
+  rm "$log_a.command" # Model task A's agent exiting before replacement.
   out=$(TRACEPARENT="$sm_tp" FM_FAKE_DUPLICATE_WINDOW="fm-$id_a" \
     run_spawn "$sm" "$wt_a" "$fakebin" "$log_a" "$id_a" --relaunch)
   status=$?

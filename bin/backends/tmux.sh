@@ -66,6 +66,12 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# Shell execution verification is separate from agent-composer submission.
+# The shared owner takes already-typed text and a caller execution postcondition.
+fm_backend_tmux_submit_shell_enter() { # <target> <text> <postcondition> [args...]
+  fm_tmux_shell_submit_enter "$@"
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
@@ -113,12 +119,15 @@ fm_backend_tmux_current_path() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
 }
 
-# fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
-# composer verification - used for the fixed spawn-time commands
-# (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
-# inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
-fm_backend_tmux_send_text_line() {  # <target> <text>
-  tmux send-keys -t "$1" "$2" Enter
+# fm_backend_tmux_send_text_line: shell TEXT followed by Enter by default.
+# --defer-enter preserves the shell-text transport while letting the caller
+# settle and use fm_backend_tmux_submit_shell_enter for execution verification.
+fm_backend_tmux_send_text_line() { # <target> <text> [--defer-enter]
+  case "${3:-}" in
+    '') tmux send-keys -t "$1" "$2" Enter ;;
+    --defer-enter) tmux send-keys -t "$1" "$2" ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_backend_tmux_send_literal: send TEXT as literal bytes with no

@@ -8,7 +8,7 @@
 #
 # Composer shapes and verdicts are owned by bin/fm-composer-lib.sh.
 # This file owns only tmux's styled capture, cursor and Pi identity primitives,
-# delivery busy read, and submit conversions that consume the shared verdict.
+# delivery busy read, agent-submit conversions, and shell-command submission.
 # Styled captures remain internal; fm-peek and every human-facing capture stay
 # plain.
 #
@@ -288,4 +288,65 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
+}
+
+# Shell commands cannot use an agent-composer verdict. The caller supplies an
+# execution postcondition (leased cwd or agent liveness), never a key-send test.
+# Retry keys require the exact owned line at a shell cursor. Joined wrapped rows
+# include history so long launch lines remain inspectable. A transcript match
+# above the cursor or another foreground program never authorizes a retry.
+# Returns 0 for owned pending input, 1 for another line, 2 for unreadable input.
+fm_tmux_shell_line_pending() { # <target> <text>
+  local target=$1 text=$2 command cursor screen cursor_line line
+  command=$(tmux display-message -p -t "$target" '#{pane_current_command}') || return 2
+  case "$command" in bash|zsh|sh|dash|ksh|fish|-bash|-zsh|-sh) ;; *) return 2 ;; esac
+  cursor=$(tmux display-message -p -t "$target" '#{cursor_y}') || return 2
+  case "$cursor" in ''|*[!0-9]*) return 2 ;; esac
+  # Preserve terminal row endings across command substitution. Remove only
+  # capture-pane's final terminator, so a blank cursor row stays distinguishable
+  # from the submitted command echoed immediately above it.
+  screen=$(tmux capture-pane -p -J -t "$target" -S - -E "$cursor" && printf '.') || return 2
+  screen=${screen%.}
+  screen=${screen%$'\n'}
+  cursor_line=${screen##*$'\n'}
+  [[ "$cursor_line" == *[![:space:]]* ]] || return 1
+  # ZLE can redraw a wrapped command with explicit row moves rather than
+  # terminal autowrap, so tmux -J alone may retain newlines inside the input.
+  # Require the full command as the suffix ending at the cursor row either way.
+  line=${screen//$'\n'/}
+  [ -n "$text" ] && [[ "$line" == *"$text" ]]
+}
+
+# <target> <already-typed-text> <postcondition-function> [postcondition-args...]
+# At most three Enter attempts over 20 half-second polls. The first Enter is
+# unconditional; subsequent keys require exact ownership above. A failed send
+# can still have executed, so always inspect the postcondition. On exhaustion,
+# clear only proven owned input and report whether cleanup could be confirmed.
+# Callers must stop on failure, never append another command to uncertain input.
+fm_tmux_shell_submit_enter() {
+  local target=$1 text=$2 verify=$3 poll attempt=1 pending_status
+  shift 3
+  tmux send-keys -t "$target" Enter 2>/dev/null || true
+  for ((poll=0; poll<20; poll++)); do
+    sleep 0.5
+    "$verify" "$@" && return 0
+    if [ "$attempt" -lt 3 ] && fm_tmux_shell_line_pending "$target" "$text"; then
+      tmux send-keys -t "$target" Enter 2>/dev/null || true
+      attempt=$((attempt + 1))
+    fi
+  done
+  if fm_tmux_shell_line_pending "$target" "$text"; then
+    tmux send-keys -t "$target" C-u 2>/dev/null || true
+    sleep 0.3
+    pending_status=0
+    fm_tmux_shell_line_pending "$target" "$text" || pending_status=$?
+    if [ "$pending_status" = 1 ]; then
+      echo "error: shell command did not run in $target after $attempt Enter attempts; cleared owned input" >&2
+    else
+      echo "error: shell command did not run in $target after $attempt Enter attempts; owned input cleanup could not be confirmed" >&2
+    fi
+  else
+    echo "error: shell command execution unconfirmed in $target; input ownership is unproven, so no cleanup keys were sent" >&2
+  fi
+  return 1
 }

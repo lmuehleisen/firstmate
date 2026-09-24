@@ -303,7 +303,9 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
   # The relaunch agent-state classifier reads the pane's foreground command;
   # a shell name is the positively agent-free answer it requires.
-  *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-bash}"; exit 0 ;;
+  *"#{pane_current_command}"*)
+    if [ -s "$FM_FAKE_LAUNCH_LOG.command" ]; then cat "$FM_FAKE_LAUNCH_LOG.command"; else printf '%s\n' "${FM_FAKE_PANE_COMMAND:-bash}"; fi
+    exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -337,6 +339,10 @@ case "${1:-}" in
       if [ "$prev" = -l ]; then
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
         case "$arg" in
+          *' claude '*) printf 'claude\n' > "$FM_FAKE_LAUNCH_LOG.pending-command" ;;
+          *.agy-hooks*) printf 'agy\n' > "$FM_FAKE_LAUNCH_LOG.pending-command" ;;
+        esac
+        case "$arg" in
           *.agy-hooks*)
             printf '%s\n' "$arg" | grep -o "[^' ]*\.agy-hooks" | head -n 1 \
               > "$FM_FAKE_LAUNCH_LOG.agy-hooks"
@@ -346,6 +352,9 @@ case "${1:-}" in
       fi
       prev=$arg
     done
+    if [ "${*: -1}" = Enter ] && [ -f "$FM_FAKE_LAUNCH_LOG.pending-command" ]; then
+      mv "$FM_FAKE_LAUNCH_LOG.pending-command" "$FM_FAKE_LAUNCH_LOG.command"
+    fi
     # Stand-in for agy starting its brief: the Enter that submits the launch
     # line runs every installed worker PreInvocation hook in array order with
     # the payload agy sends, unless the case models a launch that never
@@ -1238,6 +1247,7 @@ EOF
   [ -n "$gen1" ] || fail "the first spawn left no generation-stamped armed line"
   # A same-harness scout relaunch keeps the posture: the adapter re-arms with
   # the NEW generation and the canary trusts that line, not the stale one.
+  rm "$home/launch.log.command" # Model the previous agent exiting to its shell.
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -1258,8 +1268,8 @@ EOF
     || fail "the relaunch must keep the recorded bypass posture"
   # A relaunch resolving onto a different harness drops the posture: no
   # bypass flag on the new launch line, and the agy wiring is retired. The
-  # claude replacement cannot report its start in this fixture - only the
-  # launch line and the retired wiring matter here.
+  # claude replacement changes the fixture's foreground command on Enter;
+  # the launch line and the retired wiring must still match the new harness.
   fields=$(make_spawn_case bypass-relaunch-switch)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $fields
@@ -1270,6 +1280,7 @@ EOF
   mkdir -p "$case_dir/user-home"
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --agy-bypass) \
     || fail "the initial bypass spawn must succeed: $out"
+  rm "$home/launch.log.command" # Model the previous agent exiting to its shell.
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -1298,6 +1309,7 @@ EOF
     || fail "the initial bypass spawn must succeed: $out"
   sed -i '' 's/^kind=scout$/kind=ship/' "$home/state/$id.meta" 2>/dev/null \
     || sed -i 's/^kind=scout$/kind=ship/' "$home/state/$id.meta"
+  rm "$home/launch.log.command" # Model the previous agent exiting to its shell.
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \

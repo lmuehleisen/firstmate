@@ -44,6 +44,15 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ## Current behavior and safety
 
+### Shell command submission
+
+Worktree entry and replacement-agent launch use the shell-submit owner in `bin/fm-tmux-lib.sh`, reached through `bin/backends/tmux.sh`.
+`bin/fm-spawn.sh` supplies the execution proof: the exact leased working directory, an identifiable agent process, or a changed foreground command after launch.
+The control plane still requires a running agent before reporting a successful relaunch.
+When Enter is lost, retries require the complete owned command at the shell cursor; an exhausted submission stops dispatch and clears only identifiable owned input.
+Unreadable or changed input is preserved and reported for inspection.
+The real-shell regression and verified versions are recorded in [runtime backend verification](verification/runtime-backends.md#shell-command-submission).
+
 ### Agent liveness probe
 
 A target-existence check proves only that the pane exists, and it reads that from an exact inventory of the `=`-anchored session, never from `display-message` exiting 0, which tmux does for any target while a server runs.
