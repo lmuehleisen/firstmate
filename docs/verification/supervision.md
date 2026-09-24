@@ -8,7 +8,7 @@ Task-specific chronology, temporary paths, run identifiers, and delivery transcr
 
 ## Native session-start delivery
 
-The [Agy native startup verification](runtime-backends.md#primary-and-secondmate-supervision) records the opening-invocation nudge and real session ownership.
+The [Agy native startup verification](runtime-backends-fork.md#primary-and-secondmate-supervision) records the opening-invocation nudge and real session ownership.
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
 
@@ -272,7 +272,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The [Agy primary and secondmate verification](runtime-backends.md#primary-and-secondmate-supervision) records bounded Stop continuation and real watcher-completion delivery.
+The [Agy primary and secondmate verification](runtime-backends-fork.md#primary-and-secondmate-supervision) records bounded Stop continuation and real watcher-completion delivery.
 
 The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-21, with Claude's replacement Stop-owned path revalidated on 2026-09-21, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.
 

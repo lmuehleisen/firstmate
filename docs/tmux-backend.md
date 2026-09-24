@@ -51,7 +51,7 @@ Worktree entry and replacement-agent launch use the shell-submit owner in `bin/f
 The control plane still requires a running agent before reporting a successful relaunch.
 When Enter is lost, retries require the complete owned command at the shell cursor; an exhausted submission stops dispatch and clears only identifiable owned input.
 Unreadable or changed input is preserved and reported for inspection.
-The real-shell regression and verified versions are recorded in [runtime backend verification](verification/runtime-backends.md#shell-command-submission).
+The real-shell regression and verified versions are recorded in [runtime backend verification](verification/runtime-backends-fork.md#shell-command-submission).
 
 ### Agent liveness probe
 
