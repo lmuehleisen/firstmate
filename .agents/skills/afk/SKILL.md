@@ -41,12 +41,13 @@ Hold-for-return is the default and the only reach profile this release records: 
 4. **Per harness, after the record exists:**
    - **Pi and pi-signed**: stop here.
      The away daemon is no longer launched on Pi; the ordinary supervision session (`docs/pi-supervision-branch.md`) keeps running with the record present, and `bin/fm-afk-launch.sh start` refuses on these harnesses.
-   - **Harness WITH a native in-pane tracked-background tool** (claude's background bash, grok's background tool): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
+   - **grok** (its native in-pane background tool): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
-   - **Every other harness** (codex, opencode, omp, kimi, cursor): run `bin/fm-afk-launch.sh start`.
-     It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend and passes the captain pane in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own new pane (docs/herdr-backend.md "Away-mode supervisor support").
+   - **Every other harness** (claude, codex, opencode, omp, kimi, cursor): run `bin/fm-afk-launch.sh start`.
+     It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend and passes the captain pane in as `FM_SUPERVISOR_TARGET`, and the detected primary harness in as `FM_DAEMON_PRIMARY_HARNESS`, so the daemon injects into the captain, not its own new pane, and its busy guard reads the captain's harness (docs/herdr-backend.md "Away-mode supervisor support").
+     Claude uses this path, not its background bash tool, because Claude Code's background-task manager has killed the native daemon job mid-window while the session stayed alive.
    Both daemon paths require the already-confirmed record and share `bin/fm-afk-start.sh` as the daemon entry.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
 5. **Do not separately arm `fm-watch.sh` where the daemon runs.** The daemon manages the watcher as its child; the singleton lock no-ops a stray arm harmlessly.
@@ -181,12 +182,17 @@ immediate) and flushed as one single-line digest prefixed with the current
 operational prefix, carrying pre-read status summaries and a recommended action.
 The single-line format makes the submission unambiguous across harnesses, and
 the operational prefix lets firstmate distinguish it from a real captain message.
+A digest longer than `FM_INJECT_INLINE_MAX` (default 480 characters) is written to a file under `state/.subsuper-digests/`, and the typed line names that file instead of carrying the events; read the named file before acting, because it holds the whole escalation.
+A long typed burst is folded, either wrapped as pasted content or cut to its tail, which moves the header off the first character and reads as the captain returning.
 
 ### Injection hardening
 
 - **Single-line digest** - embedded newlines are collapsed to a literal
   separator before injection, so submission is unambiguous regardless of
   harness.
+- **Short typed line** - a digest over `FM_INJECT_INLINE_MAX` is typed as a
+  pointer to its digest file, so no typed line is long enough to be folded as
+  pasted content.
 - **Busy and composer guards on the supervisor pane** - before injecting, the daemon runs the detected-primary-harness rendered busy guard and reads `fm_backend_composer_state` directly.
   Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
   Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.

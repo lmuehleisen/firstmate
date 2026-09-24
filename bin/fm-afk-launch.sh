@@ -22,8 +22,10 @@
 #
 # Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
-# terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
+# terminal it is already in. A harness with a native in-pane tracked-background
+# tool that keeps the job alive (grok) runs it there directly. Claude Code's
+# background-task manager has killed that job mid-window, so claude takes the
+# terminal path below like every other harness. A harness with NO
 # native background mechanism (pi) has to manufacture a terminal, and doing that
 # by SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
@@ -239,6 +241,22 @@ fm_afk_launch_confirm() {
 # daemon entry; a test overrides it with a harmless placeholder.
 fm_afk_launch_entry_cmd() {
   printf '%s' "${FM_AFK_LAUNCH_ENTRY:-$FM_ROOT/bin/fm-afk-start.sh}"
+}
+
+# The command the created terminal runs. The daemon cannot see the captain's
+# harness from a separate terminal (no harness ancestor, no inherited marker), so
+# its primary-pane busy guard would match nothing and let it type into a pane that
+# is mid-turn. Capture the harness here, in the captain's process tree, and hand
+# it over with the captain pane.
+fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend> <entry>
+  local harness harness_env=''
+  harness=$(fm_afk_launch_primary_harness)
+  case "$harness" in
+    ''|unknown) ;;
+    *) harness_env=$(printf ' FM_DAEMON_PRIMARY_HARNESS=%q' "$harness") ;;
+  esac
+  printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q%s %q' \
+    "$FM_HOME" "$1" "$2" "$harness_env" "$3"
 }
 
 fm_afk_launch_record_write() {  # <backend> <target> <extra>
@@ -504,8 +522,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend" "$entry")
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_afk_launch_close_terminal herdr "$session:$pane"
@@ -531,8 +548,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend" "$entry")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1

@@ -897,6 +897,36 @@ unit_tmux_planned_record_and_collision() {
   rm -rf "$st"
 }
 
+# The detached daemon has no harness ancestor of its own, so the launcher must hand
+# it the captain's harness or its primary-pane busy guard matches nothing.
+unit_tmux_launch_hands_over_primary_harness() {
+  local st harness got
+  for harness in claude unknown; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-harness.XXXXXX")
+    mkdir -p "$st/state"
+    # shellcheck disable=SC2016 # The variables expand in the generated entry script.
+    printf '#!/bin/sh\nprintf "%%s" "${FM_DAEMON_PRIMARY_HARNESS-<unset>}" > "$FM_HOME/daemon-harness"\n' > "$st/entry"
+    chmod +x "$st/entry"
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY="$st/entry" FM_TEST_HARNESS="$harness" bash -c '
+      . "$1"
+      fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }
+      fm_afk_launch_commit_terminal() { :; }
+      tmux() {
+        [ "$1" = new-session ] || return 0
+        env -u FM_DAEMON_PRIMARY_HARNESS bash -c "$5"
+      }
+      fm_afk_launch_create_tmux %7 tmux
+    ' _ "$LAUNCH" >/dev/null 2>&1
+    got=$(cat "$st/daemon-harness" 2>/dev/null || printf '<not run>')
+    case "$harness:$got" in
+      claude:claude) pass "tmux launch: daemon receives the captain's detected harness" ;;
+      unknown:'<unset>') pass "tmux launch: an unknown harness is left to the daemon's own detection" ;;
+      *) fail "tmux launch: harness $harness reached the daemon as $got" ;;
+    esac
+    rm -rf "$st"
+  done
+}
+
 unit_stop_validates_before_signal() {
   local st sleeper_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-validate.XXXXXX")
@@ -1217,6 +1247,7 @@ unit_record_publication_atomic
 unit_malformed_record_fails_closed
 unit_stop_malformed_record_fails_closed
 unit_tmux_planned_record_and_collision
+unit_tmux_launch_hands_over_primary_harness
 unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
