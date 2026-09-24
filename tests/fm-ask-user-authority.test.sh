@@ -21,7 +21,7 @@ test_primary_and_secondmate_instruction_generation() {
     assert_grep 'If a decision belongs above the implementation worker (product choices, destructive actions),' "$ship" \
       "generated implementation brief does not identify decisions outside worker authority"
     # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-    assert_grep 'append `needs-decision: {summary of options}` and stop. Firstmate will reply with the decision.' "$ship" \
+    assert_grep 'append `needs-decision [at=<epoch>]: {summary of options}` and stop. Firstmate will reply with the decision.' "$ship" \
       "generated implementation brief bypasses firstmate decision routing"
     assert_grep 'Never merge a PR.' "$ship" \
       "generated implementation brief gives the worker merge authority"
