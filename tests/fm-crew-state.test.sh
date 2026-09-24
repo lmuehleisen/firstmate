@@ -298,7 +298,7 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_CONFIG_OVERRIDE="$1/config" "$CREW_STATE" "$2"
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -2159,9 +2159,6 @@ test_no_mistakes_prevalidation_done_stays_done() {
   fm_write_meta "$d/state/preval.meta" \
     "window=fm:fm-preval" "worktree=$d/wt" "project=$d/wt" \
     "kind=ship" "mode=no-mistakes" "harness=claude"
-  # The pipeline handoff exists only in a home opted in with config/no-mistakes.
-  mkdir -p "$d/config"
-  : > "$d/config/no-mistakes"
   printf 'done: implementation complete\n' > "$d/state/preval.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""

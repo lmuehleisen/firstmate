@@ -420,7 +420,7 @@ report_child_ledger_locked() { # <id> <meta>
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   if [ "$state" = "done" ] && [ ! -f "$(record_path "$fingerprint" reported)" ] \
     && [ ! -f "$(record_path "$fingerprint" pending)" ] \
-    && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(fm_dod_task_mode "$meta" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}")" \
+    && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(fm_dod_task_mode "$meta")" \
       "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
       "$STATE" "$id" "$meta" >/dev/null; then
     return 0

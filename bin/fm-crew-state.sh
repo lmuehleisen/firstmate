@@ -237,7 +237,7 @@ fi
 # not treated as finished-and-safe.
 emit_ship_status_done() {  # [extra-detail]
   local extra=${1:-} reason
-  if reason=$(fm_dod_accept_ship_done "$KIND" "$(fm_dod_task_mode "$META" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}")" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
+  if reason=$(fm_dod_accept_ship_done "$KIND" "$(fm_dod_task_mode "$META")" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
     emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
   fi
   emit blocked status-log "$reason"

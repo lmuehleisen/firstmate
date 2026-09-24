@@ -672,12 +672,12 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
 # line only from the brief's last `# Definition of done` section, the
 # machine-owned block this file renders, so the same text inside Task prose or
 # an example never counts.
-# fm_dod_task_mode <meta> [<config-dir>] is the mode the named-head gate judges a
-# task by: the effective_mode= bin/fm-spawn.sh and bin/fm-promote.sh record
-# beside mode=, or, for a record written before that field existed, the
-# recorded mode resolved against <config-dir>. A remapped no-mistakes task is
-# therefore judged as direct-PR on every forge, including Gerrit, where the
-# no-mistakes gate would demand a passed pipeline run that never happens.
+# fm_dod_task_mode <meta> is the mode the named-head gate judges a task by: the
+# effective_mode= bin/fm-spawn.sh and bin/fm-promote.sh record beside mode=, or
+# the recorded mode for a record written before that field existed. A remapped
+# no-mistakes task is therefore judged as direct-PR on every forge, including
+# Gerrit, where the no-mistakes gate would demand a passed pipeline run that
+# never happens.
 
 fm_no_mistakes_pipeline_state() {  # <config-dir>
   if [ ! -f "$1/no-mistakes" ]; then
@@ -710,17 +710,9 @@ fm_dod_pipeline_recorded() {  # <brief>
   ' "$1"
 }
 
-fm_dod_task_mode() {  # <meta> [<config-dir>]
-  local meta=$1 config=${2:-} effective mode
-  effective=$(fm_dod_meta_value "$meta" effective_mode)
-  if [ -n "$effective" ]; then
-    printf '%s\n' "$effective"
-    return 0
-  fi
-  mode=$(fm_dod_meta_value "$meta" mode)
-  if [ -n "$mode" ] && [ -n "$config" ]; then
-    fm_effective_delivery_mode "$mode" "$config"
-  else
-    printf '%s\n' "$mode"
-  fi
+fm_dod_task_mode() {  # <meta>
+  local effective
+  effective=$(fm_dod_meta_value "$1" effective_mode)
+  [ -n "$effective" ] || effective=$(fm_dod_meta_value "$1" mode)
+  printf '%s\n' "$effective"
 }

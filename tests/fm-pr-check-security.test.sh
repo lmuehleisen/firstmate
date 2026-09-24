@@ -131,9 +131,6 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
-  # These cases exercise the no-mistakes pipeline's gate, which this fork runs
-  # only in a home opted in with config/no-mistakes.
-  : > "$dir/home/config/no-mistakes"
   git -C "$dir/wt" init -q
   git -C "$dir/wt" commit -q --allow-empty -m init
   git -C "$dir/wt" update-ref refs/remotes/origin/main "$(git -C "$dir/wt" rev-parse HEAD)"
@@ -2110,16 +2107,14 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   pass "a no-mistakes Gerrit ready report requires the pipeline's fixes recovered into the published copy"
 }
 
-# Without config/no-mistakes a no-mistakes task never runs the pipeline, so its
-# Gerrit ready report is judged as direct-PR: the published tree alone decides,
-# and no run is consulted. That holds for a record carrying effective_mode= and
-# for one written before that field, resolved against the home's config; with
-# the opt-in present, the same legacy record still owes the pipeline's result.
+# Without config/no-mistakes a no-mistakes task never runs the pipeline, so spawn
+# records effective_mode=direct-PR and its Gerrit ready report is judged as
+# direct-PR: the published tree alone decides, and no run is consulted. A task
+# whose effective mode is no-mistakes still owes the pipeline's result.
 test_gerrit_remapped_no_mistakes_ready_gate_is_direct() {
   local dir state url head rc
   dir=$(make_case gerrit-remapped-gate)
   state="$dir/home/state"
-  rm -f "$dir/home/config/no-mistakes"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   url=https://gerrit.example/c/group/apps/console/+/4202
   printf 'value\n' > "$dir/wt/doc"
@@ -2137,15 +2132,8 @@ test_gerrit_remapped_no_mistakes_ready_gate_is_direct() {
   [ ! -s "$dir/nm.log" ] || fail "a remapped no-mistakes Gerrit publish consulted no-mistakes"
 
   url=https://gerrit.example/c/group/apps/console/+/4203
-  write_task_meta "$dir" task-legacy
-  FM_TEST_GERRIT_REVISION=$head FM_TEST_NM_FAIL=1 FM_TEST_NM_LOG="$dir/nm.log" \
-    run_check_entry "$dir" task-legacy "$url" >/dev/null \
-    || fail "a legacy no-mistakes record without the opt-in was judged as a pipeline task"
-  [ ! -s "$dir/nm.log" ] || fail "a legacy no-mistakes record without the opt-in consulted no-mistakes"
-
-  url=https://gerrit.example/c/group/apps/console/+/4204
-  : > "$dir/home/config/no-mistakes"
   write_task_meta "$dir" task-opted
+  printf 'effective_mode=no-mistakes\n' >> "$state/task-opted.meta"
   set +e
   FM_TEST_GERRIT_REVISION=$head FM_TEST_NM_FAIL=1 run_check_entry "$dir" task-opted "$url" >/dev/null 2>&1
   rc=$?

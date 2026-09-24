@@ -620,7 +620,7 @@ test_no_mistakes_token_launches_on_its_effective_mode() {
   fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$home" claude
   fm_git_worktree "$proj" "$wt" wt-effective-mode
-  id=effective-mode-e1
+  id="effective-mode-e1"
   FM_HOME="$home" "$BRIEF" "$id" project --mode no-mistakes >/dev/null 2>&1 \
     || fail "a no-mistakes brief without the opt-in should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" "Ship the remapped change." "Keep it small."
