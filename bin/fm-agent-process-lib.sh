@@ -41,9 +41,12 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
     # unrelated commands such as ompd or comp.
     *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
-    # agy (Antigravity CLI) and devin (Devin CLI) are anchored for the same
-    # reason as muse and omp: each live process name is the bare word `agy` or
-    # `devin`, and a glob would claim unrelated commands containing that fragment.
+    # agy (Antigravity CLI) is anchored for the same reason as muse and omp: its
+    # live process name is the bare word `agy` (verified, agy 1.2.0: a Go-compiled
+    # single binary, comm=agy with argv[0]=agy), and a glob would claim
+    # unrelated commands containing that fragment. devin is anchored the same
+    # way (verified, devin 3000.11.1: comm=devin), so a `*devin*` glob never
+    # claims an unrelated command.
     agy|devin) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)

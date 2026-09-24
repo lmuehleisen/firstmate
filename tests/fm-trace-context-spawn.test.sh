@@ -46,7 +46,15 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
-    case "$*" in *'encode launch-brief'*) printf 'claude\n' > "$FM_FAKE_LAUNCH_LOG.pending-command" ;; esac
+    # A spawn types a short line sourcing its staged launch file, so the launch
+    # is recognized from that file's contents as well as from a literal.
+    sent="$*"
+    for a in "$@"; do
+      case "$a" in
+        ". '"*"'") staged=${a#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || sent="$sent $(cat "$staged")" ;;
+      esac
+    done
+    case "$sent" in *'encode launch-brief'*) printf 'claude\n' > "$FM_FAKE_LAUNCH_LOG.pending-command" ;; esac
     if [ "${*: -1}" = Enter ] && [ -f "$FM_FAKE_LAUNCH_LOG.pending-command" ]; then
       mv "$FM_FAKE_LAUNCH_LOG.pending-command" "$FM_FAKE_LAUNCH_LOG.command"
     fi
@@ -86,7 +94,11 @@ case "${1:-}" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
           Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *)
+            case "$a" in
+              ". '"*"'") staged=${a#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || a=$(cat "$staged") ;;
+            esac
+            printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac
       done
     fi

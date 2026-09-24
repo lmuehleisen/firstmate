@@ -37,6 +37,8 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/home/data" "$case_dir/home/config" "$fakebin"
+  fm_git_init_commit "$case_dir/wt"
+  git -C "$case_dir/wt" update-ref refs/remotes/origin/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
   cp "$ROOT/.tasks.toml" "$case_dir/home/.tasks.toml"
   printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
     > "$case_dir/home/data/backlog.md"
@@ -53,9 +55,9 @@ make_case() {
     'base=main' > "$case_dir/github-outcome"
   : > "$case_dir/github-rules"
   : > "$case_dir/gh.log"
-  # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
-  # stat and simply skips the pr_head lookup via `gh` in that case, so give it
-  # one that resolves for cases that want pr_head recorded.
+  # The worktree is a git copy whose HEAD is on a remote-tracking ref, as a
+  # pushed ship task's is, so fm-pr-check.sh's named-head gate accepts it when
+  # the forge supplies no head (GitLab). No project clone exists on disk.
   printf '%s\n' "$case_dir"
 }
 
@@ -144,7 +146,11 @@ case "${1:-} ${2:-}" in
       *statusCheckRollup*)
         cat "$FM_TEST_GH_VIEW_JSON"
         if [ -f "${FM_TEST_AWAY_RECORD_AFTER_VIEW:-}" ]; then
-          cp "$FM_TEST_AWAY_RECORD_AFTER_VIEW" "$FM_STATE_OVERRIDE/.afk-contract"
+          if [ -s "${FM_TEST_AWAY_RECORD_AFTER_VIEW}" ]; then
+            cp "$FM_TEST_AWAY_RECORD_AFTER_VIEW" "$FM_STATE_OVERRIDE/.afk-contract"
+          else
+            rm -f "$FM_STATE_OVERRIDE/.afk-contract"
+          fi
         fi
         exit 0
         ;;
@@ -155,6 +161,10 @@ case "${1:-} ${2:-}" in
       *' --json state,baseRefName '*)
         [ ! -f "${FM_TEST_GH_VIEW_FALLBACK_FAIL:-}" ] || exit 1
         sed -n '/^state=/p;/^base=/p' "$FM_TEST_GH_OUTCOME"
+        exit 0
+        ;;
+      *isDraft*)
+        cat "$FM_TEST_GH_VIEW_JSON"
         exit 0
         ;;
     esac
@@ -418,9 +428,7 @@ write_away_record() {
   local case_dir=$1
   shift
   FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-afk-contract.sh" propose "$@" >/dev/null
-  FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null
+    "$ROOT/bin/fm-afk-contract.sh" enter "$@" >/dev/null
 }
 
 test_verified_merge_records_pr_and_head() {
@@ -1922,13 +1930,13 @@ test_secondmate_merge_reports_upward_once() {
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "secondmate-merge-reports: merge failed"
 
-  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" "$replies" \
+  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" <(sed -E 's/ \[at=[0-9]+\]//' "$replies") \
     "secondmate-merge-reports: the landed PR was not reported upward"
   [ "$(grep -c 'merged-task-x1' "$replies")" -eq 1 ] \
     || fail "secondmate-merge-reports: one merge produced more than one upward merge line"
   # The merge path registers the PR first, and that registration publishes the
   # child's ready line on the same channel from fm-pr-check itself.
-  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url" "$replies" \
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url" <(sed -E 's/ \[at=[0-9]+\]//' "$replies") \
     "secondmate-merge-reports: the registration's ready line was not reported upward"
 
   # The same merge again: the forge accepts it in this fixture, so only the
@@ -1954,7 +1962,7 @@ test_secondmate_merge_reports_on_the_local_route() {
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "secondmate-merge-local: merge failed"
 
-  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" "$parent_status" \
+  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" <(sed -E 's/ \[at=[0-9]+\]//' "$parent_status") \
     "secondmate-merge-local: the landed PR did not reach the parent home's channel"
   [ ! -e "$case_dir/state/parent-replies.status" ] \
     || fail "secondmate-merge-local: a local-route report also wrote the remote reply channel"
@@ -2014,7 +2022,7 @@ test_gitlab_merge_reports_upward() {
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "gitlab-merge-reports: merge failed"
 
   assert_grep "done [key=merged-task-x1]: merged task-x1 $url" \
-    "$case_dir/state/parent-replies.status" \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$case_dir/state/parent-replies.status") \
     "gitlab-merge-reports: a landed merge request was not reported upward"
   pass "a landed GitLab merge request is reported upward on the same channel"
 }
@@ -2441,6 +2449,40 @@ test_github_red_checks_refuse_and_allow_red_waives_named() {
   pass "fm-pr-merge refuses red GitHub checks and waives only a named --allow-red check"
 }
 
+# A draft cannot be merged, and neither can a pull request whose draft state the
+# forge did not report as a boolean; both refuse before any merge call.
+test_github_draft_or_unreadable_draft_state_refuses() {
+  local case_dir rc head label filter
+  head=dddddddddddddddddddddddddddddddddddddddd
+  for label in draft unreadable; do
+    case_dir=$(make_case "github-$label")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" "$head"
+    case "$label" in
+      draft) filter='.isDraft = true' ;;
+      *) filter='del(.isDraft)' ;;
+    esac
+    jq -c "$filter" "$case_dir/github-view.json" > "$case_dir/github-view.tmp"
+    mv "$case_dir/github-view.tmp" "$case_dir/github-view.json"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "github-$label: a pull request not read as non-draft must refuse"
+    assert_grep "the pull request is a draft" "$case_dir/stderr" \
+      "github-$label: the draft state was not named"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-$label: gh pr merge ran without a non-draft reading"
+    assert_no_grep 'declare a wait instead of done' "$case_dir/stderr" \
+      "github-$label: the arm-time draft refusal preempted the merge refusal"
+    grep -qxF 'pr=https://github.com/example/repo/pull/82' "$case_dir/state/task-x1.meta" \
+      || fail "github-$label: pr= was not recorded before the merge refusal"
+  done
+  pass "fm-pr-merge refuses a draft pull request and one with no boolean draft state"
+}
+
 # When the base branch advances, GitHub cancels a pull request's in-flight run
 # and re-triggers it, leaving the cancelled run in the rollup beside the passing
 # re-run while reporting the pull request itself CLEAN. The merge must follow the
@@ -2808,6 +2850,111 @@ test_away_grant_and_yolo_and_hold_for_return() {
   pass "away merges require yolo or a grant, and --attended-override does not skip that"
 }
 
+# While the away-posture record exists main is parked, so the supervision
+# branch actor may reach the merge gate - and meets exactly the gate main
+# would: a granted task merges green at its live head under away-grant
+# authority, an ungranted one is held for the return, and without the record
+# the branch is refused at the role partition before any forge call
+# (docs/pi-supervision-branch.md "Postures").
+test_away_branch_actor_merges_only_with_a_grant() {
+  local case_dir rc url head
+  head=dadadadadadadadadadadadadadadadadadadada
+  url=https://github.com/example/repo/pull/93
+
+  case_dir=$(make_case away-branch-attended)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  set +e
+  FM_SUPERVISION_ACTOR=branch run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 6 "$rc" "away-branch-attended: an attended branch must be refused at the partition"
+  assert_grep 'the supervision branch never performs this action' "$case_dir/stderr" \
+    "away-branch-attended: refusal lost the partition wording"
+  [ ! -e "$case_dir/gh.log" ] || assert_no_grep 'pr ' "$case_dir/gh.log" \
+    "away-branch-attended: gh ran for an attended branch merge"
+
+  case_dir=$(make_case away-branch-held)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_away_record "$case_dir"
+  set +e
+  FM_SUPERVISION_ACTOR=branch run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "away-branch-held: an ungranted task must be held for the return"
+  assert_grep 'main is parked' "$case_dir/stderr" \
+    "away-branch-held: the relocation note was not printed"
+  assert_grep 'task task-x1 is held for the captain return' "$case_dir/stderr" \
+    "away-branch-held: refusal did not name hold-for-return"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-branch-held: gh pr merge ran for an ungranted branch merge"
+
+  case_dir=$(make_case away-branch-grant)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  write_away_record "$case_dir" --grant task-x1
+  FM_SUPERVISION_ACTOR=branch FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "away-branch-grant: a granted green merge must succeed for the branch: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 93 example/repo --squash
+  assert_grep "merge landed: task-x1 $url away-grant" "$case_dir/state/.wake-queue" \
+    "away-branch-grant: the durable outcome did not tag away-grant"
+
+  # The green gate is absolute in this posture for the branch as for main.
+  case_dir=$(make_case away-branch-red)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    '{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-09-01T00:00:00Z"}'
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  FM_SUPERVISION_ACTOR=branch FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" --allow-red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-branch-red: --allow-red must stay attended-only for the branch"
+  assert_grep 'allow-red is attended-only' "$case_dir/stderr" \
+    "away-branch-red: refusal did not name the attended-only waiver"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-branch-red: gh pr merge ran for a red branch merge while away"
+  pass "under the away-posture record the branch merges a granted green task, is held without a grant, cannot waive a red check, and is refused at the partition while attended"
+}
+
+# The race this closes: a granted branch merge passes the opening partition
+# because the live record exists, then the captain returns and archives that
+# record during the slow forge preflight. The locked authority recheck must
+# treat that archive as absence and refuse the branch before gh pr merge.
+# An empty away-record-after-view file is the mock's archive-during-view hook.
+test_away_branch_refuses_when_record_archived_during_preflight() {
+  local case_dir rc url head
+  head=a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7
+  url=https://github.com/example/repo/pull/127
+
+  case_dir=$(make_case away-branch-archived-during-preflight)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  write_away_record "$case_dir" --grant task-x1
+  : > "$case_dir/away-record-after-view"
+  set +e
+  FM_SUPERVISION_ACTOR=branch FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 6 "$rc" "away-branch-archived-during-preflight: an archived record must refuse the branch under the lock"
+  assert_grep 'main is parked' "$case_dir/stderr" \
+    "away-branch-archived-during-preflight: the opening partition never saw the live record"
+  assert_grep 'the supervision branch never performs this action' "$case_dir/stderr" \
+    "away-branch-archived-during-preflight: refusal lost the partition wording"
+  assert_grep 'pr view' "$case_dir/gh.log" \
+    "away-branch-archived-during-preflight: the forge preflight never ran"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-branch-archived-during-preflight: gh pr merge ran after the record was archived"
+  pass "a branch merge refuses under the lock when the away record is archived during preflight"
+}
+
 test_away_posture_refuses_asynchronous_merge_paths() {
   local case_dir rc url head merge_line
   head=abababababababababababababababababababab
@@ -2999,10 +3146,10 @@ SH
   case_dir=$(make_case away-revoke-at-merge)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c
-  write_away_record "$case_dir" --grant task-x1
+  write_away_record "$case_dir" --words 'merge task-x1 when green' --grant task-x1
+  # New words without a grant replace the mandate, which revokes the grant.
   mutate=$(away_change_script "$case_dir" revoke-at-merge <<'SH'
-"$CONTRACT" propose --grant task-other
-"$CONTRACT" confirm
+"$CONTRACT" enter --words 'hold everything for my return'
 SH
   )
   export FM_TEST_AWAY_MUTATE_AT_MERGE="$mutate"
@@ -3127,6 +3274,7 @@ test_untraversable_user_backend_config_directory_refuses_the_merge
 test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
 test_github_red_checks_refuse_and_allow_red_waives_named
+test_github_draft_or_unreadable_draft_state_refuses
 test_superseded_failed_check_run_no_longer_refuses
 test_check_runs_never_supersede_status_contexts
 test_current_failed_check_run_still_refuses
@@ -3139,6 +3287,8 @@ test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
 test_away_grant_and_yolo_and_hold_for_return
+test_away_branch_actor_merges_only_with_a_grant
+test_away_branch_refuses_when_record_archived_during_preflight
 test_away_posture_refuses_asynchronous_merge_paths
 test_away_plan_gated_403_does_not_block_the_merge
 test_away_grant_does_not_bypass_red_or_identity

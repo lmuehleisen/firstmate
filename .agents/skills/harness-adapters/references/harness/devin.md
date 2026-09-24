@@ -12,11 +12,11 @@ Verified for crewmate and scout work only, never a secondmate or primary.
 | Launch | Positional prompt `-- "<prompt>"` starts the interactive session. `--print` / `-p` is headless and never used for a worker. |
 | Directory grants | None needed; Devin CLI operates in the working directory. `--respect-workspace-trust false` bypasses the workspace trust prompt. |
 | Approvals | Reviewed mode via `--permission-mode smart` for `auto` and `--permission-mode normal` for `manual`. Unconditional bypass (`dangerous`) is never emitted. The captain-approved non-destructive command set is pre-allowed in `.devin/config.local.json`, and firstmate's permission policy hooks refuse, approve, judge, or escalate the rest (see Approvals and permissions). |
-| Busy state | `devin-hook`: `UserPromptSubmit` opens a turn (busy); `Stop` and `SessionEnd` close it (idle). `SessionStart` is omitted to avoid false busy on resume. Double-Escape interruption leaves the record busy. |
-| Rendered tail | Delivery guard only via `(esc (twice\|again) to interrupt)`. Not a worker-state source. |
+| Busy state | `devin-hook`: `UserPromptSubmit` opens a turn (busy); `Stop` and `SessionEnd` close it (idle). `SessionStart` is omitted to avoid false busy on resume. Double-Escape interruption emits no `Stop`, so `bin/fm-control.sh` invalidates the interrupted incarnation to `unknown` rather than claiming idle. |
+| Rendered tail | Delivery guard only, via either of two independent signals: `esc (twice\|again) to interrupt` or the `❭ Guide Devin while it works` working composer. Not a worker-state source. |
 | Turn end | Native `Stop` hook in `$WT/.devin/config.local.json` touches `$TURNEND`. |
 | Exit | Firstmate sends plain `exit`, one Enter (`fm_control_exit_command`). `/exit` is documented as an equivalent alias but is ambiguous against Devin's `/revert <step>` fuzzy slash-command search and was live-observed opening that menu instead of exiting; plain `exit` has no such ambiguity. |
-| Interrupt | Double `Escape` (repeat 2) cancels the running turn. A single `Escape` displays `(esc again to interrupt)` for under 5 seconds. Devin prints `✱ Canceled. What should Devin do?` and leaves the composer empty. Interruption emits no `Stop` event and leaves the busy record unchanged. |
+| Interrupt | Double `Escape` (repeat 2) cancels the running turn, but the control plane sends the second press only after the first renders `esc again to interrupt` and at least 0.5 seconds later: a fast idle pair opens Devin's `/revert` picker, where Enter reverts file changes. An idle agent gets one press and `cancel=not-running`; a picker a mistimed press opened is closed with one `Escape`, and `exit` refuses while one is open. Devin prints `✱ Canceled. What should Devin do?` and leaves the composer empty. `bin/fm-control-lib.sh` owns the arm signal, press gap, and picker signature, taken from upstream's 2026-09-22 live evidence on devin 3000.11.1. |
 | Resume | `devin -c` / `--continue` for the most recent session, or `devin -r <SESSION_ID>` / `--resume <SESSION_ID>`. Session IDs are hyphenated word pairs (e.g. `aloud-powder`, `booming-flute`). |
 | Models | `--model <model>`. |
 | Effort | Interactive thinking levels (`Alt+T`) in TUI only; no CLI launch flag. Requested effort is recorded in task metadata only (record-and-omit). |
@@ -92,7 +92,7 @@ The installed hooks in `$WT/.devin/config.local.json` cover:
 
 `SessionStart` is intentionally omitted because it fires on `resume` with an empty composer, which would strand a false `busy` state.
 Each busy-state hook command appends `>/dev/null 2>&1 || true` so a refused event cannot break Devin CLI's lifecycle.
-Double-Escape interruption emits no `Stop` hook and leaves the busy state unchanged, matching the behavior of agy and Claude.
+Double-Escape interruption emits no `Stop` hook, so the control plane invalidates the busy state to `unknown` after delivering it; a manual keyboard cancellation outside the control plane leaves the last busy record until the next normal completion or session exit.
 
 ## Claude hook import
 
@@ -120,7 +120,7 @@ The composer is structured between a top mode rule (e.g. `──── (smart mo
 `bin/fm-composer-lib.sh` classifies this structure into `empty`, `pending`, or `unknown`.
 The idle placeholder `Ask Devin to build features, fix bugs, or work on your code` and the active-work placeholder `Guide Devin while it works` are recognized as composer furniture.
 While Devin is busy thinking, the delivery token `(esc twice to interrupt)` (or `(esc again to interrupt)`) appears on the status line.
-`bin/fm-composer-lib.sh` defines `FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT='\(esc (twice|again) to interrupt\)'` to confirm submitted keystrokes.
+`bin/fm-composer-lib.sh`'s `FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT` matches either signal to confirm submitted keystrokes.
 Typing `!` on an empty composer enters bash mode; typing `exit` quits the session.
 `/exit` is documented as an equivalent alias, but Firstmate never sends it: it is ambiguous against Devin's `/revert <step>` fuzzy slash-command search (see Exit mechanics below), so `fm_control_exit_command` sends plain `exit` for devin.
 
