@@ -22,8 +22,11 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
-#   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
-#   it also carries the current direct-PR delivery overlay.
+#   Every ship or scout spawn renders `launch-brief.md`; for a brief whose
+#   recorded contract still says mode=no-mistakes without the pipeline (one
+#   scaffolded before briefs recorded the effective mode) it also carries the
+#   current direct-PR delivery overlay. A ship's meta records the recorded
+#   token as mode= and bin/fm-dod-lib.sh's effective mode as effective_mode=.
 #   Filled legacy Tasks need no pipeline intent extraction.
 #   With config/no-mistakes present (docs/configuration.md), a no-mistakes ship
 #   instead carries bin/fm-dod-lib.sh's --intent overlay with the extracted
@@ -3165,6 +3168,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # CLI refuses: a pipeline task must never quietly ship direct-PR instead.
   NO_MISTAKES_PIPELINE_STATE=$(fm_no_mistakes_pipeline_state "$CONFIG")
   NO_MISTAKES_PIPELINE=0
+  EFFECTIVE_MODE=
+  [ "$KIND" != ship ] || EFFECTIVE_MODE=$(fm_effective_delivery_mode "$MODE" "$CONFIG")
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ "$NO_MISTAKES_PIPELINE_STATE" != off ]; then
     if [ "$NO_MISTAKES_PIPELINE_STATE" = unavailable ]; then
       echo "error: $ID ships mode=no-mistakes and config/no-mistakes is set, but no no-mistakes binary is on PATH; install it or re-resolve the task to another mode - a pipeline task never falls back to direct-PR" >&2
@@ -3193,7 +3198,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       cat "$SOURCE_BRIEF" &&
       if [ "$NO_MISTAKES_PIPELINE" -eq 1 ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
-      elif [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || grep -Eq '^Delivery contract: mode=no-mistakes( |$)' "$SOURCE_BRIEF"; }; then
+      elif [ "$KIND" = ship ] && grep -Eq '^Delivery contract: mode=no-mistakes( |$)' "$SOURCE_BRIEF"; then
         # The superseding contract keeps the brief's own ship branch and forge,
         # so a Gerrit brief is told to publish its change rather than open a PR.
         OVERLAY_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$SOURCE_BRIEF" | head -n 1)
@@ -5223,7 +5228,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx agy_bypass agy_judge", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode effective_mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx agy_bypass agy_judge", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5237,6 +5242,7 @@ preserve_relaunch_meta() {
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
+  [ -z "${EFFECTIVE_MODE:-}" ] || [ "$KIND" != ship ] || echo "effective_mode=$EFFECTIVE_MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"

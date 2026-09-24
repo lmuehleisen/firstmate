@@ -131,6 +131,9 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  # These cases exercise the no-mistakes pipeline's gate, which this fork runs
+  # only in a home opted in with config/no-mistakes.
+  : > "$dir/home/config/no-mistakes"
   git -C "$dir/wt" init -q
   git -C "$dir/wt" commit -q --allow-empty -m init
   git -C "$dir/wt" update-ref refs/remotes/origin/main "$(git -C "$dir/wt" rev-parse HEAD)"
@@ -2107,6 +2110,50 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   pass "a no-mistakes Gerrit ready report requires the pipeline's fixes recovered into the published copy"
 }
 
+# Without config/no-mistakes a no-mistakes task never runs the pipeline, so its
+# Gerrit ready report is judged as direct-PR: the published tree alone decides,
+# and no run is consulted. That holds for a record carrying effective_mode= and
+# for one written before that field, resolved against the home's config; with
+# the opt-in present, the same legacy record still owes the pipeline's result.
+test_gerrit_remapped_no_mistakes_ready_gate_is_direct() {
+  local dir state url head rc
+  dir=$(make_case gerrit-remapped-gate)
+  state="$dir/home/state"
+  rm -f "$dir/home/config/no-mistakes"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  url=https://gerrit.example/c/group/apps/console/+/4202
+  printf 'value\n' > "$dir/wt/doc"
+  git -C "$dir/wt" add doc
+  git -C "$dir/wt" commit -q -m "Document the value"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+
+  : > "$dir/nm.log"
+  write_task_meta "$dir" task-remapped
+  printf 'effective_mode=direct-PR\n' >> "$state/task-remapped.meta"
+  FM_TEST_GERRIT_REVISION=$head FM_TEST_NM_FAIL=1 FM_TEST_NM_LOG="$dir/nm.log" \
+    run_check_entry "$dir" task-remapped "$url" >/dev/null \
+    || fail "a remapped no-mistakes Gerrit publish was refused over a pipeline it never runs"
+  grep -qxF "pr=$url" "$state/task-remapped.meta" || fail "the remapped publish was not recorded"
+  [ ! -s "$dir/nm.log" ] || fail "a remapped no-mistakes Gerrit publish consulted no-mistakes"
+
+  url=https://gerrit.example/c/group/apps/console/+/4203
+  write_task_meta "$dir" task-legacy
+  FM_TEST_GERRIT_REVISION=$head FM_TEST_NM_FAIL=1 FM_TEST_NM_LOG="$dir/nm.log" \
+    run_check_entry "$dir" task-legacy "$url" >/dev/null \
+    || fail "a legacy no-mistakes record without the opt-in was judged as a pipeline task"
+  [ ! -s "$dir/nm.log" ] || fail "a legacy no-mistakes record without the opt-in consulted no-mistakes"
+
+  url=https://gerrit.example/c/group/apps/console/+/4204
+  : > "$dir/home/config/no-mistakes"
+  write_task_meta "$dir" task-opted
+  set +e
+  FM_TEST_GERRIT_REVISION=$head FM_TEST_NM_FAIL=1 run_check_entry "$dir" task-opted "$url" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an opted-in no-mistakes Gerrit publish was accepted without a readable passed run"
+  pass "a remapped no-mistakes Gerrit ready report is judged as direct-PR"
+}
+
 # The GitLab watch must follow a merge request exactly as the GitHub watch
 # follows a pull request, on any instance, and must never turn an unreadable
 # merge request into a merge. Its evidence against the public fixture project
@@ -3572,6 +3619,7 @@ test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree
 test_gerrit_nm_ready_gate_requires_recovered_custody
+test_gerrit_remapped_no_mistakes_ready_gate_is_direct
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report

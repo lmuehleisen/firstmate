@@ -195,7 +195,7 @@ EOF
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
 test_ship_modes_generate_clean_briefs() {
-  local home id mode brief status
+  local home id mode effective brief status
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
@@ -207,7 +207,10 @@ test_ship_modes_generate_clean_briefs() {
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
-    grep -qx "Delivery contract: mode=$mode" "$brief" \
+    # Without config/no-mistakes the no-mistakes token records its effective mode.
+    effective=$mode
+    [ "$mode" != no-mistakes ] || effective=direct-PR
+    grep -qx "Delivery contract: mode=$effective" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
@@ -258,8 +261,8 @@ test_ship_mode_is_explicit_not_registry() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "explicit no-mistakes brief on a direct-PR project should scaffold"
   brief="$home/data/brief-explicit-a5/brief.md"
-  grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
-    || fail "registered direct-PR posture overrode the explicit --mode"
+  assert_grep "recorded mode is no-mistakes" "$brief" \
+    "registered direct-PR posture overrode the explicit --mode"
   assert_grep "Do NOT run /no-mistakes" "$brief" \
     "legacy no-mistakes mode did not render the direct-PR contract"
 
@@ -354,8 +357,8 @@ test_pr_based_dod_requires_non_draft() {
 }
 
 # Without config/no-mistakes a no-mistakes token on a Gerrit-bound project ships
-# exactly like direct-PR on that forge: it publishes one change itself, keeps its
-# recorded contract line, and is never handed the pipeline's skip vocabulary.
+# exactly like direct-PR on that forge: it publishes one change itself, records
+# direct-PR as its contract line, and is never handed the pipeline's skip vocabulary.
 test_no_mistakes_gerrit_token_ships_direct_without_opt_in() {
   local home brief
   home="$TMP_ROOT/gerrit-remap-home"
@@ -363,9 +366,9 @@ test_no_mistakes_gerrit_token_ships_direct_without_opt_in() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gerrit-remap-g1 some-proj --mode no-mistakes --forge gerrit >/dev/null \
     || fail "a no-mistakes gerrit brief without the opt-in should scaffold"
   brief="$home/data/gerrit-remap-g1/brief.md"
-  grep -qx 'Delivery contract: mode=no-mistakes forge=gerrit shape=squash' "$brief" \
-    || fail "the remapped gerrit brief lost its recorded delivery contract line"
-  assert_grep 'This home does not run the no-mistakes pipeline' "$brief" "the remapped gerrit brief did not say why no pipeline runs"
+  grep -qx 'Delivery contract: mode=direct-PR forge=gerrit shape=squash' "$brief" \
+    || fail "the remapped gerrit brief did not record its effective delivery contract line"
+  assert_grep 'this home does not run the no-mistakes pipeline' "$brief" "the remapped gerrit brief did not say why no pipeline runs"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'Run `gerrit-axi publish --squash --json`' "$brief" "the remapped gerrit brief lost the publish step"
   assert_grep 'relevant tests and lint checks' "$brief" "the remapped gerrit brief lost the verification contract"
@@ -434,7 +437,7 @@ test_no_mistakes_pipeline_opt_in() {
   done
   assert_grep '[captain]' "$brief" "rendered intent contract must explain the neutral legacy provenance marker"
   assert_no_grep 'Do NOT run /no-mistakes' "$brief" "pipeline brief still forbids the pipeline"
-  assert_no_grep 'This home does not run the no-mistakes pipeline' "$brief" "pipeline brief kept the direct-PR remap"
+  assert_no_grep 'this home does not run the no-mistakes pipeline' "$brief" "pipeline brief kept the direct-PR remap"
   assert_no_grep 'Delivery pipeline:' "$off/data/plain-no-mistakes/brief.md" "flag-absent brief recorded a pipeline contract"
   pass "fm-brief: config/no-mistakes renders the pipeline contract only for an explicit no-mistakes ship"
 }
