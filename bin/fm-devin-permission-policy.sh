@@ -98,8 +98,9 @@
 # judge approves. permission-request approves, uncached, a call whose only
 # objection was that outward action and whose whole command is one `gh api`
 # invocation - no other segment, redirection, substitution, expansion, glob,
-# or ANSI-C quoting, and no flag beyond -X/--method POST, --jq/-q, and
-# --silent - of exactly one of these shapes against the task's own PR:
+# or ANSI-C quoting, and no flag beyond -X/--method POST, --jq/-q,
+# --silent, and --hostname github.com - of exactly one of these shapes
+# against the task's own PR on github.com:
 #   - repos/<owner>/<name>/pulls/<n>/comments with exactly the fields
 #     in_reply_to (a number) and body (a -F body must not start with @, which
 #     would read a file): a reply to an existing review comment;
@@ -113,7 +114,9 @@
 # file; before one is recorded it is the single open PR whose head is the
 # worktree's branch, owned by the origin repository's owner. Owner, name, and
 # number must all match (case-insensitively for owner and name, as GitHub
-# does). An unprovable PR, a failed or timed-out lookup, or any other forge
+# does). A command naming no host is approved only while gh's default host in
+# the hook's environment is github.com (GH_HOST unset or github.com, and a
+# github.com credential present), and every lookup names github.com itself. An unprovable PR, a failed or timed-out lookup, or any other forge
 # write keeps the never-approve escalation.
 #
 # Non-exec tools: read / grep / glob / notebook_read are approved unless an
@@ -310,7 +313,7 @@ own_pr() {
   pattern='^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$'
   [[ ${remote%.git} =~ $pattern ]] || return 1
   repo="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
-  out=$(fm_run_timed 15 gh pr list -R "$repo" --head "$branch" --state open \
+  out=$(fm_run_timed 15 gh pr list -R "github.com/$repo" --head "$branch" --state open \
     --json number,headRepositoryOwner --jq '.[] | "\(.number) \(.headRepositoryOwner.login)"' 2>/dev/null) || return 1
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -319,6 +322,15 @@ own_pr() {
   done <<< "$out"
   [ "$n" = 1 ] && [[ $OWN_PR_NUMBER =~ ^[1-9][0-9]*$ ]] || { OWN_PR_NUMBER=''; return 1; }
   OWN_PR_REPO=$(lower "$repo")
+}
+
+# github_default_host: 0 when a gh call naming no host reaches github.com, as
+# the approved command would from this same environment - GH_HOST is unset or
+# github.com, and github.com holds a credential, so gh never falls back to
+# another authenticated host. The token itself is discarded.
+github_default_host() {
+  case "${GH_HOST:-github.com}" in github.com) ;; *) return 1 ;; esac
+  fm_run_timed 10 gh auth token --hostname github.com >/dev/null 2>&1
 }
 
 # review_thread_query_id <query>: prints the thread id when <query> is exactly
@@ -347,7 +359,7 @@ review_thread_query_id() {
 # task's own PR. Any other word, flag, field, or shell construct returns 1 and
 # the call keeps its never-approve escalation.
 own_pr_review_write() {
-  local cmd=$1 k n w endpoint='' pattern repo num kind tid got
+  local cmd=$1 k n w endpoint='' pattern repo num kind tid got host=''
   local text='' text_raw=0 nbody=0 reply='' nreply=0 query='' nquery=0 nfield=0
   OWN_PR_SHAPE=''
   # The tokenizer approximates ANSI-C quoting, so its words are not trusted.
@@ -373,6 +385,8 @@ own_pr_review_write() {
     case "$w" in
       -X|--method) k=$((k + 1)); [ "${T_TXT[k]-}" = POST ] || return 1 ;;
       -XPOST|--method=POST|--silent|--jq=*) ;;
+      --hostname) k=$((k + 1)); [ "${T_TXT[k]-}" = github.com ] || return 1; host=github.com ;;
+      --hostname=github.com) host=github.com ;;
       --jq|-q) k=$((k + 1)); [ "$k" -lt "$n" ] || return 1 ;;
       -f|--raw-field|-F|--field)
         k=$((k + 1)); [ "$k" -lt "$n" ] || return 1
@@ -399,15 +413,16 @@ own_pr_review_write() {
       [ "$nfield" = 1 ] && [ "$nbody" = 1 ] && [ "$text_raw" = 1 ] && [ "$text" = '@codex review' ] || return 1
       OWN_PR_SHAPE='a Codex re-review request'
     fi
-    own_pr && [ "$repo" = "$OWN_PR_REPO" ] && [ "$num" = "$OWN_PR_NUMBER" ] || { OWN_PR_SHAPE=''; return 1; }
+    { [ -n "$host" ] || github_default_host; } && own_pr \
+      && [ "$repo" = "$OWN_PR_REPO" ] && [ "$num" = "$OWN_PR_NUMBER" ] || { OWN_PR_SHAPE=''; return 1; }
     return 0
   fi
   [ "$endpoint" = graphql ] && [ "$nfield" = 1 ] && [ "$nquery" = 1 ] || return 1
   tid=$(review_thread_query_id "$query") || return 1
-  own_pr || return 1
+  { [ -n "$host" ] || github_default_host; } && own_pr || return 1
   # Ownership is read back from the forge: the thread must sit on this PR.
   # shellcheck disable=SC2016  # $id is a GraphQL variable, not a shell one.
-  got=$(fm_run_timed 15 gh api graphql \
+  got=$(fm_run_timed 15 gh api --hostname github.com graphql \
     -f query='query($id: ID!) { node(id: $id) { ... on PullRequestReviewThread { pullRequest { number repository { nameWithOwner } } } } }' \
     -f id="$tid" --jq '.data.node.pullRequest | "\(.repository.nameWithOwner) \(.number)"' 2>/dev/null) || return 1
   [ "$(lower "$got")" = "$OWN_PR_REPO $OWN_PR_NUMBER" ] || return 1

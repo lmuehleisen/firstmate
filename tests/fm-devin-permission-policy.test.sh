@@ -744,8 +744,10 @@ EOF
 # --- review-round writes on the task's own PR -------------------------------
 
 # own_pr_case <name>: a case whose PATH carries a fake gh that logs every call
-# and answers the two read-only lookups the carve-out makes: the open PRs for a
-# head branch ($dir/gh-prlist) and a review thread's PR ($dir/gh-thread-<id>).
+# and answers the read-only lookups the carve-out makes, each only when it names
+# github.com: whether github.com holds a credential (unless $dir/gh-no-token),
+# the open PRs for a head branch ($dir/gh-prlist), and a review thread's PR
+# ($dir/gh-thread-<id>).
 own_pr_case() {
   local policy dir
   policy=$(new_case "$1" 'echo "APPROVE: looks fine to me"; exit 0')
@@ -754,9 +756,10 @@ own_pr_case() {
   cat > "$dir/fakebin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_GH_DIR/gh-calls"
-case "$1 $2" in
-  'pr list') cat "$FAKE_GH_DIR/gh-prlist" 2>/dev/null; exit 0 ;;
-  'api graphql')
+case "$*" in
+  'auth token --hostname github.com') [ ! -e "$FAKE_GH_DIR/gh-no-token" ] && echo gho_fake; exit ;;
+  'pr list -R github.com/'*) cat "$FAKE_GH_DIR/gh-prlist" 2>/dev/null; exit 0 ;;
+  'api --hostname github.com graphql '*)
     for a in "$@"; do
       case "$a" in id=*) f="$FAKE_GH_DIR/gh-thread-${a#id=}"; [ -f "$f" ] && { cat "$f"; exit 0; } ;; esac
     done
@@ -806,6 +809,8 @@ expect_own_pr_escalated() {  # <policy> <label> < commands
 
 test_own_pr_review_writes() {
   local policy dir wt
+  # gh's default host comes from GH_HOST; the fixture starts on github.com.
+  unset GH_HOST
   policy=$(own_pr_case own-pr)
   dir=$(case_dir "$policy")
   printf 'window=x\nkind=ship\npr=https://github.com/Owner/Name/pull/41\n' > "$dir/state/t1.meta"
@@ -829,12 +834,31 @@ EOF
   [ ! -d "$dir/state/t1.devin-permission-cache" ] || fail "an own-PR review write must never be cached"
   [ "$(jq -s 'map(select(.decision == "approve" and .decider == "policy")) | length' "$dir/state/devin-permission-log.jsonl")" = 7 ] \
     || fail "each own-PR review write must be logged as a policy approval"
-  # The hook itself only ever reads the forge: the thread lookup, never the write.
-  if grep -v 'PullRequestReviewThread' "$dir/gh-calls" | grep -q .; then
+  # The hook itself only ever reads the forge, never the write.
+  if grep -vE '^auth token --hostname github.com$|^api --hostname github.com graphql -f query=query.*PullRequestReviewThread' "$dir/gh-calls" | grep -q .; then
     fail "the policy must never run anything but read-only lookups: $(cat "$dir/gh-calls")"
   fi
 
+  # A command naming no host is approved only while gh's default host is
+  # github.com; naming github.com itself is always enough.
+  export GH_HOST=ghe.example
+  expect_own_pr_escalated "$policy" "a default host other than github.com" <<'EOF'
+gh api repos/owner/name/issues/41/comments -f body="@codex review"
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }'
+EOF
+  expect_own_pr_approved "$policy" "an explicit github.com host" <<'EOF'
+gh api --hostname github.com repos/owner/name/issues/41/comments -f body="@codex review"
+gh api graphql --hostname=github.com -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }'
+EOF
+  unset GH_HOST
+  : > "$dir/gh-no-token"
+  expect_own_pr_escalated "$policy" "no github.com credential" <<'EOF'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body='Fixed.'
+EOF
+  rm -f "$dir/gh-no-token"
+
   expect_own_pr_escalated "$policy" "a near miss" <<'EOF'
+gh api --hostname ghe.example repos/owner/name/issues/41/comments -f body="@codex review"
 gh api repos/owner/name/pulls/42/comments -F in_reply_to=3141592 -F body='Fixed.'
 gh api repos/owner/other/pulls/41/comments -F in_reply_to=3141592 -F body='Fixed.'
 gh api repos/someone/name/issues/41/comments -f body="@codex review"
