@@ -832,54 +832,113 @@ EOF
 
 # --- bootstrap dispatch validation ------------------------------------------
 
+# A fixture home for driving bin/fm-bootstrap.sh's crew-dispatch validation
+# through its public interface. config/backend pins tmux so the tool check
+# needs only the session CLI and treehouse beside the common tools; the manual
+# backlog backend keeps that gate inert, and detect-only mode skips the
+# mutating sweeps. Each stub answers only what bootstrap probes; jq is the real
+# binary because the validator parses the config with it.
+make_bootstrap_dispatch_fixture() {  # <dir>; writes <dir>/home + <dir>/fakebin
+  local dir=$1 fakebin real_jq
+  mkdir -p "$dir/home/config"
+  printf '%s\n' tmux > "$dir/home/config/backend"
+  printf '%s\n' manual > "$dir/home/config/backlog-backend"
+  fakebin=$(fm_fakebin "$dir")
+  fm_fake_exit0 "$fakebin" tmux node
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" gh
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.2.6'
+  exit 0
+fi
+if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\n' '  --archive-body'
+  exit 0
+fi
+if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  fm_fake_version_tool "$fakebin" quota-axi FM_FAKE_QUOTA_AXI_VERSION 0.1.51
+  real_jq=$(command -v jq 2>/dev/null) || fail "jq is required for dispatch validation tests"
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+exec '$real_jq' "\$@"
+SH
+  chmod +x "$fakebin/jq"
+}
+
+run_bootstrap() {  # <dir>
+  local dir=$1
+  env -u FM_BACKEND -u FM_DEVIN_HARNESS -u FM_TASK_ID \
+    -u FM_CONFIG_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+    -u FM_BOOTSTRAP_NETWORK -u FM_BOOTSTRAP_VERBOSE_FACTS \
+    -u TYPESAFE_API_KEY -u TYPESAFE_API_KEY_PRIVATE \
+    -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
+    -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID -u CMUX_SOCKET_PATH \
+    -u CMUX_TAB_ID -u CMUX_PANEL_ID -u CMUX_REMOTE_TMUX_MIRROR \
+    PATH="$dir/fakebin:${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+assert_bootstrap_dispatch() {  # <json> <label>; expects silent valid output
+  local json=$1 label=$2 dir="$TMP_ROOT/bootstrap-dispatch" out
+  printf '%s\n' "$json" > "$dir/home/config/crew-dispatch.json"
+  out=$(run_bootstrap "$dir")
+  [ -z "$out" ] || fail "$label, got: $out"
+}
+
+assert_bootstrap_dispatch_rejects() {  # <json> <pattern> <label>
+  local json=$1 pattern=$2 label=$3 dir="$TMP_ROOT/bootstrap-dispatch" out
+  printf '%s\n' "$json" > "$dir/home/config/crew-dispatch.json"
+  out=$(run_bootstrap "$dir")
+  case "$out" in
+    *"$pattern"*) ;;
+    *) fail "$label, got: $out" ;;
+  esac
+}
+
+# Exercises bin/fm-bootstrap.sh end to end against the fixture home: Devin and
+# Gemini sit in the verified-harness baseline so a crew profile using either
+# must not be flagged, while a bogus harness and an effort Devin does not
+# support must each surface as a CREW_DISPATCH diagnostic.
 test_devin_bootstrap_dispatch_validation() {
-  local dir="$TMP_ROOT/bootstrap-dispatch" config_dir="$TMP_ROOT/bootstrap-dispatch/config" out
-  mkdir -p "$config_dir"
-  # crew_dispatch_validate reads bootstrap globals and helper libraries since
-  # upstream's typed dispatch resolution (#4692); supply them untyped.
-  # shellcheck source=bin/fm-env-lib.sh
-  . "$ROOT/bin/fm-env-lib.sh"
-  # shellcheck source=bin/fm-quota-axi-lib.sh
-  . "$ROOT/bin/fm-quota-axi-lib.sh"
-  # shellcheck source=bin/fm-control-lib.sh
-  . "$ROOT/bin/fm-control-lib.sh"
-  # shellcheck disable=SC2034  # read by the eval'd crew_dispatch_validate
-  TYPESAFE_API_KEY_PRIVATE=
-  # shellcheck disable=SC2034  # read by the eval'd crew_dispatch_validate
-  FM_HOME=$dir
-  eval "$(sed -n '/^crew_dispatch_validate() {/,/^}/p' "$ROOT/bin/fm-bootstrap.sh")"
+  make_bootstrap_dispatch_fixture "$TMP_ROOT/bootstrap-dispatch"
 
-  cat > "$config_dir/crew-dispatch.json" <<'EOF'
-{"default":{"harness":"devin","model":"claude-sonnet-4"}}
-EOF
-  out=$(CONFIG="$config_dir" crew_dispatch_validate 2>&1)
-  [ -z "$out" ] || fail "crew_dispatch_validate must accept devin harness, got: $out"
+  assert_bootstrap_dispatch \
+    '{"default":{"harness":"devin","model":"claude-sonnet-4"}}' \
+    "bootstrap must accept devin harness"
 
-  cat > "$config_dir/crew-dispatch.json" <<'EOF'
-{"default":{"harness":"gemini","model":"gemini-2.5-flash"}}
-EOF
-  out=$(CONFIG="$config_dir" crew_dispatch_validate 2>&1)
-  [ -z "$out" ] || fail "crew_dispatch_validate must accept gemini harness, got: $out"
+  assert_bootstrap_dispatch \
+    '{"default":{"harness":"gemini","model":"gemini-2.5-flash"}}' \
+    "bootstrap must accept gemini harness"
 
-  cat > "$config_dir/crew-dispatch.json" <<'EOF'
-{"default":{"harness":"bogus_harness","model":"some-model"}}
-EOF
-  out=$(CONFIG="$config_dir" crew_dispatch_validate 2>&1)
-  case "$out" in
-    *'unverified harness: bogus_harness'*) ;;
-    *) fail "crew_dispatch_validate must reject bogus_harness, got: $out" ;;
-  esac
+  assert_bootstrap_dispatch_rejects \
+    '{"default":{"harness":"bogus_harness","model":"some-model"}}' \
+    'unverified harness: bogus_harness' \
+    "bootstrap must reject bogus_harness"
 
-  cat > "$config_dir/crew-dispatch.json" <<'EOF'
-{"default":{"harness":"devin","effort":"high"}}
-EOF
-  out=$(CONFIG="$config_dir" crew_dispatch_validate 2>&1)
-  case "$out" in
-    *'invalid effort: devin:high'*) ;;
-    *) fail "crew_dispatch_validate must reject effort for devin, got: $out" ;;
-  esac
+  assert_bootstrap_dispatch_rejects \
+    '{"default":{"harness":"devin","effort":"high"}}' \
+    'invalid effort: devin:high' \
+    "bootstrap must reject effort for devin"
 
-  pass "fm-bootstrap.sh: crew_dispatch_validate accepts devin and gemini, rejects unverified harnesses and unsupported effort"
+  pass "fm-bootstrap.sh: dispatch validation accepts devin and gemini, rejects unverified harnesses and unsupported effort"
 }
 
 # --- composer classification ------------------------------------------------

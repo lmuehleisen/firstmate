@@ -541,7 +541,7 @@ $INBOX_SECTION
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
-If your deliverable is a visual artifact the captain will review, put it in the report (path or inline) and describe what to look at; do not start a Lavish review loop.
+Lavish is not available to this fork's workers, so if your deliverable is a visual artifact the captain will review, put it in the report (path or inline) and describe what to look at; do not start a Lavish review loop.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
