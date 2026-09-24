@@ -348,7 +348,14 @@ fm_backend_tmux_target_presence() {  # <target> -> present|missing|unreadable
       window=${target#*:}
       window=${window#=}
       [ -n "$session" ] && [ -n "$window" ] || { printf 'unreadable'; return 0; }
-      if inventory=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>&1); then status=0; else status=$?; fi
+      # fm_backend_tmux_window_inventory owns the missing-versus-unreadable
+      # verdict for a named session; only the id forms above classify here.
+      inventory=$(fm_backend_tmux_window_inventory "=$session")
+      case $? in
+        0) status=0 ;;
+        2) printf 'missing'; return 0 ;;
+        *) printf 'unreadable'; return 0 ;;
+      esac
       ;;
     *) printf 'unreadable'; return 0 ;;
   esac

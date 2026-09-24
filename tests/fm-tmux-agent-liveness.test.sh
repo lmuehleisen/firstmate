@@ -489,6 +489,18 @@ fi
 [ ! -s "$LAB/presence.err" ] || fail "the presence probe must answer an unknown pane id cleanly under set -u: $(cat "$LAB/presence.err")"
 pass "tmux presence: pane ids, window indexes, and pane-qualified windows are checked against the same inventory"
 
+window_id=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "=$SESSION:=fm-present" '#{window_id}') \
+  || fail "could not read the present window's id"
+[ "$(fm_backend_tmux_target_presence "=$SESSION:fm-present")" = present ] || fail "an =session-anchored window must read present"
+[ "$(fm_backend_tmux_target_presence "=$SESSION:fm-gone")" = missing ] || fail "an =session-anchored missing window must read missing"
+[ "$(fm_backend_tmux_target_presence "$window_id")" = present ] || fail "a live window id must read present"
+[ "$(fm_backend_tmux_target_presence "@999999")" = missing ] || fail "an unknown window id must read missing"
+[ "$(fm_backend_tmux_target_presence "$SESSION:999")" = missing ] || fail "an unused window index must read missing"
+[ "$(fm_backend_tmux_target_presence "no-such-session:fm-present")" = missing ] || fail "a missing session must read missing"
+[ "$(PATH=/nonexistent fm_backend_tmux_target_presence "$SESSION:fm-present")" = unreadable ] \
+  || fail "a tmux that cannot be run must read unreadable, never missing"
+pass "tmux presence: =session, window-id, and index targets keep their verdicts; an unrunnable tmux is unreadable"
+
 # fm-crew-state routes through the same probe: a gone window with a stale busy
 # record from a turn killed mid-flight must read gone, never working.
 mkdir -p "$LAB/crew/state" "$LAB/crew/shim"
