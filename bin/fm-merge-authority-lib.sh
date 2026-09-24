@@ -11,6 +11,11 @@
 #   <path>
 #   <number>
 #   <authority>                 yolo | away-grant | attended
+# While the away-posture record exists a merge proceeds only when the task's
+# recorded yolo posture is on (yolo) or its id is in the record's merge-grant
+# list (away-grant); otherwise it is held for the captain's return. Without the
+# record the merge is attended. Upstream's `away` value is still accepted when a
+# persisted record is read, but this fork never writes it.
 # The identity comes from the merge run's immutable canonical URL parse;
 # persistence revalidates the task's current pr= metadata under its metadata
 # and lifecycle locks and refuses a mismatch. The file is atomically published,
@@ -102,7 +107,7 @@ fm_merge_authority_record_matches() {  # <record> <device> <provider> <host> <pa
     return 1
   fi
   exec 8<&-
-  case "$authority" in yolo|away-grant|attended) ;; *) return 1 ;; esac
+  case "$authority" in away|attended|yolo|away-grant) ;; *) return 1 ;; esac
   [ "$version" = fm-merge-authority-v1 ] \
     && [ "$provider" = "$expected_provider" ] \
     && [ "$host" = "$expected_host" ] \

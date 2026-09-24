@@ -84,7 +84,9 @@ test_completed_ship_hold_declares_wait() {
       run_captain "$home" complete "$id" "$id" >/dev/null
     fi
     last=$(tail -n 1 "$home/state/$id.status")
-    assert_contains "$last" 'captain-held [key=completed-ship-hold]: tracked by finished-ship' "plain-done ship did not enter its declared wait"
+    # Self-announced status lines carry an emission stamp (bin/fm-wake-lib.sh).
+    printf '%s\n' "$last" | grep -Eq '^captain-held \[key=completed-ship-hold\]( \[at=[0-9]+\])?: tracked by finished-ship$' \
+      || fail "plain-done ship did not enter its declared wait: $last"
     before=$(wc -c < "$home/state/$id.status")
     run_captain "$home" hold "$id" --reason 'Awaiting local merge approval' >/dev/null
     run_captain "$home" complete "$id" "$id" >/dev/null

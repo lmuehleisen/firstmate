@@ -10,7 +10,11 @@
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
-#   - Identity: only when THIS session's harness ancestor holds state/.lock.
+#   - Identity: only when THIS session holds state/.lock, as
+#     bin/fm-session-lock-lib.sh decides it: the recorded pid is a harness
+#     ancestor, or a live lock was recorded under this same trusted Claude
+#     session id (which is what keeps a background session arming after its
+#     transient helper chain is recycled).
 #     When an existing numeric owner fails the shared harness-liveness predicate,
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
 #     ownership. A live owner, missing lock, malformed lock, or unresolved
@@ -35,11 +39,13 @@
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together,
-#     and a killed hook's rewake is never delivered. The cycle therefore closes
-#     itself first: the hook passes FM_WATCH_DEADLINE, derived from its own
-#     declared timeout by autoarm_hook_deadline_secs below, to the arm, so a
-#     cycle with nothing to report ends before the timeout with one no-op
-#     "check: autoarm-deadline" wake, translated like any other actionable
+#     and a killed hook's rewake is never delivered (Claude drops the exit 2 of
+#     a hook it terminated at the configured timeout; measured on Claude Code
+#     2.1.278 and 2.1.281, docs/verification/supervision.md). The cycle
+#     therefore closes itself first: the hook passes FM_WATCH_DEADLINE, derived
+#     from its own declared timeout by autoarm_hook_deadline_secs below, to the
+#     arm, so a cycle with nothing to report ends before the timeout with one
+#     no-op "check: autoarm-deadline" wake, translated like any other actionable
 #     close; the rewake turn's own Stop re-arms with a fresh timeout. HUP,
 #     TERM, and INT are translated through the ordinary durable failure
 #     handoff instead of leaving the generation frozen at arming.

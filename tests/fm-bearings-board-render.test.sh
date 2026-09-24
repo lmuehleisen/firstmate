@@ -32,6 +32,35 @@ SH
   printf '%s\n' "$home"
 }
 
+# The build treats a claimed runner as listening before that runner resolves a
+# Lavish session. Wait until the stub poll is entered or the source is no longer
+# live, and require both: a claim that dies in the gap is the flake.
+require_listener_reached_poll() {  # <home>
+  local home=$1 i=0 owner=''
+  while [ "$i" -lt 40 ]; do
+    i=$((i + 1))
+    owner=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+      LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+      "$ROOT/bin/fm-procevent.sh" list 2>/dev/null \
+      | awk 'NR > 1 { print $3; exit }')
+    if [ -s "$home/stub-poll" ] && [ "$owner" = live ]; then
+      return 0
+    fi
+    case "$owner" in
+      none|orphaned)
+        if [ -s "$home/stub-poll" ]; then
+          fail "the board listener reached the Lavish poll and then exited (owner: $owner)"
+        fi
+        fail "the board listener exited before it reached the Lavish poll (owner: $owner)"
+        ;;
+    esac
+    sleep 0.05
+  done
+  fail "the board listener did not reach the Lavish poll (owner: ${owner:-none})"
+}
+
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
 render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [captains-call-json]

@@ -269,6 +269,7 @@ fm_task_inbox_body() {  # <record-path>
 fm_task_inbox_doorbell_line() {  # <record-path>
   local dir=${1%/*} abs quoted LC_ALL=C
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
+  abs=${abs%/handled}
   case "$abs" in
     *[![:print:]]*) return 1 ;;
   esac
@@ -400,8 +401,9 @@ _fm_task_inbox_submit_stranded() {  # <backend> <target> <record-path> [expected
 # The one exception is a doorbell this inbox stranded: the typing ring that
 # could not prove its Enter landed leaves .stranded behind, and a later ring
 # presses Enter only while that marker exists AND the composer holds exactly
-# this doorbell. Without both, a pending composer defers as before, so the
-# doorbell never blocks its own retries and a person's draft is never sent.
+# this doorbell, and never into an agent its backend reports busy. Without all
+# three, a pending composer defers as before, so the doorbell never blocks its
+# own retries and a person's draft is never sent.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
@@ -418,6 +420,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   case "$cstate" in
     pending)
       if [ -e "$stranded" ] \
+        && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
         && fm_task_inbox_composer_holds_doorbell "$backend" "$target" "$rec" "$label"; then
         _fm_task_inbox_submit_stranded "$backend" "$target" "$rec" "$label"
         return

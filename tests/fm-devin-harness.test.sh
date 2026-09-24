@@ -184,6 +184,11 @@ case "${1:-}" in
     prev=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
+        # A spawn types a short line sourcing its staged launch file; log the
+        # staged command itself so assertions read what the pane runs.
+        case "$arg" in
+          ". '"*"'") staged=${arg#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || arg=$(cat "$staged") ;;
+        esac
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
         break
       fi

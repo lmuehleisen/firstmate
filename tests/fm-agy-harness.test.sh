@@ -337,6 +337,11 @@ case "${1:-}" in
     prev=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
+        # A spawn types a short line sourcing its staged launch file; log the
+        # staged command itself so assertions read what the pane runs.
+        case "$arg" in
+          ". '"*"'") staged=${arg#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || arg=$(cat "$staged") ;;
+        esac
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
         case "$arg" in
           *' claude '*) printf 'claude\n' > "$FM_FAKE_LAUNCH_LOG.pending-command" ;;
@@ -743,7 +748,7 @@ EOF
     *'agy did not report starting its brief'*) ;;
     *) fail "the refusal must say the brief never started, got: $out" ;;
   esac
-  grep -q '^failed: agy did not report starting its brief' "$home/state/$id.status" \
+  grep -Eq '^failed( \[at=[0-9]+\])?: agy did not report starting its brief' "$home/state/$id.status" \
     || fail "a never-started agy spawn did not record a failure: $(cat "$home/state/$id.status" 2>/dev/null)"
   grep -Fq "fm-$id" "$home/launch.log.kills" 2>/dev/null \
     || fail "a never-started agy spawn left its endpoint running: $(cat "$home/launch.log.kills" 2>/dev/null)"
@@ -776,7 +781,7 @@ EOF
     *'could not be confirmed; the agy worker may still be running'*) ;;
     *) fail "an unconfirmed close must be reported, got: $out" ;;
   esac
-  grep -q '^failed: agy did not report starting its brief.*could not be confirmed closed' "$home/state/$id.status" \
+  grep -Eq '^failed( \[at=[0-9]+\])?: agy did not report starting its brief.*could not be confirmed closed' "$home/state/$id.status" \
     || fail "the failure record did not say the endpoint may still run: $(cat "$home/state/$id.status" 2>/dev/null)"
   [ -f "$home/state/$id.meta" ] || fail "an unconfirmed close rolled back the task record"
   record=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"' _ "$ROOT" "$home/state" "$id") \

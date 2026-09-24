@@ -4,7 +4,9 @@
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded.
+# host and path, so any instance works and no host is hardcoded. A Gerrit change
+# is refused outright: that adapter is read-only, and the refusal at the parse
+# below owns why.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -76,9 +78,9 @@
 # recorded as an `answer --release` before this entrypoint is invoked. While
 # state/.afk-contract exists, a merge for this task also proceeds only if its
 # meta yolo=on or its id is in that record's merge-grant list; otherwise it is
-# held for the captain return. An unreadable record refuses rather than being
-# skipped. Neither posture releases a captain hold, and the grant lapses when
-# the record is archived.
+# held for the captain return, whatever the captain's away words say. An
+# unreadable record refuses rather than being skipped. Neither posture releases
+# a captain hold, and the grant lapses when the record is archived.
 # The authority read and synchronous forge command share the away record's
 # cross-subsystem lock, which bin/fm-afk-contract.sh owns, closing the common
 # live-owner TOCTOU; failure to take it refuses before the forge call. Async and
@@ -149,6 +151,17 @@ PR_NUMBER=$FM_PR_NUMBER
 # glab resolves the instance from the project URL passed to -R, so the host is
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
+# Firstmate never submits a Gerrit change, even though gerrit-axi can, so the
+# refusal is stated rather than left as a silently absent provider branch.
+# Submitting a Gerrit change means first recording a Code-Review+2, which is a
+# positive attributed claim that a named human approved the change, read by
+# colleagues and by any audit of the repository. Firstmate must not manufacture
+# one. The server permitting self-approval is what makes this a policy boundary
+# rather than a capability limit, so it is enforced here rather than assumed.
+if [ "$PROVIDER" = gerrit ]; then
+  echo "error: firstmate does not submit a Gerrit change: submitting requires an attributed human approval it must not manufacture, so a human submits the change on the server" >&2
+  exit 2
+fi
 shift 2
 ATTENDED_OVERRIDE=false
 ALLOW_RED=()
@@ -342,13 +355,17 @@ META="$STATE/$ID.meta"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# Role partition: merging is MAIN-owned; the Pi supervision branch reports the
-# green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
-# without a branch actor). This precedes reading the task record, because the
-# wrong actor is refused for its role whatever that record says.
+# Role partition: merging is MAIN-owned while attended; the Pi supervision
+# branch reports the green PR and never merges (contract: bin/fm-lease-lib.sh;
+# no-op in homes without a branch actor). While the away-posture record exists
+# main is parked and this one action relocates to the branch, which then meets
+# exactly the same gates below as main would: yolo or a merge grant, green at
+# its live head, synchronous, under the record lock. This precedes
+# reading the task record, because the wrong actor is refused for its role
+# whatever that record says.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+fm_lease_forbid_branch "PR merge (fm-pr-merge)" --away-relocated
 
 if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
@@ -610,7 +627,6 @@ github_verify_mergeable() {
   if ! fields=$(printf '%s' "$json" | jq -r '
       if type == "object" then
         "state=" + ((.state // "") | tostring),
-        "draft=" + (if (.isDraft | type) == "boolean" then (.isDraft | tostring) else "" end),
         "mergeable=" + ((.mergeable // "") | tostring),
         "merge_state=" + ((.mergeStateStatus // "") | tostring),
         "head=" + ((.headRefOid // "") | tostring),
@@ -625,7 +641,6 @@ github_verify_mergeable() {
     total=$((total + 1))
     case "$line" in
       state=*) state=${line#state=} ;;
-      draft=*) draft=${line#draft=} ;;
       mergeable=*) mergeable=${line#mergeable=} ;;
       merge_state=*) merge_state=${line#merge_state=} ;;
       head=*) live_head=${line#head=} ;;
@@ -636,11 +651,12 @@ github_verify_mergeable() {
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 6 ] || [ "$total" -ne 6 ] || [ -z "$base" ]; then
+  if [ "$named" -ne 5 ] || [ "$total" -ne 5 ] || [ -z "$base" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
 
+  draft=$(fm_pr_json_draft_state "$json")
   if ! fm_pr_head_valid "$live_head"; then
     echo "error: could not read the GitHub pull request head commit before merging" >&2
     return 1
@@ -890,7 +906,7 @@ METHODS
 }
 
 record_pr_metadata() {
-  if ! "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
+  if ! FM_PR_CHECK_MERGE=1 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
     return 1
   fi
   grep -qxF "pr=$URL" "$META" || {
@@ -921,7 +937,7 @@ FM_PR_MERGE_AUTHORITY=
 # owns what the away-posture record and the task's recorded yolo posture say;
 # this function owns what a merge run may do about it, so the answer the merge
 # poll later tags its ledger row with is the same answer gated here.
-require_away_merge_grant() {
+resolve_merge_authority() {
   FM_PR_MERGE_AUTHORITY=
   if fm_merge_authority_resolve "$FM_HOME" "$STATE" "$META" "$ID"; then
     FM_PR_MERGE_AUTHORITY=$FM_MERGE_AUTHORITY
@@ -968,7 +984,8 @@ require_current_away_authority() {
       return 2
     fi
   fi
-  require_away_merge_grant || return 1
+  fm_lease_forbid_branch "PR merge (fm-pr-merge)" --away-relocated
+  resolve_merge_authority || return 1
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
     echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2
     return 2
@@ -994,8 +1011,9 @@ persist_accepted_merge_authority() {
 
 # While away, a merge proceeds only when the base branch's rules prove no
 # merge queue, because a queued merge can land after its away authority
-# lapses; this holds regardless of which away authority (a named merge grant
-# or a standing yolo=on posture) let the merge run at all. A repository whose
+# lapses with the record's archive; this holds regardless of which away
+# authority (a named merge grant or a standing yolo=on posture) let the merge
+# run at all. A repository whose
 # plan does not expose branch rules at all (GitHub's "Upgrade to GitHub Pro or
 # make this repository public" 403) proves that on its own, since such a
 # repository cannot have a merge_queue rule either; see
@@ -1008,7 +1026,7 @@ refuse_github_queue_while_away() {
   [ "$FM_PR_AWAY_POSTURE" = true ] || return 0
   # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
   # oversight: a queue rule or PR base change after this preflight can still
-  # enqueue the merge, which can land after its away grant lapses.
+  # enqueue the merge, which can land after its away authority lapses.
   github_read_queue_method
   [ "$FM_PR_GITHUB_QUEUE_STATUS" = none ] && return 0
   echo "error: GitHub merge refused while away because the base branch's merge-queue state does not prove an immediate merge; nothing was handed to the forge" >&2
