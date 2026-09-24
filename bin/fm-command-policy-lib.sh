@@ -153,7 +153,9 @@
 # branch -D/-M/-f, reflog expire/delete, update-ref -d), and a fetch that does
 # something with what it downloads - the shapes under "Fetches" below. gh
 # reads its group and verb past inherited flags and their values (`gh pr
-# --repo o/n comment`), so an outward verb cannot hide behind one.
+# --repo o/n comment`), so an outward verb cannot hide behind one. The Devin
+# adapter alone approves three review-round writes on the task's own PR out of
+# this class; its header owns that carve-out.
 #
 # Fetches (curl and wget). A read-only web lookup is approved for ANY host: a
 # GET-shaped request whose output lands on stdout, a pipe that is not a shell
