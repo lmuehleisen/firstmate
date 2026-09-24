@@ -904,6 +904,7 @@ unit_tmux_launch_hands_over_primary_harness() {
   for harness in claude unknown; do
     st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-harness.XXXXXX")
     mkdir -p "$st/state"
+    # shellcheck disable=SC2016 # The variables expand in the generated entry script.
     printf '#!/bin/sh\nprintf "%%s" "${FM_DAEMON_PRIMARY_HARNESS-<unset>}" > "$FM_HOME/daemon-harness"\n' > "$st/entry"
     chmod +x "$st/entry"
     FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY="$st/entry" FM_TEST_HARNESS="$harness" bash -c '

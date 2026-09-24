@@ -150,7 +150,8 @@
 #                                   a longer digest is written under
 #                                   state/.subsuper-digests/ and only a short
 #                                   pointer line naming that file is typed
-#                                   (default 480)
+#                                   (default 480); a pointer that cannot fit
+#                                   is not typed and the buffer is kept
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
@@ -757,6 +758,17 @@ escalate_flush() {  # <state>
       printf '(pre-read; re-arm not needed — watcher daemon-managed)\n'
     } > "$file" || return 1
     msg=$(printf 'Supervisor escalate (%s event(s)): the digest is %s characters, too long to type safely, so read it from %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "${#msg}" "$file")
+    # The pointer is bounded too: a low max or a long FM_HOME path falls back to
+    # the bare locator, and a pointer that still does not fit is never typed.
+    fm_operational_input_encode away-supervisor "$msg" encoded || return 1
+    if [ "${#encoded}" -gt "$max" ]; then
+      msg=$(printf 'Supervisor escalate (%s event(s)): read it from %s' "$n" "$file")
+      fm_operational_input_encode away-supervisor "$msg" encoded || return 1
+      if [ "${#encoded}" -gt "$max" ]; then
+        log "escalate: pointer line of ${#encoded} characters exceeds FM_INJECT_INLINE_MAX=$max; not typed, buffer kept"
+        return 1
+      fi
+    fi
   fi
   if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1

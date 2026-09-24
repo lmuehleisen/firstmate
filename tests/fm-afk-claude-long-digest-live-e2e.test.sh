@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016,SC2031 # Snippets expand inside the daemon() subshell, which sources the daemon library.
 # Opt-in credentialed live guard for away-mode digest delivery into a real Claude
 # Code primary under tmux. It proves, against the installed Claude Code:
 #   1. Counterfactual: a digest of more than 2,000 characters typed inline arrives

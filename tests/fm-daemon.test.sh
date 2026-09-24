@@ -1474,6 +1474,38 @@ test_escalate_long_digest_types_a_pointer() {
   pass "a digest over the inline max types a short pointer to a file holding every event"
 }
 
+test_escalate_pointer_line_is_bounded() {
+  local dir state fakebin sent capture i long typed max
+  dir=$(make_supercase pointer-bound)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  long=$(printf 'x%.0s' $(seq 1 300))
+  for i in 1 2 3; do escalate_add "$state" "task-$i.status: blocked: event $i $long"; done
+  afk_enter "$state"
+  # Room for the bare locator but not the explanatory pointer.
+  max=$(( ${#state} + 130 ))
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_INJECT_INLINE_MAX=$max escalate_flush "$state" \
+    || fail "escalate_flush failed with a pointer-sized max"
+  typed=$(grep -v '\[ENTER\]' "$sent")
+  [ "${#typed}" -le "$max" ] || fail "pointer typed ${#typed} characters, over FM_INJECT_INLINE_MAX=$max: $typed"
+  case "$typed" in
+    *"FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (3 event(s)): read it from $state/.subsuper-digests/"*.txt) : ;;
+    *) fail "a tight max did not fall back to the bare locator: $typed" ;;
+  esac
+  : > "$sent"
+  escalate_add "$state" "task-4.status: blocked: event 4 $long"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_INJECT_INLINE_MAX=40 escalate_flush "$state"; then
+    fail "escalate_flush reported success with a pointer that cannot fit"
+  fi
+  [ -s "$sent" ] && fail "a pointer over FM_INJECT_INLINE_MAX was typed: $(cat "$sent")"
+  grep -F 'task-4.status' "$state/.subsuper-escalations" >/dev/null || fail "unsent escalation was not kept in the buffer"
+  pass "the pointer line stays within FM_INJECT_INLINE_MAX or is not typed at all"
+}
+
 test_escalate_batch_age_uses_first_append() {
   local dir state fakebin sent capture
   dir=$(make_supercase batch-age)
@@ -2876,6 +2908,7 @@ test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_long_digest_types_a_pointer
+test_escalate_pointer_line_is_bounded
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
