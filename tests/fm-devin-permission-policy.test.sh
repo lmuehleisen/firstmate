@@ -741,6 +741,184 @@ EOF
   pass "fm-devin-permission-policy: PR comments, thread resolution, downloads that do something, and rewrites always escalate"
 }
 
+# --- review-round writes on the task's own PR -------------------------------
+
+# own_pr_case <name>: a case whose PATH carries a fake gh that logs every call
+# and answers the two read-only lookups the carve-out makes: the open PRs for a
+# head branch ($dir/gh-prlist) and a review thread's PR ($dir/gh-thread-<id>).
+own_pr_case() {
+  local policy dir
+  policy=$(new_case "$1" 'echo "APPROVE: looks fine to me"; exit 0')
+  dir=$(case_dir "$policy")
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_GH_DIR/gh-calls"
+case "$1 $2" in
+  'pr list') cat "$FAKE_GH_DIR/gh-prlist" 2>/dev/null; exit 0 ;;
+  'api graphql')
+    for a in "$@"; do
+      case "$a" in id=*) f="$FAKE_GH_DIR/gh-thread-${a#id=}"; [ -f "$f" ] && { cat "$f"; exit 0; } ;; esac
+    done
+    exit 1 ;;
+esac
+exit 1
+EOF
+  chmod +x "$dir/fakebin/gh"
+  printf 'Owner/Name 41\n' > "$dir/gh-thread-PRRT_own"
+  printf 'Owner/Name 42\n' > "$dir/gh-thread-PRRT_other_pr"
+  printf 'Owner/Other 41\n' > "$dir/gh-thread-PRRT_other_repo"
+  printf '%s\n' "$policy"
+}
+
+# own_pr_hook <policy> <command>: permission-request with the fake gh first on PATH.
+own_pr_hook() {
+  local saved=$PATH
+  PATH="$(case_dir "$1")/fakebin:$PATH" FAKE_GH_DIR=$(case_dir "$1")
+  export PATH FAKE_GH_DIR
+  hook "$1" permission-request exec "$2"
+  PATH=$saved
+}
+
+expect_own_pr_approved() {  # <policy> <label> < commands
+  local policy=$1 cmd
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    own_pr_hook "$policy" "$cmd"
+    [ "$RC" = 0 ] && [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+      || fail "$2 must approve '$cmd', got rc=$RC out=$OUT"
+  done
+}
+
+expect_own_pr_escalated() {  # <policy> <label> < commands
+  local policy=$1 dir cmd
+  dir=$(case_dir "$policy")
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    rm -rf "$dir/state/t1.devin-permission-pending"
+    own_pr_hook "$policy" "$cmd"
+    [ "$RC" = 0 ] && [ -z "$OUT" ] || fail "$2 must keep escalating '$cmd', got rc=$RC out=$OUT"
+    grep -qF 'needs-decision' "$dir/state/t1.status" 2>/dev/null \
+      || fail "$2 must reach the captain for '$cmd'"
+    : > "$dir/state/t1.status"
+  done
+}
+
+test_own_pr_review_writes() {
+  local policy dir wt
+  policy=$(own_pr_case own-pr)
+  dir=$(case_dir "$policy")
+  printf 'window=x\nkind=ship\npr=https://github.com/Owner/Name/pull/41\n' > "$dir/state/t1.meta"
+
+  expect_own_pr_approved "$policy" "the task's own PR" <<'EOF'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body='Fixed in abc1234: the guard now rejects empty input.'
+gh api repos/Owner/Name/pulls/41/comments -X POST -f in_reply_to=3141592 -f body="Done - kept the old flag as an alias."
+gh api /repos/owner/name/pulls/41/comments --method POST --field in_reply_to=3141592 --raw-field body='Not changing this: the caller already validates it.' --jq .html_url
+gh api repos/owner/name/issues/41/comments -f body="@codex review"
+gh api repos/owner/name/issues/41/comments --raw-field body='@codex review' --silent
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }'
+EOF
+  own_pr_hook "$policy" "gh api graphql -f query='mutation Resolve {
+  resolveReviewThread(input: {threadId: \"PRRT_own\"}) {
+    thread { id isResolved }
+  }
+}' --jq .data.resolveReviewThread.thread.isResolved"
+  [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+    || fail "a multi-line resolveReviewThread query on the task's own PR must approve, got rc=$RC out=$OUT"
+  [ ! -e "$dir/state/t1.status" ] || fail "an own-PR review write must not wake firstmate: $(cat "$dir/state/t1.status")"
+  [ ! -d "$dir/state/t1.devin-permission-cache" ] || fail "an own-PR review write must never be cached"
+  [ "$(jq -s 'map(select(.decision == "approve" and .decider == "policy")) | length' "$dir/state/devin-permission-log.jsonl")" = 7 ] \
+    || fail "each own-PR review write must be logged as a policy approval"
+  # The hook itself only ever reads the forge: the thread lookup, never the write.
+  if grep -v 'PullRequestReviewThread' "$dir/gh-calls" | grep -q .; then
+    fail "the policy must never run anything but read-only lookups: $(cat "$dir/gh-calls")"
+  fi
+
+  expect_own_pr_escalated "$policy" "a near miss" <<'EOF'
+gh api repos/owner/name/pulls/42/comments -F in_reply_to=3141592 -F body='Fixed.'
+gh api repos/owner/other/pulls/41/comments -F in_reply_to=3141592 -F body='Fixed.'
+gh api repos/someone/name/issues/41/comments -f body="@codex review"
+gh api repos/owner/name/issues/42/comments -f body="@codex review"
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body='Fixed.' -F path=bin/x.sh
+gh api repos/owner/name/pulls/41/comments -f body='A new top-level review comment' -f commit_id=abc1234 -f path=bin/x.sh -F line=3
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body=@notes.txt
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=abc -F body='Fixed.'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body="Fixed on $(hostname)."
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body="Fixed in $HOME."
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body='Fixed.' -H 'Accept: application/json'
+gh api --hostname github.example repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body='Fixed.'
+gh api repos/owner/name/pulls/41/comments -X PATCH -F in_reply_to=3141592 -F body='Fixed.'
+gh api repos/owner/name/pulls/41/reviews -f event=APPROVE -f body='@codex review'
+gh api repos/owner/name/issues/41/comments -f body="@codex review please"
+gh api repos/owner/name/issues/41/comments -f body="LGTM"
+gh api repos/owner/name/issues/41/comments -F body='@codex review'
+gh api repos/owner/name/issues/41/comments -f body="@codex review" -f extra=1
+gh api repos/owner/name/issues/41/labels -f labels[]=ready
+gh api repos/owner/name/pulls/41/merge -X PUT
+gh api repos/owner/name/issues/41/comments -f body="@codex review" && gh pr merge 41 --repo owner/name
+gh api repos/owner/name/issues/41/comments -f body="@codex review" > /tmp/out.json
+gh api repos/{owner}/{repo}/issues/41/comments -f body="@codex review"
+gh api repos/owner/name/issues/41/comments -f body=$'@codex review'
+gh api graphql -f query='mutation { addPullRequestReviewComment(input: {pullRequestReviewId: "PRR_x", body: "hi"}) { comment { id } } }'
+gh api graphql -f query='mutation { unresolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }'
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } addLabelsToLabelable(input: {labelableId: "PR_x", labelIds: ["L"]}) { clientMutationId } }'
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } } mutation { mergePullRequest }'
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_other_pr"}) { thread { isResolved } } }'
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_other_repo"}) { thread { isResolved } } }'
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_unknown"}) { thread { isResolved } } }'
+gh api graphql -F query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }'
+gh api graphql -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }' -f id=PRRT_own
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }' -f extra=1
+EOF
+
+  # Without a recorded pr= the PR must be proved from the task's own branch;
+  # a worktree with no branch or no origin proves nothing.
+  printf 'window=x\nkind=ship\n' > "$dir/state/t1.meta"
+  expect_own_pr_escalated "$policy" "missing pr= metadata with no provable branch PR" <<'EOF'
+gh api repos/owner/name/issues/41/comments -f body="@codex review"
+EOF
+  rm -f "$dir/state/t1.meta"
+  expect_own_pr_escalated "$policy" "absent task metadata with no provable branch PR" <<'EOF'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -F body='Fixed.'
+EOF
+
+  wt=$(jq -r .worktree "$policy")
+  git -C "$wt" init -q -b fm/t1 && git -C "$wt" remote add origin https://github.com/Owner/Name.git \
+    || fail "cannot build the branch fixture"
+  printf 'window=x\nkind=ship\n' > "$dir/state/t1.meta"
+  printf '41 Owner\n' > "$dir/gh-prlist"
+  expect_own_pr_approved "$policy" "the task branch's open PR" <<'EOF'
+gh api repos/owner/name/issues/41/comments -f body="@codex review"
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }'
+EOF
+  expect_own_pr_escalated "$policy" "another PR than the task branch's" <<'EOF'
+gh api repos/owner/name/issues/42/comments -f body="@codex review"
+EOF
+  printf '41 Owner\n45 fork-owner\n' > "$dir/gh-prlist"
+  expect_own_pr_approved "$policy" "the task branch's PR beside a fork's same-named branch" <<'EOF'
+gh api repos/owner/name/issues/41/comments -f body="@codex review"
+EOF
+  printf '45 fork-owner\n' > "$dir/gh-prlist"
+  expect_own_pr_escalated "$policy" "a same-named branch PR from another owner" <<'EOF'
+gh api repos/owner/name/issues/45/comments -f body="@codex review"
+EOF
+  printf '41 Owner\n44 Owner\n' > "$dir/gh-prlist"
+  expect_own_pr_escalated "$policy" "an ambiguous branch PR" <<'EOF'
+gh api repos/owner/name/issues/41/comments -f body="@codex review"
+EOF
+  : > "$dir/gh-prlist"
+  expect_own_pr_escalated "$policy" "a branch with no open PR" <<'EOF'
+gh api repos/owner/name/issues/41/comments -f body="@codex review"
+EOF
+  # A recorded pr= that cannot be parsed never falls back to the branch.
+  printf '41 Owner\n' > "$dir/gh-prlist"
+  printf 'window=x\npr=https://github.com/Owner/Name/pulls/41\n' > "$dir/state/t1.meta"
+  expect_own_pr_escalated "$policy" "an unparseable pr= line" <<'EOF'
+gh api repos/owner/name/issues/41/comments -f body="@codex review"
+EOF
+  pass "fm-devin-permission-policy: review replies, @codex review, and thread resolution are approved only on the task's own PR"
+}
+
 # A read-only web lookup is routine work on ANY host: a GET-shaped curl or
 # wget whose output lands on stdout, a pipe that is not a shell or
 # interpreter, or a file inside the task's write roots. These approve
@@ -1320,6 +1498,7 @@ test_scratch_writes_and_task_deletes
 test_judge_retries_a_missing_verdict_once
 test_verdict_cache_reuses_approvals_only
 test_outward_actions_always_escalate
+test_own_pr_review_writes
 test_read_only_lookups_are_approved_statically
 test_downloads_that_do_something_always_escalate
 test_the_brief_is_not_writable_by_the_worker

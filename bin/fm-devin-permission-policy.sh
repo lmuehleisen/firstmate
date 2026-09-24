@@ -92,6 +92,30 @@
 # {"decision":"approve"}, and everything else exits 0 with no output so
 # Devin's own permission prompt decides.
 #
+# Own-PR review writes. One narrow carve-out from the shared never-approve
+# class, owned here rather than in the shared library so it reaches Devin
+# workers only and never widens what the agy adapter's bypass launch or any
+# judge approves. permission-request approves, uncached, a call whose only
+# objection was that outward action and whose whole command is one `gh api`
+# invocation - no other segment, redirection, substitution, expansion, glob,
+# or ANSI-C quoting, and no flag beyond -X/--method POST, --jq/-q, and
+# --silent - of exactly one of these shapes against the task's own PR:
+#   - repos/<owner>/<name>/pulls/<n>/comments with exactly the fields
+#     in_reply_to (a number) and body (a -F body must not start with @, which
+#     would read a file): a reply to an existing review comment;
+#   - repos/<owner>/<name>/issues/<n>/comments with exactly one raw -f body
+#     field whose value is `@codex review`: a Codex re-review request;
+#   - graphql with exactly one raw -f query field holding one
+#     resolveReviewThread mutation with a literal threadId and a plain field
+#     selection, where a read-only graphql lookup confirms the thread belongs
+#     to the task's own PR.
+# The task's own PR is the pr= line in state/<task>.meta, beside the status
+# file; before one is recorded it is the single open PR whose head is the
+# worktree's branch, owned by the origin repository's owner. Owner, name, and
+# number must all match (case-insensitively for owner and name, as GitHub
+# does). An unprovable PR, a failed or timed-out lookup, or any other forge
+# write keeps the never-approve escalation.
+#
 # Non-exec tools: read / grep / glob / notebook_read are approved unless an
 # argument names credential material; write / edit / notebook_edit are
 # approved for a file strictly inside the worktree (outside .git/, .devin/,
@@ -167,6 +191,8 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 # post-tool-use fires for every tool call; stay cheap when nothing is pending.
 if [ "$EVENT" = post-tool-use ] || [ "$EVENT" = stop ]; then
@@ -258,6 +284,135 @@ evaluate_tool() {  # non-exec tools: sets NOT_APPROVABLE
     *) no_approve "$TOOL is not auto-approved" ;;
   esac
 }
+
+# --- review-round writes on the task's own PR (see the header) ---------------
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# own_pr: sets OWN_PR_REPO (lowercase owner/name) and OWN_PR_NUMBER from the
+# task's recorded pr=, or, when none is recorded yet, from the one open PR
+# whose head is the worktree's branch in the origin repository. 1 when neither
+# proves a PR; an unparseable or non-GitHub pr= never falls back.
+own_pr() {
+  local meta branch remote repo out line n=0 pattern
+  OWN_PR_REPO='' OWN_PR_NUMBER=''
+  fm_pr_task_id_valid "$TASK" && [ -n "$STATUS" ] || return 1
+  meta="${STATUS%/*}/$TASK.meta"
+  if grep -q '^pr=' "$meta" 2>/dev/null; then
+    fm_pr_metadata_identity_parse "$meta" && [ "$FM_PR_META_PROVIDER" = github ] || return 1
+    OWN_PR_REPO=$(lower "$FM_PR_META_PATH") OWN_PR_NUMBER=$FM_PR_META_NUMBER
+    return 0
+  fi
+  [ -n "$WORKTREE" ] || return 1
+  branch=$(git -C "$WORKTREE" symbolic-ref --short -q HEAD 2>/dev/null) || return 1
+  case "$branch" in ''|main|master|-*) return 1 ;; esac
+  remote=$(git -C "$WORKTREE" remote get-url origin 2>/dev/null) || return 1
+  pattern='^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$'
+  [[ ${remote%.git} =~ $pattern ]] || return 1
+  repo="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+  out=$(fm_run_timed 15 gh pr list -R "$repo" --head "$branch" --state open \
+    --json number,headRepositoryOwner --jq '.[] | "\(.number) \(.headRepositoryOwner.login)"' 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ "$(lower "${line#* }")" = "$(lower "${repo%%/*}")" ] || continue
+    n=$((n + 1)) OWN_PR_NUMBER=${line%% *}
+  done <<< "$out"
+  [ "$n" = 1 ] && [[ $OWN_PR_NUMBER =~ ^[1-9][0-9]*$ ]] || { OWN_PR_NUMBER=''; return 1; }
+  OWN_PR_REPO=$(lower "$repo")
+}
+
+# review_thread_query_id <query>: prints the thread id when <query> is exactly
+# one resolveReviewThread mutation with a literal threadId and a selection of
+# plain field names, so no second mutation can ride along.
+review_thread_query_id() {
+  local q depth=0 k c sel pattern
+  q=$(printf '%s' "$1" | tr '\t\n\r' '   ' | tr -s ' ')
+  q=${q# } q=${q% }
+  pattern='^mutation( [A-Za-z_][A-Za-z0-9_]*)? ?\{ ?resolveReviewThread ?\( ?input ?: ?\{ ?threadId ?: ?"([A-Za-z0-9_=-]+)" ?\} ?\) ?(\{[A-Za-z0-9_ {}]*\}) ?\}$'
+  [[ $q =~ $pattern ]] || return 1
+  sel=${BASH_REMATCH[3]}
+  for ((k = 0; k < ${#sel}; k++)); do
+    c=${sel:k:1}
+    case "$c" in
+      '{') depth=$((depth + 1)) ;;
+      '}') depth=$((depth - 1)); [ "$depth" -gt 0 ] || [ "$k" = $((${#sel} - 1)) ] || return 1 ;;
+    esac
+  done
+  [ "$depth" = 0 ] || return 1
+  printf '%s\n' "${BASH_REMATCH[2]}"
+}
+
+# own_pr_review_write <command>: 0, with OWN_PR_SHAPE naming the write, when
+# the whole command is one of the three review-round writes against this
+# task's own PR. Any other word, flag, field, or shell construct returns 1 and
+# the call keeps its never-approve escalation.
+own_pr_review_write() {
+  local cmd=$1 k n w endpoint='' pattern repo num kind tid got
+  local body='' body_raw=0 nbody=0 reply='' nreply=0 query='' nquery=0 nfield=0
+  OWN_PR_SHAPE=''
+  # The tokenizer approximates ANSI-C quoting, so its words are not trusted.
+  case "$cmd" in *"\$'"*) return 1 ;; esac
+  P_INNER=()
+  tokenize "$cmd"
+  [ "$P_SUBST" -eq 0 ] && [ "$P_HEREDOC_EXPANDING" -eq 0 ] || return 1
+  n=${#T_TXT[@]}
+  for ((k = 0; k < n; k++)); do
+    [ "${T_KIND[k]}" = w ] && [ "${T_VAR[k]}" = 0 ] && [ "${T_GLOB[k]}" = 0 ] || return 1
+  done
+  [ "$n" -ge 3 ] && [ "${T_TXT[0]}" = gh ] && [ "${T_TXT[1]}" = api ] || return 1
+  _field() {  # <raw-flag> <key=value>
+    nfield=$((nfield + 1))
+    case "$2" in
+      body=*) nbody=$((nbody + 1)) body=${2#body=} body_raw=$1 ;;
+      in_reply_to=*) nreply=$((nreply + 1)) reply=${2#in_reply_to=} ;;
+      query=*) [ "$1" = 1 ] && nquery=$((nquery + 1)) query=${2#query=} ;;
+    esac
+  }
+  for ((k = 2; k < n; k++)); do
+    w=${T_TXT[k]}
+    case "$w" in
+      -X|--method) k=$((k + 1)); [ "${T_TXT[k]-}" = POST ] || return 1 ;;
+      -XPOST|--method=POST|--silent|--jq=*) ;;
+      --jq|-q) k=$((k + 1)); [ "$k" -lt "$n" ] || return 1 ;;
+      -f|--raw-field|-F|--field)
+        k=$((k + 1)); [ "$k" -lt "$n" ] || return 1
+        case "$w" in -f|--raw-field) _field 1 "${T_TXT[k]}" ;; *) _field 0 "${T_TXT[k]}" ;; esac ;;
+      --raw-field=*) _field 1 "${w#--raw-field=}" ;;
+      --field=*) _field 0 "${w#--field=}" ;;
+      -f?*) _field 1 "${w#-f}" ;;
+      -F?*) _field 0 "${w#-F}" ;;
+      -*) return 1 ;;
+      *) [ -z "$endpoint" ] || return 1; endpoint=$w ;;
+    esac
+  done
+  endpoint=${endpoint#/}
+  pattern='^repos/([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)/(pulls|issues)/([1-9][0-9]*)/comments$'
+  if [[ $endpoint =~ $pattern ]]; then
+    repo=$(lower "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}") kind=${BASH_REMATCH[3]} num=${BASH_REMATCH[4]}
+    if [ "$kind" = pulls ]; then
+      # -F reads a file for an @value, so a typed body must not start with @.
+      [ "$nfield" = 2 ] && [ "$nbody" = 1 ] && [ "$nreply" = 1 ] && [ -n "$body" ] \
+        && [[ $reply =~ ^[1-9][0-9]*$ ]] || return 1
+      [ "$body_raw" = 1 ] || [ "${body#@}" = "$body" ] || return 1
+      OWN_PR_SHAPE='a reply to a review comment'
+    else
+      [ "$nfield" = 1 ] && [ "$nbody" = 1 ] && [ "$body_raw" = 1 ] && [ "$body" = '@codex review' ] || return 1
+      OWN_PR_SHAPE='a Codex re-review request'
+    fi
+    own_pr && [ "$repo" = "$OWN_PR_REPO" ] && [ "$num" = "$OWN_PR_NUMBER" ] || { OWN_PR_SHAPE=''; return 1; }
+    return 0
+  fi
+  [ "$endpoint" = graphql ] && [ "$nfield" = 1 ] && [ "$nquery" = 1 ] || return 1
+  tid=$(review_thread_query_id "$query") || return 1
+  own_pr || return 1
+  # Ownership is read back from the forge: the thread must sit on this PR.
+  got=$(fm_run_timed 15 gh api graphql \
+    -f query='query($id: ID!) { node(id: $id) { ... on PullRequestReviewThread { pullRequest { number repository { nameWithOwner } } } } }' \
+    -f id="$tid" --jq '.data.node.pullRequest | "\(.repository.nameWithOwner) \(.number)"' 2>/dev/null) || return 1
+  [ "$(lower "$got")" = "$OWN_PR_REPO $OWN_PR_NUMBER" ] || return 1
+  OWN_PR_SHAPE='resolving a review thread'
+}
+
 case "$EVENT" in
   judge-probe)
     # The measurement seam (not a Devin hook). Same payload, same static
@@ -304,6 +459,14 @@ case "$EVENT" in
       exit 0
     fi
     escalate_reason='' escalate_source='first judge'
+    # The one carve-out from the never-approve class: only when the outward
+    # action was the call's sole objection, and never cached.
+    if [ "$TOOL" = exec ] && [ -n "$NEVER_APPROVE" ] && [ "$NOT_APPROVABLE" = "$NEVER_APPROVE" ] \
+      && [ -z "$SENSITIVE_HIT" ] && own_pr_review_write "$CMD"; then
+      log_record approve policy "$OWN_PR_SHAPE on this task's own PR"
+      json_reason approve "Approved by firstmate policy: $OWN_PR_SHAPE on this task's own PR"
+      exit 0
+    fi
     if [ -n "$NEVER_APPROVE" ]; then
       # Outward actions skip the judge and the cache entirely, and are never
       # cached at the prompt either, so approving one stays a one-off.
