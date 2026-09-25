@@ -268,10 +268,15 @@ take_send_turn() {  # <token>
 }
 
 cmd_arm() {
-  local token log start
+  local token log start locked=
   cat >/dev/null 2>&1 || true
   token="$(date +%s).$$.$RANDOM"
-  set_turn "$token" || return 0
+  ! task_lock || locked=1
+  set_turn "$token" || {
+    [ -z "$locked" ] || task_unlock
+    return 0
+  }
+  [ -z "$locked" ] || task_unlock
   if ! log=$(find_session_log); then
     log_event unarmed "no Devin session log found in $LOG_DIR for the hook's process ancestry"
     return 0
@@ -282,9 +287,10 @@ cmd_arm() {
   return 0
 }
 
-# The per-task lock that orders the cap line against Stop and retire, so a cap
-# published by a sentinel is always seen, and resolved, by whichever of them
-# retires its turn. Only these short sections take it, never a send.
+# The per-task lock that orders the cap line against a new prompt, Stop, and
+# retire, so a sentinel publishes a cap only for a turn that is still current
+# and whichever hook retires that turn sees the cap and resolves it. Only these
+# short sections take it, never a send.
 task_lock() {
   take_lock "$DIR/.lock"
 }
@@ -357,8 +363,8 @@ cmd_watch() {
   reset=$(reset_seconds "$line")
   count=$(retry_count)
   if [ "$count" -ge "$MAX" ]; then
-    # Published only while this turn is still current, under the lock Stop
-    # and retire take, so the turn's end always sees the cap and resolves it.
+    # Published only while this turn is still current, under the lock a new
+    # prompt, Stop, and retire take, so the turn's end always sees the cap.
     task_lock || {
       [ ! -d "$DIR" ] || log_event failed "the task's retry lock stayed held; the retry cap was not published"
       return 0
