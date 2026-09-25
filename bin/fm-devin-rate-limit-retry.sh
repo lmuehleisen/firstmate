@@ -189,17 +189,17 @@ reset_seconds() {  # <error-line>
   esac
 }
 
-# Takes a mkdir lock; fails when a live holder keeps it for the whole wait or
-# its directory is gone. A holder that died leaves the lock behind, and every
-# section these locks guard takes milliseconds, so one older than 30 seconds
-# is abandoned.
+# Takes a mkdir lock; fails when its directory is gone. A holder that died
+# leaves the lock behind, and every section these locks guard takes
+# milliseconds, so one older than 5 seconds is abandoned well inside the
+# 10-second wait, and only a holder re-taking it throughout can outlast that.
 take_lock() {  # <lock-path>
   local held _
   for _ in $(seq 1 50); do
     mkdir "$1" 2>/dev/null && return 0
     [ -d "${1%/*}" ] || return 1
     held=$(fm_lock_path_mtime "$1") || held=
-    case "$held" in '' | *[!0-9]*) ;; *) [ $(($(date +%s) - held)) -le 30 ] || rmdir "$1" 2>/dev/null || true ;; esac
+    case "$held" in '' | *[!0-9]*) ;; *) [ $(($(date +%s) - held)) -le 5 ] || rmdir "$1" 2>/dev/null || true ;; esac
     sleep 0.2
   done
   return 1
@@ -271,6 +271,8 @@ cmd_arm() {
   local token log start locked=
   cat >/dev/null 2>&1 || true
   token="$(date +%s).$$.$RANDOM"
+  # The turn is replaced even without the lock, because keeping the old token
+  # would let the previous turn's sentinel send its retry into this one.
   ! task_lock || locked=1
   set_turn "$token" || {
     [ -z "$locked" ] || task_unlock

@@ -13,8 +13,8 @@
 # reused pid's stale log, an undelivered retry, a held send lock, a long reset
 # that must not delay a shorter one, spacing measured from a slow send's end,
 # a superseded retry that leaves nothing behind, a stale log under a non-devin
-# ancestor, a capped task whose retry state is retired, and a cap detected after
-# its turn was retired.
+# ancestor, a capped task whose retry state is retired, a cap detected after
+# its turn was retired, and a task lock a dead holder left behind.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -334,3 +334,16 @@ sleep 3
 assert_no_grep 'blocked' "$H/state/t1.status" "a cap for a retired turn must not write a blocked line"
 ! has_event "$H" capped || fail "a cap for a retired turn must not be logged as capped"
 pass "a cap detected after its turn was retired publishes nothing"
+
+# 19. A task lock a dead holder left behind is broken within the wait, so the
+# cap is still published.
+H=$(new_home dead-lock)
+: >"$H/state/t1.status"
+LOG=$(FM_DEVIN_RETRY_MAX=0 fake_devin "$H" t1 arm)
+mkdir "$H/state/t1.devin-retry/.lock"
+touch -t 202001010000 "$H/state/t1.devin-retry/.lock"
+rate_limit_line "1 second" >>"$LOG"
+wait_for 15 "the capped event" has_event "$H" capped
+assert_equals 1 "$(grep -c '^blocked \[at=[0-9]*\] \[key=devin-rate-limit\]: ' "$H/state/t1.status")" "a dead holder's lock must not stop the cap"
+hook "$H" t1 stop
+pass "a task lock a dead holder left behind does not stop the cap"

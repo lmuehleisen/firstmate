@@ -27,6 +27,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEVIN_BIN=$(command -v devin 2>/dev/null || true)
 LAB=
+RETRY_STATE=
 SOCKET="fm-devin-signals-$$"
 SESSION=devin-signals
 TARGET="$SESSION:devin"
@@ -34,6 +35,7 @@ DEVIN_VERSION=
 
 cleanup() {
   local rc=$?
+  [ -z "${RETRY_STATE:-}" ] || "$ROOT/bin/fm-devin-rate-limit-retry.sh" retire "$RETRY_STATE" live - </dev/null
   [ -z "${REAL_TMUX:-}" ] || "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
   if [ "$rc" -ne 0 ] && [ -n "$LAB" ]; then
     printf 'Devin worker failure evidence retained: %s\n' "$LAB" >&2
