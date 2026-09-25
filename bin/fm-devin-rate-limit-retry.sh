@@ -22,7 +22,8 @@
 #       Opens a new turn: records a fresh turn token under
 #       <state-dir>/<task-id>.devin-retry/, finds the session log by walking
 #       the hook's process ancestry to the first pid with a
-#       devin_*_<pid>.log, and starts one detached `watch` sentinel for this
+#       devin_*_<pid>.log (the newest, when a reused pid left an older one),
+#       and starts one detached `watch` sentinel for this
 #       turn from the log's current line count. A turn whose log cannot be
 #       found is logged as unarmed and gets no automatic retry.
 #   stop (Stop)
@@ -44,11 +45,12 @@
 #       task's last normal Stop. The home-wide slot file
 #       <state-dir>/devin-rate-limit-slot then pushes that time to at least
 #       SPACING seconds after the latest retry any other worker in this home
-#       scheduled, so workers that hit the limit together retry apart. It
-#       sleeps to the slot, gives up if the turn token changed meanwhile, and
+#       scheduled, so workers that hit the limit together retry apart; when
+#       another claimant holds the slot's lock throughout, the retry keeps its
+#       own time unstaggered. It sleeps to the slot, gives up if the turn token changed meanwhile, and
 #       sends one ordinary steer through bin/fm-send.sh, so the message lands
 #       in the task's durable inbox and the doorbell submit starts the retry
-#       turn. Once count reaches MAX it sends nothing and appends one
+#       turn; a send that fails is logged and not counted. Once count reaches MAX it sends nothing and appends one
 #       `blocked [key=devin-rate-limit]` status line instead.
 #
 # Every arm, detection, retry, cap, and failure is one JSON line in the
@@ -136,17 +138,21 @@ retry_count() {
 }
 
 # The session log belongs to the `devin acp` process that runs this hook, so
-# the first ancestor with a devin_*_<pid>.log names it.
+# the first ancestor with a devin_*_<pid>.log names it; when a reused pid left
+# an older log behind, the most recently written one is the live session's.
 find_session_log() {
-  local pid=$PPID f _
+  local pid=$PPID f newest _
   for _ in 1 2 3 4 5 6 7 8; do
     case "$pid" in '' | *[!0-9]* | 0 | 1) return 1 ;; esac
+    newest=
     for f in "$LOG_DIR"/devin_*_"$pid".log; do
-      [ -f "$f" ] && {
-        printf '%s\n' "$f"
-        return 0
-      }
+      [ -f "$f" ] || continue
+      if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest=$f; fi
     done
+    [ -z "$newest" ] || {
+      printf '%s\n' "$newest"
+      return 0
+    }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
   done
   return 1
@@ -174,16 +180,26 @@ reset_seconds() {  # <error-line>
 
 # Claims the home-wide retry slot at or after <epoch>, at least SPACING after
 # the latest slot any worker in this home claimed; prints the claimed epoch.
+# When the lock stays held by a live claimant, it prints <epoch> unstaggered
+# and leaves the slot and the lock alone.
 claim_slot() {  # <epoch>
-  local want=$1 last lock="$SLOT.lock" held _
+  local want=$1 last lock="$SLOT.lock" held acquired= _
   for _ in $(seq 1 50); do
-    mkdir "$lock" 2>/dev/null && break
+    mkdir "$lock" 2>/dev/null && {
+      acquired=1
+      break
+    }
     # A holder that died leaves the lock behind; the section below takes
     # milliseconds, so a lock older than 30 seconds is abandoned.
     held=$(fm_lock_path_mtime "$lock") || held=
     case "$held" in '' | *[!0-9]*) ;; *) [ $(($(date +%s) - held)) -le 30 ] || rmdir "$lock" 2>/dev/null || true ;; esac
     sleep 0.2
   done
+  [ -n "$acquired" ] || {
+    log_event unstaggered "the retry slot lock stayed held; retry scheduled without home-wide spacing"
+    printf '%s' "$want"
+    return 0
+  }
   last=$(cat "$SLOT" 2>/dev/null) || last=0
   case "$last" in '' | *[!0-9]*) last=0 ;; esac
   [ "$want" -ge $((last + SPACING)) ] || want=$((last + SPACING))
@@ -270,10 +286,18 @@ cmd_watch() {
     [ "$now" -lt "$slot" ] || break
     if [ $((slot - now)) -lt "$POLL" ]; then sleep $((slot - now)); else sleep "$POLL"; fi
   done
+  # The count is written before the send, because the delivered retry starts
+  # the next turn whose sentinel reads it, and restored when nothing was sent,
+  # so the cap counts only retries the worker actually received.
   printf '%s\n' $((count + 1)) >"$DIR/count.$$" && mv -f "$DIR/count.$$" "$DIR/count"
   if FM_HOME=$HOME_DIR FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-send.sh" "$TASK" "$RETRY_MESSAGE" >/dev/null 2>&1; then
     log_event retried "retry $((count + 1)) of $MAX sent"
   else
+    if [ "$count" -eq 0 ]; then
+      rm -f "$DIR/count"
+    else
+      printf '%s\n' "$count" >"$DIR/count.$$" && mv -f "$DIR/count.$$" "$DIR/count"
+    fi
     log_event failed "retry $((count + 1)) of $MAX could not be sent through fm-send"
   fi
 }

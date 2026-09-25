@@ -9,7 +9,8 @@
 # fm-send with its home and state, a Stop or a new prompt superseding a
 # scheduled retry, the lines that must not trigger a retry, the consecutive
 # cap with its blocked line and the resolved line a later normal Stop writes,
-# the home-wide stagger between two workers, the unarmed case, and retire.
+# the home-wide stagger between two workers, the unarmed case, retire, a
+# reused pid's stale log, an undelivered retry, and a held slot lock.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -27,6 +28,7 @@ cp "$ROOT/bin/fm-devin-rate-limit-retry.sh" "$ROOT/bin/fm-lock-lib.sh" "$BIN/"
 RETRY="$BIN/fm-devin-rate-limit-retry.sh"
 cat >"$BIN/fm-send.sh" <<'EOF'
 #!/usr/bin/env bash
+[ ! -e "$FM_HOME/fail-send" ] || exit 1
 printf '%s|%s|%s|%s|%s\n' "$(date +%s)" "$FM_HOME" "$FM_STATE_OVERRIDE" "$1" "$2" >>"$FM_HOME/sent"
 EOF
 chmod +x "$BIN/fm-send.sh"
@@ -58,11 +60,16 @@ new_home() {
 
 # fake_devin <home> <task> <event...>: runs each hook event from one process
 # that owns devin_test_<pid>.log in the home's log dir, the way `devin acp`
-# runs hooks; prints the log path.
+# runs hooks; prints the log path. With FM_TEST_STALE_LOG=1, an older
+# devin_aaa_<pid>.log from an earlier process with the same pid sorts first.
 fake_devin() {
   local home=$1 task=$2
   shift 2
   FM_DEVIN_RETRY_LOG_DIR="$home/logs" bash -c '
+    [ "${FM_TEST_STALE_LOG:-}" != 1 ] || {
+      printf "old session\n" >"$1/logs/devin_aaa_$$.log"
+      touch -t 202001010000 "$1/logs/devin_aaa_$$.log"
+    }
     log="$1/logs/devin_test_$$.log"
     printf "session start\n" >>"$log"
     printf "%s\n" "$log"
@@ -198,3 +205,36 @@ rate_limit_line "1 second" >>"$LOG"
 sleep 3
 assert_equals 0 "$(sent_count "$H")" "a retired task must get no retry"
 pass "retire removes the retry state and its sentinel sends nothing"
+
+# 10. A reused pid's older log is skipped for the live session's newer one.
+H=$(new_home reused-pid)
+LOG=$(FM_TEST_STALE_LOG=1 fake_devin "$H" t1 arm)
+rate_limit_line "1 second" >>"$LOG"
+wait_for 15 "the retry send" sent_at_least "$H" 1
+pass "a reused pid's older session log does not hide the live one"
+
+# 11. A retry fm-send could not deliver is logged and not counted.
+H=$(new_home send-fails)
+: >"$H/fail-send"
+LOG=$(fake_devin "$H" t1 arm)
+rate_limit_line "1 second" >>"$LOG"
+wait_for 15 "the failed event" has_event "$H" failed
+assert_absent "$H/state/t1.devin-retry/count" "an undelivered retry must not count toward the cap"
+pass "an undelivered retry is logged and not counted toward the cap"
+
+# 12. A slot lock held by a live claimant throughout leaves the slot and the
+# lock alone, and the retry still goes out on its own time.
+H=$(new_home slot-held)
+printf '%s\n' 4000000000 >"$H/state/devin-rate-limit-slot"
+mkdir "$H/state/devin-rate-limit-slot.lock"
+(for _ in $(seq 1 40); do touch "$H/state/devin-rate-limit-slot.lock"; sleep 0.5; done) &
+toucher=$!
+LOG=$(FM_DEVIN_RETRY_SPACING=30 fake_devin "$H" t1 arm)
+rate_limit_line "1 second" >>"$LOG"
+wait_for 25 "the retry send" sent_at_least "$H" 1
+kill "$toucher" 2>/dev/null || true
+wait "$toucher" 2>/dev/null || true
+has_event "$H" unstaggered || fail "a held slot lock must be logged as unstaggered"
+assert_equals 4000000000 "$(cat "$H/state/devin-rate-limit-slot")" "a claimant without the lock must not rewrite the slot"
+[ -d "$H/state/devin-rate-limit-slot.lock" ] || fail "a claimant without the lock must not remove it"
+pass "a slot lock held throughout leaves the slot alone and the retry unstaggered"
