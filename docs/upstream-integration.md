@@ -31,8 +31,8 @@ This page is the maintainer checklist for one integration run; the fork's invari
 4. Verify the fork's dropped dependencies stay dropped and review what upstream changed under the opt-in: `git grep -n -E 'gh-axi|lavish-axi|chrome-devtools-axi|no-mistakes' -- bin .agents/skills AGENTS.md README.md CONTRIBUTING.md docs`, and account for every new hit upstream introduced.
    Include `CONTRIBUTING.md` and `docs`, because upstream prose can reintroduce a requirement the fork removed, such as a required check the fork deleted.
    gh-axi, chrome-devtools-axi, and lavish-axi stay dropped, while `no-mistakes` is an optional opt-in through `config/no-mistakes`, so an upstream change to its pipeline can now belong in the fork instead of being stripped.
-5. Classify every shared file that still differs from upstream: list the files present upstream in `git diff --stat upstream/main HEAD` and match each against the ledger's `Seam:` lines.
-   Report each file no entry claims in the pull request body as an incidental candidate and propose its realignment.
+5. Classify every divergent hunk in a shared file: for each file present upstream in `git diff --stat upstream/main HEAD`, read `git diff upstream/main HEAD -- <file>` and match each hunk against the behavior and scope a ledger `Seam:` line describes.
+   A file named by one entry does not claim its other hunks, so report each hunk no entry's scope covers in the pull request body as an incidental candidate and propose its realignment.
    For each `carried` entry, check whether this upstream range ships an equivalent, and if so propose dropping the fork copy.
    Also look for fork-tuned values inside upstream-owned files that an upstream test now pins.
 6. Run every guard the ledger names on the merged tree, before the broader suite; `grep '^- Guard:' docs/fork-divergences.md | grep -o 'tests/[a-z0-9-]*\.test\.sh' | sort -u` lists them.
