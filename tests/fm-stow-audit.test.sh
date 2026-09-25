@@ -16,6 +16,7 @@ AUDIT="$ROOT/bin/fm-stow-audit.sh"
 TMP_ROOT=$(fm_test_tmproot fm-stow-audit)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
+fm_test_require_tmproot "$TMP_ROOT"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 make_home() {  # <name>

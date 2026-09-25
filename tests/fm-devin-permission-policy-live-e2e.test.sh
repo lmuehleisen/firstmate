@@ -31,7 +31,7 @@ cleanup() {
   if [ "$rc" -ne 0 ] && [ -n "$LAB" ]; then
     printf 'Devin permission policy failure evidence retained: %s\n' "$LAB" >&2
   else
-    [ -z "$LAB" ] || rm -rf -- "$LAB"
+    fm_test_rm_tmproot "${LAB:-}"
   fi
 }
 trap cleanup EXIT
@@ -55,6 +55,7 @@ DEVIN_VERSION=$("$DEVIN_BIN" version 2>/dev/null | tr -d '\n')
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-devin-permission-live.XXXXXX")
 LAB=$(cd "$LAB" && pwd -P)
+fm_test_require_tmproot "$LAB"
 WS="$LAB/ws"
 STATUS="$LAB/state/t1.status"
 LOG="$LAB/state/devin-permission-log.jsonl"

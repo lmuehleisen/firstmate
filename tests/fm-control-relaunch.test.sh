@@ -38,14 +38,15 @@ X_LINK="$ROOT/bin/fm-x-link.sh"
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch) || exit 1
 mkdir -p "$TMP_ROOT" || exit 1
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd) || exit 1
+fm_test_require_tmproot "$TMP_ROOT"
 TASK_TMPS=()
 
 relaunch_cleanup() {
   local d
   for d in "${TASK_TMPS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    fm_test_rm_tmproot "${d:-}"
   done
-  rm -rf "$TMP_ROOT"
+  fm_test_rm_tmproot "${TMP_ROOT:-}"
 }
 trap relaunch_cleanup EXIT
 

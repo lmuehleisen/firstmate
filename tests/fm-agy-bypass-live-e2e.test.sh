@@ -32,7 +32,7 @@ cleanup() {
   if [ "$rc" -ne 0 ] && [ -n "$LAB" ]; then
     printf 'agy bypass failure evidence retained: %s\n' "$LAB" >&2
   else
-    [ -z "$LAB" ] || rm -rf -- "$LAB"
+    fm_test_rm_tmproot "${LAB:-}"
   fi
 }
 trap cleanup EXIT
@@ -56,6 +56,7 @@ AGY_VERSION=$("$AGY_BIN" --version 2>/dev/null | tr -d '\n')
 MODEL=gemini-3.6-flash-low
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-bypass.XXXXXX")
 LAB=$(cd "$LAB" && pwd -P)
+fm_test_require_tmproot "$LAB"
 
 # mkcase <name>: one scratch workspace plus state per case, mirroring the
 # directories fm-spawn gives a real task.

@@ -52,7 +52,7 @@ cleanup() {
   if [ "$rc" -ne 0 ] && [ -n "$LAB" ]; then
     printf 'Agy worker failure evidence retained: %s\n' "$LAB" >&2
   else
-    [ -z "$LAB" ] || rm -rf -- "$LAB"
+    fm_test_rm_tmproot "${LAB:-}"
   fi
 }
 trap cleanup EXIT
@@ -93,6 +93,7 @@ LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-live.XXXXXX")
 # unresolved grant (the /var -> /private/var case mktemp -d produces here) makes
 # it treat a write inside the granted directory as non-workspace access.
 LAB=$(cd "$LAB" && pwd -P)
+fm_test_require_tmproot "$LAB"
 WORKSPACE="$LAB/workspace"
 # Reproduce a Firstmate worker inheriting the tracked primary registration.
 # A real linked worktree must keep accept-edits even when that hook is loaded.

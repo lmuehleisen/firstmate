@@ -1665,6 +1665,12 @@ families_for_changed_path() {
       families_for_test_reference git-config-helpers.sh lib.sh herdr-test-safety.sh \
         || printf '%s\n' "__unmapped__:$path"
       ;;
+    tests/tmproot-guard.sh)
+      # Same non-transitive reference scan: most suites reach the guard only
+      # through tests/lib.sh, so match that library as well.
+      families_for_test_reference tmproot-guard.sh lib.sh \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
     tests/fixtures/*/*|tests/captures/*/*)
       # A fixture or recorded capture belongs to whichever suite reads its
       # directory, found by the same reference scan used for shared helpers.
