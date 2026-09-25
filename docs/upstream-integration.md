@@ -40,6 +40,7 @@ This page is the maintainer checklist for one integration run; the fork's invari
    A failing guard on an `intended` entry means an upstream change reached that divergence: adapt the upstream change, never the guard, and name the entry in the pull request body.
    A failing guard on a `carried` entry may mean upstream now ships an equivalent: evaluate dropping the fork copy and its entry before defending it, and name the outcome in the pull request body.
    List every entry whose `Guard:` line names no test (it reads `none`) in the pull request body as unprotected.
+   An opt-in live guard only skips by default, and a skip is not a pass: run the guards with `FM_LIVE=1` where each guard's harness is installed and signed in (the `fm_live_gate` contract in `tests/lib.sh`), and list every guard that still reported a skip in the pull request body as not exercised.
 7. Run `bin/fm-test-run.sh --changed` and `bin/fm-test-run.sh --check-coverage`, then each portable lane from `bin/fm-test-run.sh --list-lanes`, and `bin/fm-lint.sh`.
    When `--changed` refuses an unmapped path, run every suite the conflicts, the scan's findings, and the fork's divergent areas touch instead of skipping to the next step.
    A failing test that pins one side's design is adapted to the fork's intended behavior as the ledger records it, and the pull request body names each adaptation and why.
