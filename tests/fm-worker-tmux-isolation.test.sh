@@ -16,6 +16,9 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 REAL_TMUX=$(command -v tmux 2>/dev/null || true)
+# Probes run with fakebins first on PATH, and the relaunch stub's `sleep` exits
+# at once, so every session command names the real one.
+REAL_SLEEP=$(command -v sleep)
 if [ -z "$REAL_TMUX" ]; then
   echo "skip: tmux not found (worker tmux isolation)"
   exit 0
@@ -59,8 +62,8 @@ private_dir_for() {  # <home> <id>
 # FLEET_TMUX and FLEET_PANE to what a pane on it inherits.
 start_fleet() {
   ltmux -S "$FLEET_SOCK" kill-server >/dev/null 2>&1 || true
-  ltmux -S "$FLEET_SOCK" new-session -d -s firstmate -n captain 'sleep 600' || return 1
-  ltmux -S "$FLEET_SOCK" new-window -d -t firstmate -n fm-worker 'sleep 600' || return 1
+  ltmux -S "$FLEET_SOCK" new-session -d -s firstmate -n captain "$REAL_SLEEP 600" || return 1
+  ltmux -S "$FLEET_SOCK" new-window -d -t firstmate -n fm-worker "$REAL_SLEEP 600" || return 1
   FLEET_TMUX=$(ltmux -S "$FLEET_SOCK" display-message -p -t firstmate:fm-worker '#{socket_path},#{pid},0')
   FLEET_PANE=$(ltmux -S "$FLEET_SOCK" display-message -p -t firstmate:fm-worker '#{pane_id}')
 }
@@ -119,7 +122,7 @@ install_probe() {
   printf 'TMUX_TMPDIR=%s\n' "\${TMUX_TMPDIR-unset}"
 } > '$out'
 [ '$mode' != observe ] || exit 0
-'$REAL_TMUX' new-session -d -s lab 'sleep 600' || printf 'lab=failed\n' >> '$out'
+'$REAL_TMUX' new-session -d -s lab '$REAL_SLEEP 600' || printf 'lab=failed\n' >> '$out'
 printf 'socket=%s\n' "\$('$REAL_TMUX' display-message -p -t lab '#{socket_path}')" >> '$out'
 [ '$mode' != leak ] || exit 0
 '$REAL_TMUX' kill-server >/dev/null 2>&1
@@ -384,7 +387,7 @@ test_socket_budget_for_a_maximum_length_id() {
   out_file="$CASE_DIR/probe.out"
   cat > "$FAKEBIN_DIR/codex" <<SH
 #!/bin/sh
-'$REAL_TMUX' -L '$label' new-session -d -s lab 'sleep 600' && printf 'long=ok\n' > '$out_file'
+'$REAL_TMUX' -L '$label' new-session -d -s lab '$REAL_SLEEP 600' && printf 'long=ok\n' > '$out_file'
 '$REAL_TMUX' -L '$label' kill-server >/dev/null 2>&1
 SH
   chmod +x "$FAKEBIN_DIR/codex"
@@ -450,11 +453,11 @@ SH
 
   dir=$PRIVATE_DIR
   fm_worker_tmux_prepare "$dir" || fail "could not prepare the leak case's private directory"
-  env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" "$REAL_TMUX" new-session -d -s leaked 'sleep 600' ||
+  env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" "$REAL_TMUX" new-session -d -s leaked "$REAL_SLEEP 600" ||
     fail "could not start the leaked private server"
   sock=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" "$REAL_TMUX" display-message -p '#{socket_path}')
   # A server the worker named with -S directly under its directory.
-  ltmux -S "$dir/own" new-session -d -s own 'sleep 600' ||
+  ltmux -S "$dir/own" new-session -d -s own "$REAL_SLEEP 600" ||
     fail "could not start the worker's own -S server"
   own_pid=$(ltmux -S "$dir/own" display-message -p '#{pid}')
   [ -n "$own_pid" ] || fail "could not read the worker's own -S server pid"
