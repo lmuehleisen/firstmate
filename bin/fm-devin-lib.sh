@@ -230,6 +230,9 @@ remove_devin_managed_wiring() {  # <meta> <worktree>
 fm_devin_teardown_remove_state() {  # <state-dir> <id>
   rm -f "$1/$2.devin-permission.json"
   rm -rf "$1/$2.devin-permission-pending" "$1/$2.devin-permission-cache"
+  # Only a task that left retry state behind, current or mid-retire, has
+  # anything to retire.
+  [ -e "$1/$2.devin-retry" ] || compgen -G "$1/$2.devin-retry.retiring.*" >/dev/null || return 0
   "$SCRIPT_DIR/fm-devin-rate-limit-retry.sh" retire "$1" "$2" - </dev/null && return 0
   echo "error: $2's Devin rate-limit retry state under $1 could not be retired (see $1/devin-rate-limit-log.jsonl); fix it and re-run teardown" >&2
   return 1
