@@ -34,7 +34,7 @@ SESSION="fm-lab-eventwait-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
-  [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
+  fm_test_rm_tmproot "${SCRATCH:-}"
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT

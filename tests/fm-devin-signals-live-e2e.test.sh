@@ -32,7 +32,7 @@ cleanup() {
   if [ "$rc" -ne 0 ] && [ -n "$LAB" ]; then
     printf 'Devin worker failure evidence retained: %s\n' "$LAB" >&2
   else
-    [ -z "$LAB" ] || rm -rf -- "$LAB"
+    fm_test_rm_tmproot "${LAB:-}"
   fi
 }
 trap cleanup EXIT
@@ -56,6 +56,7 @@ DEVIN_VERSION=$("$DEVIN_BIN" version 2>/dev/null | tr -d '\n')
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-devin-live.XXXXXX")
 LAB=$(cd "$LAB" && pwd -P)
+fm_test_require_tmproot "$LAB"
 WORKSPACE="$LAB/workspace"
 TASK_TMP="$LAB/tasktmp"
 REPORT="$LAB/report.md"

@@ -56,7 +56,7 @@ cleanup() {
     sleep 0.25
     i=$((i + 1))
   done
-  rm -rf "$LAB" 2>/dev/null || true
+  fm_test_rm_tmproot "${LAB:-}" || true
   fm_test_cleanup
 }
 trap cleanup EXIT

@@ -32,7 +32,7 @@ SESSION=liveness
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  [ -n "${LAB:-}" ] && rm -rf "$LAB"
+  fm_test_rm_tmproot "${LAB:-}"
 }
 trap cleanup_all EXIT
 

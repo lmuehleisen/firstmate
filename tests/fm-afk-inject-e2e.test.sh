@@ -28,6 +28,8 @@
 # Assert on submitted CONTENT (logged verbatim by the supervisor pane), not pane
 # appearance - terminal line-wrapping looks like newlines but isn't.
 set -u
+# shellcheck source=tests/tmproot-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmproot-guard.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
@@ -56,8 +58,8 @@ cleanup_all() {
   if [ -n "${SOCKET:-}" ] && [ -n "${REAL_TMUX:-}" ]; then
     "$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
   fi
-  rm -rf "${TMUX_SHIM_DIR:-}" 2>/dev/null || true
-  rm -rf "${STATE_DIR:-}" 2>/dev/null || true
+  fm_test_rm_tmproot "${TMUX_SHIM_DIR:-}" || true
+  fm_test_rm_tmproot "${STATE_DIR:-}" || true
 }
 trap cleanup_all EXIT
 

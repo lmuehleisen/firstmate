@@ -45,7 +45,7 @@ SH
 #!/usr/bin/env bash
 set -eu
 repo=$(mktemp -d "${TMPDIR:-/tmp}/fm-git-runner.XXXXXX")
-trap 'rm -rf "$repo"' EXIT
+trap 'fm_test_rm_tmproot "${repo:-}"' EXIT
 git init -q "$repo"
 git -C "$repo" config user.name 'Runner Fixture'
 git -C "$repo" config user.email runner@example.invalid

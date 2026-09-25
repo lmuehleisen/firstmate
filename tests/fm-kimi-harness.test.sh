@@ -24,9 +24,9 @@ JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
-  [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
-  [ -z "$KIMI_RUNTIME_LAUNCH_DIR" ] || rm -rf "$KIMI_RUNTIME_LAUNCH_DIR"
-  rm -rf "$TMP_ROOT"
+  fm_test_rm_tmproot "${KIMI_RUNTIME_TASK_TMP:-}"
+  fm_test_rm_tmproot "${KIMI_RUNTIME_LAUNCH_DIR:-}"
+  fm_test_rm_tmproot "${TMP_ROOT:-}"
 }
 trap cleanup_kimi_harness EXIT
 

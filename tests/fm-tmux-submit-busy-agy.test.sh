@@ -16,7 +16,7 @@ set -u
 . "$ROOT/bin/fm-tmux-lib.sh"
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-tmux-submit-busy-agy.XXXXXX")
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'fm_test_rm_tmproot "${TMP_ROOT:-}"' EXIT
 
 # A tmux transport fixture: capture-pane prints the composer file (optionally
 # failing its first read), and Enter renders the running-turn screen.

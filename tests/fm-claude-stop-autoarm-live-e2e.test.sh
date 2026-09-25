@@ -33,7 +33,7 @@ TRANSCRIPT="$LAB/claude.jsonl"
 CLAUDE_VERSION=$(claude --version)
 
 cleanup() {
-  rm -rf "$LAB"
+  fm_test_rm_tmproot "${LAB:-}"
 }
 trap cleanup EXIT
 

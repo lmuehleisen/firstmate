@@ -33,7 +33,7 @@ TMP_ROOT=
 
 cleanup() {
   if [ -n "${TMP_ROOT:-}" ]; then
-    rm -rf "$TMP_ROOT"
+    fm_test_rm_tmproot "${TMP_ROOT:-}"
   fi
 }
 trap cleanup EXIT

@@ -22,7 +22,7 @@ TRANSCRIPT="$LAB/codex.jsonl"
 CODEX_VERSION=$(codex --version)
 
 cleanup() {
-  rm -rf "$LAB"
+  fm_test_rm_tmproot "${LAB:-}"
 }
 trap cleanup EXIT
 
