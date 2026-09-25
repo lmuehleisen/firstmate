@@ -1,7 +1,7 @@
 # Upstream integration
 
 This fork takes upstream [kunchenguid/firstmate](https://github.com/kunchenguid/firstmate) changes on a recurring schedule.
-This page is the maintainer checklist for one integration run; the fork's invariants themselves are listed in [README.md](../README.md) under "Personal fork: what differs".
+This page is the maintainer checklist for one integration run; the fork's invariants and every other deliberate difference from upstream are recorded in the [fork divergences ledger](fork-divergences.md).
 
 ## Contract
 
@@ -31,9 +31,16 @@ This page is the maintainer checklist for one integration run; the fork's invari
 4. Verify the fork's dropped dependencies stay dropped and review what upstream changed under the opt-in: `git grep -n -E 'gh-axi|lavish-axi|chrome-devtools-axi|no-mistakes' -- bin .agents/skills AGENTS.md README.md CONTRIBUTING.md docs`, and account for every new hit upstream introduced.
    Include `CONTRIBUTING.md` and `docs`, because upstream prose can reintroduce a requirement the fork removed, such as a required check the fork deleted.
    gh-axi, chrome-devtools-axi, and lavish-axi stay dropped, while `no-mistakes` is an optional opt-in through `config/no-mistakes`, so an upstream change to its pipeline can now belong in the fork instead of being stripped.
-5. Check that README "Personal fork: what differs" and `AGENTS.md` section 7 still describe the fork, and look for fork-tuned values inside upstream-owned files that an upstream test now pins.
-6. Run `bin/fm-test-run.sh --changed` and `bin/fm-test-run.sh --check-coverage`, then each portable lane from `bin/fm-test-run.sh --list-lanes`, and `bin/fm-lint.sh`.
+5. Classify every shared file that still differs from upstream: list the files present upstream in `git diff --stat upstream/main HEAD` and match each against the ledger's `Seam:` lines.
+   Report each file no entry claims in the pull request body as an incidental candidate and propose its realignment.
+   For each `carried` entry, check whether this upstream range ships an equivalent, and if so propose dropping the fork copy.
+   Also look for fork-tuned values inside upstream-owned files that an upstream test now pins.
+6. Run every guard the ledger names on the merged tree, before the broader suite; `grep -o 'tests/[a-z0-9-]*\.test\.sh' docs/fork-divergences.md | sort -u` lists them.
+   A failing guard means an upstream change reached an intended divergence: adapt the upstream change, never the guard, and name the entry in the pull request body.
+   List every entry with `Guard: none` in the pull request body as unprotected.
+7. Run `bin/fm-test-run.sh --changed` and `bin/fm-test-run.sh --check-coverage`, then each portable lane from `bin/fm-test-run.sh --list-lanes`, and `bin/fm-lint.sh`.
    When `--changed` refuses an unmapped path, run every suite the conflicts, the scan's findings, and the fork's divergent areas touch instead of skipping to the next step.
-   A failing test that pins one side's design is adapted to the fork's intended behavior, and the pull request body names each adaptation and why.
-7. Open the pull request against the fork with `gh pr create --repo lmuehleisen/firstmate --base main`, always passing `--repo` because this checkout also carries the upstream remote.
-   Its body states the upstream source commit, that a merge commit is required, every conflict and its resolution, every upstream change dropped or adapted, the call-site scan result, the invariant evidence, and the test results.
+   A failing test that pins one side's design is adapted to the fork's intended behavior as the ledger records it, and the pull request body names each adaptation and why.
+8. Update the ledger in the same pull request: drop carried entries upstream made redundant, add entries for newly deliberate differences, remove realigned incidental items, and check that README "Personal fork: what differs" and `AGENTS.md` section 7 still describe the fork.
+9. Open the pull request against the fork with `gh pr create --repo lmuehleisen/firstmate --base main`, always passing `--repo` because this checkout also carries the upstream remote.
+   Its body states the upstream source commit, that a merge commit is required, every conflict and its resolution, every upstream change dropped or adapted, the call-site scan result, the shared-file classification, the guard results, the ledger changes, and the test results.
