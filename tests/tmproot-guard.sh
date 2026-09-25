@@ -11,7 +11,8 @@
 # A path is a safe temp root only when it is non-empty, not `/`, strictly below
 # a temporary base (the TMPDIR in force when this file was sourced, the current
 # TMPDIR, or /tmp, each canonicalized), and neither the firstmate checkout this
-# file lives in nor an ancestor of it. Trailing slashes are dropped and the
+# file lives in, an ancestor of it, nor anything inside it - even when the
+# checkout itself sits under a temporary directory. Trailing slashes are dropped and the
 # final path component is not followed, so a symlinked root is judged - and
 # removed - as the link itself, never as the directory it points at.
 #
@@ -96,6 +97,14 @@ fm_test_tmproot_guard_reason() {
   case "$FM_TEST_TMPROOT_GUARD_CHECKOUT/" in
     "$canon"/*)
       printf 'it is or contains the checkout %s\n' "$FM_TEST_TMPROOT_GUARD_CHECKOUT"
+      return 0
+      ;;
+  esac
+  # Checked before the temp allowlist: a checkout that itself lives under a
+  # temporary directory must not make its own contents removable.
+  case "$canon/" in
+    "$FM_TEST_TMPROOT_GUARD_CHECKOUT"/?*)
+      printf 'it is inside the checkout %s\n' "$FM_TEST_TMPROOT_GUARD_CHECKOUT"
       return 0
       ;;
   esac

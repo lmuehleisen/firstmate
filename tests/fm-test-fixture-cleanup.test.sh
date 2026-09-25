@@ -246,6 +246,17 @@ PROBE
   assert_contains "$out" "refusing to remove project/..: a relative directory component" \
     "the guard did not refuse a dot-dot path"
 
+  # The disposable checkout itself lives under a temp directory, so only the
+  # checkout-containment rule can stop removal of its contents.
+  before=$(tree_listing "$copy")
+  out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_rm_tmproot "$1/project" "$1/tests/../project/src"' _ "$copy" 2>&1) || true
+  after=$(tree_listing "$copy")
+  [ "$before" = "$after" ] || fail "the guard removed a directory inside a checkout that lives under a temp directory"
+  assert_contains "$out" "refusing to remove $copy/project: it is inside the checkout" \
+    "the guard did not refuse a path inside the checkout"
+  assert_contains "$out" "refusing to remove $copy/tests/../project/src: it is inside the checkout" \
+    "the guard did not refuse a dot-dot spelling of a path inside the checkout"
+
   out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_tmproot_guard_reason /; fm_test_tmproot_guard_reason /usr' 2>&1)
   assert_contains "$out" "the filesystem root" "the guard did not refuse the filesystem root"
   assert_contains "$out" "not strictly below a temporary directory" \
@@ -276,7 +287,7 @@ PROBE
   out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_require_tmproot ""; echo continued' 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm_test_require_tmproot accepted an empty root"
   assert_not_contains "$out" continued "fm_test_require_tmproot let a test continue on an empty root"
-  pass "the cleanup guard refuses empty, root, non-temporary, and checkout-containing paths and never follows a slash-terminated symlink"
+  pass "the cleanup guard refuses empty, root, non-temporary, checkout-containing, and in-checkout paths and never follows a slash-terminated symlink"
 }
 
 test_fixture_root_gone_after_normal_exit
