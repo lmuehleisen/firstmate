@@ -179,7 +179,7 @@ EOF
 # status file.
 fm_devin_relaunch_retire_policy() {  # <harness> <state-dir> <id>
   [ "${1-}" = devin ] || return 0
-  "$SCRIPT_DIR/fm-devin-rate-limit-retry.sh" retire "$2" "$3" - </dev/null
+  "$SCRIPT_DIR/fm-devin-rate-limit-retry.sh" retire "$2" "$3" - </dev/null || return 1
   "$SCRIPT_DIR/fm-devin-permission-policy.sh" retire "$2/$3.devin-permission.json" </dev/null
 }
 
@@ -224,9 +224,11 @@ remove_devin_managed_wiring() {  # <meta> <worktree>
 # The per-task policy file, plus the permission-policy escalation markers and
 # verdict cache (bin/fm-devin-permission-policy.sh), and the rate-limit retry
 # state, whose removal also ends a running sentinel
-# (bin/fm-devin-rate-limit-retry.sh).
+# (bin/fm-devin-rate-limit-retry.sh). A retry state that cannot be removed does
+# not stop teardown, whose endpoint is already gone, so a surviving sentinel's
+# send finds no task.
 fm_devin_teardown_remove_state() {  # <state-dir> <id>
   rm -f "$1/$2.devin-permission.json"
   rm -rf "$1/$2.devin-permission-pending" "$1/$2.devin-permission-cache"
-  "$SCRIPT_DIR/fm-devin-rate-limit-retry.sh" retire "$1" "$2" - </dev/null
+  "$SCRIPT_DIR/fm-devin-rate-limit-retry.sh" retire "$1" "$2" - </dev/null || true
 }

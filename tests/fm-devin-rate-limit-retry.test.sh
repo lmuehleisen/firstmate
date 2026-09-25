@@ -14,7 +14,8 @@
 # that must not delay a shorter one, spacing measured from a slow send's end,
 # a superseded retry that leaves nothing behind, a stale log under a non-devin
 # ancestor, a capped task whose retry state is retired, a cap detected after
-# its turn was retired, and a task lock a dead holder left behind.
+# its turn was retired, a task lock a dead holder left behind, and a retire
+# that cannot remove the state.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -359,3 +360,23 @@ wait_for 15 "the capped event" has_event "$H" capped
 assert_equals 1 "$(grep -c '^blocked \[at=[0-9]*\] \[key=devin-rate-limit\]: ' "$H/state/t1.status")" "a dead holder's lock must not stop the cap"
 hook "$H" t1 stop
 pass "a task lock a dead holder left behind does not stop the cap"
+
+# 20. A retire that cannot remove the task's retry state reports it, so a
+# relaunch does not proceed past a sentinel it could not retire.
+H=$(new_home retire-fails)
+hook "$H" t1 arm
+mkdir -p "$H/state/t1.devin-retry/pinned"
+: >"$H/state/t1.devin-retry/pinned/file"
+chmod a-w "$H/state/t1.devin-retry/pinned"
+if "$RETRY" retire "$H/state" t1 - </dev/null; then
+  retire_rc=0
+else
+  retire_rc=$?
+fi
+chmod u+w "$H/state/t1.devin-retry/pinned"
+if [ -e "$H/state/t1.devin-retry" ]; then
+  assert_equals 1 "$retire_rc" "a retire that left the state behind must exit 1"
+  pass "a retire that cannot remove the retry state exits 1"
+else
+  pass "a retire that cannot remove the retry state exits 1 (skipped: this user can remove read-only directories)"
+fi

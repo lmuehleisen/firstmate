@@ -61,7 +61,9 @@
 #   jq -s 'group_by(.event) | map({event: .[0].event, n: length})' state/devin-rate-limit-log.jsonl
 #
 # Every hook invocation exits 0 so a failure here never breaks Devin's
-# lifecycle.
+# lifecycle; `retire`, which is not a hook, exits 1 when the task's retry state
+# is still there afterwards, so a relaunch does not proceed past a sentinel it
+# could not retire.
 #
 # Tuning (environment, read by the sentinel; seconds unless noted):
 #   FM_DEVIN_RETRY_MAX      consecutive automatic retries before the cap (4)
@@ -332,7 +334,8 @@ cmd_retire() {
     status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired"
     log_event resolved "the retry state was retired after the retry cap"
   fi
-  rm -rf -- "$DIR"
+  rm -rf -- "$DIR" || return 1
+  [ ! -e "$DIR" ]
 }
 
 # Sleeps until <epoch>; fails as soon as this turn's token is replaced.
@@ -427,7 +430,7 @@ case "$EVENT" in
 arm) cmd_arm ;;
 stop) cmd_stop ;;
 end) cmd_end ;;
-retire) cmd_retire ;;
+retire) cmd_retire || exit 1 ;;
 watch) cmd_watch "$@" ;;
 *) echo "fm-devin-rate-limit-retry.sh: unknown event '$EVENT'" >&2 ;;
 esac
