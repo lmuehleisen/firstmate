@@ -15,7 +15,7 @@ Classes:
 - `carried`: a fork fix or port kept only until upstream ships an equivalent; each integration run checks whether it can be dropped.
 - `incidental`: no reason to differ; realign when convenient.
 
-A `Seam:` claims only the hunks that carry its entry's behavior, not the whole file; a hunk in a file shared with upstream that no entry's scope covers, or a fork-only path no entry names, is unclassified, and the integration run reports it.
+A `Seam:` claims only the hunks that carry its entry's behavior, not the whole file; a hunk in a file shared with upstream that no entry's scope covers, or a fork-only path no entry's `Seam:` or `Guard:` names, is unclassified, and the integration run reports it.
 An entry whose convergence is still under investigation says so in its `Class:` line and is not a decision.
 
 Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam:` naming the files (fork-only or shared), `Guard:` naming the test that fails if the divergence is lost (or `none`, which is itself a finding), and `Upstream:` with what upstream does instead and, for carried entries, what would let the fork drop it.
