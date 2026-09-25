@@ -17,9 +17,9 @@
 # its turn was retired, a task lock a dead holder left behind, a retire that
 # cannot move the state aside, a retire whose state dir is gone, a cap on a
 # task with no status file yet, a status line that cannot be written, and a
-# retire whose resolved line cannot be written, and state an earlier retire left
-# under its retiring name by a dead or live pid, and a retire after the status
-# log is gone.
+# retire whose resolved line cannot be written, state an earlier retire left
+# under its retiring name by a dead or live pid, a retire after the status log
+# is gone, and a retry whose count cannot be recorded.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -489,3 +489,23 @@ hook "$H" t1 arm
 assert_absent "$H/state/t1.status" "a retire without a status log must not create one"
 assert_absent "$H/state/t1.devin-retry" "a retire without a status log must still remove the state"
 pass "a retire after the status log is gone creates no orphan status log"
+
+# 28. A retry whose count cannot be recorded is not sent and raises the keyed
+# blocked line, so retries can never outrun the cap.
+H=$(new_home count-unwritable)
+: >"$H/state/t1.status"
+LOG=$(fake_devin "$H" t1 arm)
+mkdir "$H/state/t1.devin-retry/count"
+chmod a-w "$H/state/t1.devin-retry/count"
+rate_limit_line "1 second" >>"$LOG"
+if [ -w "$H/state/t1.devin-retry/count" ]; then
+  chmod u+w "$H/state/t1.devin-retry/count"
+  hook "$H" t1 stop
+  pass "a retry whose count cannot be recorded is not sent (skipped: this user can write read-only directories)"
+else
+  wait_for 15 "the blocked line" grep -q '^blocked \[at=[0-9]*\] \[key=devin-rate-limit\]: .*could not be recorded' "$H/state/t1.status"
+  assert_equals 0 "$(sent_count "$H")" "a retry whose count cannot be recorded must not be sent"
+  chmod u+w "$H/state/t1.devin-retry/count"
+  hook "$H" t1 stop
+  pass "a retry whose count cannot be recorded is not sent and raises the blocker"
+fi

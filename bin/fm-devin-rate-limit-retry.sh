@@ -441,8 +441,10 @@ publish_blocked() {  # <token> <reason>
       fi
       # A Stop or retire that gave up waiting for the lock may have ended
       # the turn while this line was written; resolve it here in that case.
+      # The marker goes with that resolution, so a later cap publishes anew.
       turn_is "$1" ||
-        status_resolve "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin turn ended while its blocker was being recorded"
+        ! status_resolve "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin turn ended while its blocker was being recorded" ||
+        rm -f "$DIR/capped"
     fi
   fi
   task_unlock
@@ -492,7 +494,12 @@ cmd_watch() {
   # The count is written before the send, because the delivered retry starts
   # the next turn whose sentinel reads it, and restored when nothing was sent,
   # so the cap counts only retries the worker actually received.
-  printf '%s\n' $((count + 1)) >"$DIR/count.$$" && mv -f "$DIR/count.$$" "$DIR/count"
+  if ! { printf '%s\n' $((count + 1)) >"$DIR/count.$$" && mv -f "$DIR/count.$$" "$DIR/count"; } 2>/dev/null; then
+    rm -f "$DIR/count.$$" 2>/dev/null
+    log_event failed "retry $((count + 1)) of $MAX was not sent: its count could not be recorded"
+    publish_blocked "$token" "Devin stopped on its model rate limit and its automatic retry could not be recorded; send it a message to retry" || true
+    return 0
+  fi
   if FM_HOME=$HOME_DIR FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-send.sh" "$TASK" "$RETRY_MESSAGE" >/dev/null 2>&1; then
     log_event retried "retry $((count + 1)) of $MAX sent"
   else
