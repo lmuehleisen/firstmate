@@ -338,6 +338,11 @@ cmd_watch() {
     log_event superseded "a new prompt or turn end arrived before retry $((count + 1))"
     return 0
   fi
+  # Accepted residual race: a prompt submitted between the turn check above
+  # and fm-send's enqueue still receives this retry, a harmless extra "continue"
+  # steer. Holding a lock across the send that the arm hook waits on would
+  # instead stall the retry's own doorbell, whose submit fires that hook while
+  # fm-send is still ringing.
   # The count is written before the send, because the delivered retry starts
   # the next turn whose sentinel reads it, and restored when nothing was sent,
   # so the cap counts only retries the worker actually received.
