@@ -56,7 +56,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 ### reviewed-worker-permissions
 
-- Intent: `config/crew-permissions` (automatic review by default, manual review as an option) replaces upstream's `config/claude-permission-mode`, and no worker launch bypasses permissions; README "Reviewed worker permissions".
+- Intent: `config/crew-permissions` (automatic review by default, manual review as an option) replaces upstream's `config/claude-permission-mode`, so Claude and Codex worker launches never bypass permissions, while agy and Devin have their own entries below and other harnesses such as OpenCode, Cursor, Muse, and Rovo keep upstream's bypass launch; README "Reviewed worker permissions".
 - Class: intended.
 - Seam: permission resolution and `launch_template` in `bin/fm-spawn.sh`, and `docs/configuration.md` (shared).
 - Guard: `tests/fm-spawn-dispatch-profile.test.sh` `test_worker_permission_modes`, `test_invalid_worker_permissions_refuse`, and `test_upstream_claude_permission_mode_file_cannot_select_bypass`; the negative bypass assertions in `tests/fm-claude-trust.test.sh`.
