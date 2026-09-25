@@ -122,8 +122,8 @@
 # Every selected script also runs with TMUX and TMUX_PANE unset and TMUX_TMPDIR
 # pointed at a short private per-run directory, so a suite's bare tmux reaches
 # only a private server and never the tmux server the runner was started from.
-# The run stops every server left in that directory by its exact socket and
-# removes it on exit. Ship and scout workers get the same boundary at launch
+# The run stops every server whose socket is anywhere under that directory,
+# by its exact socket, and removes it on exit. Ship and scout workers get the same boundary at launch
 # (bin/fm-worker-tmux-lib.sh); this runner keeps its own copy of the few lines
 # because suites run standalone copies of it.
 #
@@ -2361,10 +2361,9 @@ declare -a WORKER_SCRIPTS=()
 cleanup_run() {
   local sock
   if [ -n "$RUN_TMUX_TMPDIR" ]; then
-    for sock in "$RUN_TMUX_TMPDIR"/tmux-*/*; do
-      [ -S "$sock" ] || continue
+    while IFS= read -r sock; do
       env -u TMUX -u TMUX_PANE tmux -S "$sock" kill-server >/dev/null 2>&1 || true
-    done
+    done < <(find "$RUN_TMUX_TMPDIR" -type s -print 2>/dev/null)
     rm -rf "$RUN_TMUX_TMPDIR"
   fi
   rm -rf "$RUN_TMP"

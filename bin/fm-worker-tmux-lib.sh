@@ -44,7 +44,8 @@
 #   fm_worker_tmux_launch_prefix <dir>
 #       prints the launch statements that move a process onto <dir>
 #   fm_worker_tmux_retire <dir>
-#       stops only the tmux servers whose sockets live in <dir>, then removes it
+#       stops only the tmux servers whose sockets live anywhere under <dir>,
+#       then removes it
 #   fm_worker_tmux_spawn_wire
 #       bin/fm-spawn.sh: sets FM_WORKER_TMUX_DIR for a ship or scout ($KIND,
 #       $FM_HOME, $ID) and prepares it; empty for every other kind
@@ -111,13 +112,14 @@ fm_worker_tmux_retire() {
     echo "warning: private worker tmux directory $dir is not a private directory owned by this user; leaving it and any server under it untouched" >&2
     return 1
   fi
-  # Each server is addressed by its exact socket path, which outranks an
-  # inherited TMUX, and the caller's own TMUX is dropped as well, so this can
-  # reach no server outside the directory.
-  for sock in "$dir"/tmux-*/*; do
-    [ -S "$sock" ] && [ ! -L "$sock" ] && [ ! -L "${sock%/*}" ] || continue
+  # Every socket anywhere under the directory is stopped: the default and -L
+  # sockets under tmux-<uid>/ and any a worker named with -S. find does not
+  # follow symlinks, so nothing outside the directory is visited. Each server
+  # is addressed by its exact socket path, which outranks an inherited TMUX,
+  # and the caller's own TMUX is dropped as well.
+  while IFS= read -r sock; do
     env -u TMUX -u TMUX_PANE tmux -S "$sock" kill-server >/dev/null 2>&1 || true
-  done
+  done < <(find "$dir" -type s -print 2>/dev/null)
   rm -rf "$dir"
 }
 

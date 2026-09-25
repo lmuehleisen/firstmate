@@ -416,7 +416,7 @@ test_unsafe_existing_directory_refuses() {
 
 # Teardown stops a server the worker left running, and only that one.
 test_teardown_stops_a_leaked_private_server() {
-  local case_dir home id=leak-t1 dir sock fakebin out status
+  local case_dir home id=leak-t1 dir sock own_pid fakebin out status
   case_dir="$TMP_ROOT/teardown"
   home="$case_dir/home"
   fakebin="$case_dir/fakebin"
@@ -453,6 +453,11 @@ SH
   env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" "$REAL_TMUX" new-session -d -s leaked 'sleep 600' ||
     fail "could not start the leaked private server"
   sock=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" "$REAL_TMUX" display-message -p '#{socket_path}')
+  # A server the worker named with -S directly under its directory.
+  ltmux -S "$dir/own" new-session -d -s own 'sleep 600' ||
+    fail "could not start the worker's own -S server"
+  own_pid=$(ltmux -S "$dir/own" display-message -p '#{pid}')
+  [ -n "$own_pid" ] || fail "could not read the worker's own -S server pid"
   start_fleet || fail "could not start the lab fleet"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
@@ -463,9 +468,11 @@ SH
   expect_code 0 "$status" "teardown of a landed task should succeed: $out"
   ltmux -S "$sock" has-session >/dev/null 2>&1 &&
     fail "teardown must stop the worker's leaked private tmux server"
+  kill -0 "$own_pid" 2>/dev/null &&
+    fail "teardown must stop a server the worker started with -S under its directory"
   [ ! -e "$dir" ] || fail "teardown must remove the private tmux directory"
   assert_fleet_intact "teardown"
-  pass "teardown stops a leaked private tmux server and leaves the fleet running"
+  pass "teardown stops leaked private tmux servers, including a worker's own -S socket, and leaves the fleet running"
 }
 
 # The precedence trap this guards against must hold on this tmux, or every
