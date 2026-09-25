@@ -97,11 +97,6 @@ esac
 
 EVENT=$1 STATE=$2 TASK=$3 HOME_DIR=$4
 shift 4
-# The owner-checked locks (fm_lock_try_acquire / fm_lock_release); pointed at
-# this state dir because the library resolves and creates its own on load.
-FM_STATE_OVERRIDE=$STATE
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 DIR="$STATE/$TASK.devin-retry"
 EVENT_LOG="$STATE/devin-rate-limit-log.jsonl"
 STATUS="$STATE/$TASK.status"
@@ -194,12 +189,24 @@ reset_seconds() {  # <error-line>
   esac
 }
 
+# Loads bin/fm-wake-lib.sh for its owner-checked locks on first use only,
+# pointed at this state dir, because the library resolves and creates a state
+# dir when it loads; a retire of an absent task must create nothing.
+load_lock_lib() {
+  command -v fm_lock_try_acquire >/dev/null 2>&1 && return 0
+  FM_STATE_OVERRIDE=$STATE
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+}
+
 # Takes an owner-checked lock (bin/fm-wake-lib.sh): only a lock whose owner
 # process died is taken over, and only its owner releases it. Fails when the
 # lock's directory is gone or a live owner keeps it past a 10-second wait;
 # every section these locks guard takes milliseconds.
 take_lock() {  # <lock-path>
   local deadline
+  [ -d "${1%/*}" ] || return 1
+  load_lock_lib || return 1
   deadline=$(($(date +%s) + 10))
   while :; do
     [ -d "${1%/*}" ] || return 1
@@ -215,7 +222,7 @@ send_lock() {
 }
 
 send_unlock() {
-  fm_lock_release "$SEND_LOCK" 2>/dev/null || true
+  ! command -v fm_lock_release >/dev/null 2>&1 || fm_lock_release "$SEND_LOCK" 2>/dev/null || true
 }
 
 # The epoch of the latest retry send any worker in this home started or
@@ -302,7 +309,7 @@ task_lock() {
 }
 
 task_unlock() {
-  fm_lock_release "$DIR/.lock" 2>/dev/null || true
+  ! command -v fm_lock_release >/dev/null 2>&1 || fm_lock_release "$DIR/.lock" 2>/dev/null || true
 }
 
 cmd_stop() {

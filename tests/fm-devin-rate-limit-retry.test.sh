@@ -15,7 +15,7 @@
 # a superseded retry that leaves nothing behind, a stale log under a non-devin
 # ancestor, a capped task whose retry state is retired, a cap detected after
 # its turn was retired, a task lock a dead holder left behind, and a retire
-# that cannot remove the state.
+# that cannot remove the state, and a retire whose state dir is gone.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -380,3 +380,10 @@ if [ -e "$H/state/t1.devin-retry" ]; then
 else
   pass "a retire that cannot remove the retry state exits 1 (skipped: this user can remove read-only directories)"
 fi
+
+# 21. Retiring a task whose state dir is gone creates nothing, so teardown of
+# a home being removed cannot bring its state dir back.
+gone="$TMP_ROOT/gone-home/state"
+"$RETRY" retire "$gone" t1 - </dev/null || fail "retiring an absent task must succeed"
+assert_absent "$TMP_ROOT/gone-home" "retiring an absent task must not create its state dir"
+pass "retiring a task whose state dir is gone creates nothing"
