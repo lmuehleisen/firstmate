@@ -18,7 +18,7 @@
 # cannot move the state aside, a retire whose state dir is gone, a cap on a
 # task with no status file yet, a status line that cannot be written, and a
 # retire whose resolved line cannot be written, and state an earlier retire left
-# under its retiring name.
+# under its retiring name by a dead or live pid.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -469,3 +469,12 @@ assert_equals 1 "$(grep -c '^resolved ' "$H/state/t1.status")" "left-behind capp
 assert_absent "$H/state/t1.devin-retry.retiring.999999" "left-behind state must be removed"
 assert_absent "$H/state/t1.devin-retry" "the recovered state must be retired"
 pass "state left under a retiring name is recovered and resolved by the next retire"
+
+# 26. Retiring state under a live pid's name - a retire still running, or a
+# reused pid - fails the retire rather than treating absence as success.
+H=$(new_home retiring-live)
+mkdir -p "$H/state/t1.devin-retry.retiring.$$"
+: >"$H/state/t1.devin-retry.retiring.$$/capped"
+if "$RETRY" retire "$H/state" t1 - </dev/null; then fail "a retire must not succeed past retiring state under a live pid"; fi
+[ -e "$H/state/t1.devin-retry.retiring.$$/capped" ] || fail "retiring state under a live pid must be left alone"
+pass "retiring state under a live pid fails the retire"

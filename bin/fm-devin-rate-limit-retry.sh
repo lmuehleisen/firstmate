@@ -346,15 +346,16 @@ cmd_end() {
 }
 
 # Brings back retry state an earlier retire left under its retiring name when
-# it could neither resolve nor restore it; a name whose retire is still
-# running is left alone.
+# it could neither resolve nor restore it. A name whose pid is alive - a retire
+# still running, or a reused pid - is left alone and fails this retire, since
+# its blocker may still be open.
 recover_retiring() {
   local r pid
   for r in "$DIR".retiring.*; do
     [ -d "$r" ] || continue
     pid=${r##*.}
     case "$pid" in '' | *[!0-9]*) continue ;; esac
-    ! kill -0 "$pid" 2>/dev/null || continue
+    ! kill -0 "$pid" 2>/dev/null || return 1
     if [ ! -e "$DIR" ]; then
       mv -- "$r" "$DIR" 2>/dev/null || return 1
     else
