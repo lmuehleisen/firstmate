@@ -16,7 +16,7 @@
 # ancestor, a capped task whose retry state is retired, a cap detected after
 # its turn was retired, a task lock a dead holder left behind, and a retire
 # that cannot remove the state, a retire whose state dir is gone, and a cap on
-# a task with no status file yet.
+# a task with no status file yet, and a status line that cannot be written.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -409,3 +409,30 @@ wait_for 10 "the capped event" has_event "$H" capped
 assert_equals 1 "$(grep -c '^blocked \[at=[0-9]*\] \[key=devin-rate-limit\]: ' "$H/state/t1.status" 2>/dev/null)" "the cap must create the status file with its blocked line"
 hook "$H" t1 stop
 pass "a cap on a task with no status file yet creates it"
+
+# 23. A status line that cannot be written keeps the state it would change: a
+# cap with an unwritable status file records no marker, and a Stop that cannot
+# write its resolved line keeps the marker for the next Stop.
+H=$(new_home status-unwritable)
+: >"$H/state/t1.status"
+chmod a-w "$H/state/t1.status"
+LOG=$(FM_DEVIN_RETRY_MAX=0 fake_devin "$H" t1 arm)
+rate_limit_line "1 second" >>"$LOG"
+if printf 'probe\n' 2>/dev/null >>"$H/state/t1.status"; then
+  chmod u+w "$H/state/t1.status"
+  hook "$H" t1 stop
+  pass "a status line that cannot be written keeps its state (skipped: this user can write read-only files)"
+else
+  wait_for 10 "the failed append" has_event "$H" failed
+  assert_absent "$H/state/t1.devin-retry/capped" "a blocked line that was not written must leave no marker"
+  chmod u+w "$H/state/t1.status"
+  : >"$H/state/t1.devin-retry/capped"
+  chmod a-w "$H/state/t1.status"
+  hook "$H" t1 stop
+  [ -e "$H/state/t1.devin-retry/capped" ] || fail "a Stop that could not write its resolved line must keep the marker"
+  chmod u+w "$H/state/t1.status"
+  hook "$H" t1 stop
+  assert_absent "$H/state/t1.devin-retry/capped" "the next Stop that writes its resolved line must clear the marker"
+  assert_equals 1 "$(grep -c '^resolved ' "$H/state/t1.status")" "the next Stop must resolve the blocker"
+  pass "a status line that cannot be written keeps the state it would change"
+fi

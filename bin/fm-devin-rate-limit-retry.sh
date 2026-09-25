@@ -124,10 +124,14 @@ log_event() {  # <event> <detail>
 }
 
 # Appends one status line, creating the task's status file when this is its
-# first event; nothing is written once the task's state dir is gone.
+# first event; nothing is written once the task's state dir is gone. Fails,
+# and logs it, when the line could not be appended, so callers keep the state
+# that line would have changed.
 status_append() {  # <line>
   [ -d "$STATE" ] || return 0
-  printf '%s\n' "$1" >>"$STATUS" 2>/dev/null || log_event failed "could not append to $STATUS: $1"
+  printf '%s\n' "$1" >>"$STATUS" 2>/dev/null && return 0
+  log_event failed "could not append to $STATUS: $1"
+  return 1
 }
 
 set_turn() {  # <token>
@@ -325,9 +329,9 @@ cmd_stop() {
   ! task_lock || locked=1
   set_turn "ended.$(date +%s)" || true
   rm -f "$DIR/count"
-  if [ -e "$DIR/capped" ]; then
+  if [ -e "$DIR/capped" ] &&
+    status_append "resolved [at=$(date +%s)] [key=$KEY]: Devin finished a turn normally again after the rate limit"; then
     rm -f "$DIR/capped"
-    status_append "resolved [at=$(date +%s)] [key=$KEY]: Devin finished a turn normally again after the rate limit"
     log_event resolved "a normal turn ended after the retry cap"
   fi
   [ -z "$locked" ] || task_unlock
@@ -355,7 +359,8 @@ cmd_retire() {
   # Resolved only once the state is gone, so a retire that fails leaves the
   # blocker open alongside the worker it still describes.
   if [ -n "$capped" ]; then
-    status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired"
+    status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired" ||
+      return 1
     log_event resolved "the retry state was retired after the retry cap"
   fi
 }
@@ -385,8 +390,11 @@ publish_blocked() {  # <token> <reason>
   if turn_is "$1"; then
     published=1
     if [ ! -e "$DIR/capped" ]; then
-      : >"$DIR/capped"
-      status_append "blocked [at=$(date +%s)] [key=$KEY]: $2"
+      if ! status_append "blocked [at=$(date +%s)] [key=$KEY]: $2"; then
+        task_unlock
+        return 1
+      fi
+      : >"$DIR/capped" 2>/dev/null || log_event failed "could not record the blocker's marker in $DIR"
       # A Stop or retire that gave up waiting for the lock may have ended
       # the turn while this line was written; resolve it here in that case.
       turn_is "$1" ||
