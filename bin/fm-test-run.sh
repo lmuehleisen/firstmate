@@ -1516,6 +1516,7 @@ families_for_changed_path() {
     bin/fm-devin-rate-limit-retry.sh)
       printf '%s\n' __script__:fm-devin-rate-limit-retry.test.sh
       printf '%s\n' __script__:fm-devin-harness.test.sh
+      printf '%s\n' __script__:fm-devin-signals-live-e2e.test.sh
       ;;
     bin/fm-agy-lib.sh)
       printf '%s\n' __script__:fm-agy-harness.test.sh

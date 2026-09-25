@@ -163,6 +163,4 @@ The environment was authenticated with a Devin subscription (`Logged in (via Dev
    Firstmate's `fm_control_exit_command` now returns plain `exit` for devin (`bin/fm-control-lib.sh`); every other verified harness keeps its documented exit command unchanged.
 
 7. Turn-ending errors fire no hook (live-observed 2026-09-25, devin 3000.11.3):
-   A probe session whose `.devin/config.local.json` recorded every `UserPromptSubmit`, `Stop`, and `SessionEnd` payload saw a normal turn fire `UserPromptSubmit` then `Stop`, while a turn whose network was then cut fired `UserPromptSubmit` only.
-   That turn ended on `Something went wrong` with the session log line `Sending error response ... method=session/prompt error=Error { ... message: "Connection error, send a message to continue retrying" ... }`, and no hook payload followed.
-   The 2026-09-24 fleet session logs show the rate-limit stop on the same error response path, 13 times across 6 worker sessions, each reset stated in seconds or minutes (`Your limit will reset in 40 seconds.`, `... in 3 minutes.`).
+   the evidence and the live guard's result are recorded in `../../../../../docs/verification/runtime-backends-fork.md` under "Turn-ending errors and the rate-limit retry".

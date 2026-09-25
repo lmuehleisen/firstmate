@@ -10,8 +10,9 @@
 # scheduled retry, the lines that must not trigger a retry, the consecutive
 # cap with its blocked line and the resolved line a later normal Stop writes,
 # the home-wide stagger between two workers, the unarmed case, retire, a
-# reused pid's stale log, an undelivered retry, a held slot lock, and a long
-# reset that must not delay a shorter one.
+# reused pid's stale log, an undelivered retry, a held send lock, a long reset
+# that must not delay a shorter one, spacing measured from a slow send's end,
+# and a superseded retry that leaves nothing behind.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -30,6 +31,7 @@ RETRY="$BIN/fm-devin-rate-limit-retry.sh"
 cat >"$BIN/fm-send.sh" <<'EOF'
 #!/usr/bin/env bash
 [ ! -e "$FM_HOME/fail-send" ] || exit 1
+[ ! -e "$FM_HOME/slow-send-$1" ] || sleep "$(cat "$FM_HOME/slow-send-$1")"
 printf '%s|%s|%s|%s|%s\n' "$(date +%s)" "$FM_HOME" "$FM_STATE_OVERRIDE" "$1" "$2" >>"$FM_HOME/sent"
 EOF
 chmod +x "$BIN/fm-send.sh"
@@ -100,6 +102,7 @@ wait_for() {
 sent_count() { if [ -f "$1/sent" ]; then wc -l <"$1/sent" | tr -d ' '; else printf 0; fi; }
 has_event() { grep -q "\"event\":\"$2\"" "$1/state/devin-rate-limit-log.jsonl" 2>/dev/null; }
 sent_at_least() { [ "$(sent_count "$1")" -ge "$2" ]; }
+detected_at_least() { [ "$(grep -c '"event":"detected"' "$1/state/devin-rate-limit-log.jsonl" 2>/dev/null)" -ge "$2" ]; }
 
 # 1. A turn-ending rate-limit error sends one retry through fm-send after the
 # stated reset, with this home and state and the task id.
@@ -223,25 +226,27 @@ wait_for 15 "the failed event" has_event "$H" failed
 assert_absent "$H/state/t1.devin-retry/count" "an undelivered retry must not count toward the cap"
 pass "an undelivered retry is logged and not counted toward the cap"
 
-# 12. A slot lock held by a live claimant throughout leaves the slot and the
-# lock alone, and the retry still goes out on its own time.
-H=$(new_home slot-held)
-printf '%s\n' 4000000000 >"$H/state/devin-rate-limit-slot"
-mkdir "$H/state/devin-rate-limit-slot.lock"
-(for _ in $(seq 1 40); do touch "$H/state/devin-rate-limit-slot.lock"; sleep 0.5; done) &
+# 12. A send lock held by a live holder throughout leaves the last-send record
+# and the lock alone, and the retry still goes out on its own time.
+H=$(new_home lock-held)
+printf '%s\n' 1000000000 >"$H/state/devin-rate-limit-last-send"
+mkdir "$H/state/devin-rate-limit-last-send.lock"
+(for _ in $(seq 1 60); do touch "$H/state/devin-rate-limit-last-send.lock"; sleep 0.5; done) &
 toucher=$!
 LOG=$(FM_DEVIN_RETRY_SPACING=30 fake_devin "$H" t1 arm)
 rate_limit_line "1 second" >>"$LOG"
 wait_for 25 "the retry send" sent_at_least "$H" 1
+wait_for 20 "the retried event" has_event "$H" retried
 kill "$toucher" 2>/dev/null || true
 wait "$toucher" 2>/dev/null || true
-has_event "$H" unstaggered || fail "a held slot lock must be logged as unstaggered"
-assert_equals 4000000000 "$(cat "$H/state/devin-rate-limit-slot")" "a claimant without the lock must not rewrite the slot"
-[ -d "$H/state/devin-rate-limit-slot.lock" ] || fail "a claimant without the lock must not remove it"
-pass "a slot lock held throughout leaves the slot alone and the retry unstaggered"
+wait_for 20 "the retried event" has_event "$H" retried
+has_event "$H" unstaggered || fail "a held send lock must be logged as unstaggered"
+assert_equals 1000000000 "$(cat "$H/state/devin-rate-limit-last-send")" "a sender without the lock must not rewrite the last-send record"
+[ -d "$H/state/devin-rate-limit-last-send.lock" ] || fail "a sender without the lock must not remove it"
+pass "a send lock held throughout leaves the record alone and the retry unstaggered"
 
 # 13. A longer reset detected first does not delay another worker's shorter
-# one, because the slot is claimed only when a retry is due.
+# one, because spacing is taken only when a retry is due.
 H=$(new_home long-first)
 LOG1=$(FM_DEVIN_RETRY_SPACING=5 fake_devin "$H" t1 arm)
 rate_limit_line "1 hour" >>"$LOG1"
@@ -253,3 +258,32 @@ assert_equals t2 "$(cut -d'|' -f4 "$H/sent")" "only the short reset's worker may
 hook "$H" t1 stop
 wait_for 10 "the long reset's superseded event" has_event "$H" superseded
 pass "a longer reset detected first does not delay another worker's shorter one"
+
+# 14. Spacing counts from when a slow send finished, not from when it was due.
+H=$(new_home slow-send)
+printf '4\n' >"$H/slow-send-t1"
+LOG1=$(FM_DEVIN_RETRY_SPACING=2 fake_devin "$H" t1 arm)
+rate_limit_line "1 second" >>"$LOG1"
+wait_for 10 "the first retry's start" test -s "$H/state/devin-rate-limit-last-send"
+LOG2=$(FM_DEVIN_RETRY_SPACING=2 fake_devin "$H" t2 arm)
+rate_limit_line "1 second" >>"$LOG2"
+wait_for 25 "both retries" sent_at_least "$H" 2
+t1_done=$(grep '|t1|' "$H/sent" | cut -d'|' -f1)
+t2_sent=$(grep '|t2|' "$H/sent" | cut -d'|' -f1)
+[ $((t2_sent - t1_done)) -ge 2 ] || fail "the next retry must wait the spacing after a slow send finished (got $((t2_sent - t1_done))s)"
+pass "spacing counts from when a slow send finished"
+
+# 15. A retry superseded while it waits for its spacing leaves nothing behind
+# that delays another worker.
+H=$(new_home superseded-wait)
+LOG1=$(FM_DEVIN_RETRY_SPACING=6 fake_devin "$H" t1 arm)
+rate_limit_line "1 second" >>"$LOG1"
+wait_for 15 "the first retry" sent_at_least "$H" 1
+LOG2=$(FM_DEVIN_RETRY_SPACING=6 fake_devin "$H" t2 arm)
+rate_limit_line "1 second" >>"$LOG2"
+wait_for 10 "the second detection" detected_at_least "$H" 2
+record=$(cat "$H/state/devin-rate-limit-last-send")
+hook "$H" t2 stop
+wait_for 15 "the superseded event" has_event "$H" superseded
+assert_equals "$record" "$(cat "$H/state/devin-rate-limit-last-send")" "a superseded retry must not move the last-send record"
+pass "a retry superseded while waiting for its spacing records nothing"

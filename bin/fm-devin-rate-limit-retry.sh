@@ -42,17 +42,17 @@
 #       when none is stated) and schedules one retry at
 #         reset + BACKOFF * 2^count + random(0..JITTER)
 #       where count is the number of automatic retries already sent since the
-#       task's last normal Stop. When that time comes, the home-wide slot file
-#       <state-dir>/devin-rate-limit-slot pushes it to at least SPACING
-#       seconds after the latest retry any other worker in this home sent or
-#       is about to send, so workers that hit the limit together retry apart;
-#       when another claimant holds the slot's lock throughout, the retry
-#       keeps its own time unstaggered. It gives up if the turn token changes
-#       while it waits, and otherwise sends one ordinary steer through
-#       bin/fm-send.sh, so the message lands in the task's durable inbox and
-#       the doorbell submit starts the retry turn; a send that fails is logged
-#       and not counted. Once count reaches MAX it sends nothing and appends one
-#       `blocked [key=devin-rate-limit]` status line instead.
+#       task's last normal Stop. When that time comes, it also waits until
+#       SPACING seconds have passed since the latest retry any worker in this
+#       home started or finished sending, recorded in
+#       <state-dir>/devin-rate-limit-last-send, so workers that hit the limit
+#       together retry apart; when another worker holds that record's lock
+#       throughout, the retry goes out unstaggered. It gives up if the turn
+#       token changes while it waits, and otherwise sends one ordinary steer
+#       through bin/fm-send.sh, so the message lands in the task's durable
+#       inbox and the doorbell submit starts the retry turn; a send that fails
+#       is logged and not counted. Once count reaches MAX it sends nothing and
+#       appends one `blocked [key=devin-rate-limit]` status line instead.
 #
 # Every arm, detection, retry, cap, and failure is one JSON line in the
 # home-wide <state-dir>/devin-rate-limit-log.jsonl, the evidence for how often
@@ -99,7 +99,8 @@ shift 4
 DIR="$STATE/$TASK.devin-retry"
 EVENT_LOG="$STATE/devin-rate-limit-log.jsonl"
 STATUS="$STATE/$TASK.status"
-SLOT="$STATE/devin-rate-limit-slot"
+LAST_SEND="$STATE/devin-rate-limit-last-send"
+SEND_LOCK="$LAST_SEND.lock"
 LOG_DIR=${FM_DEVIN_RETRY_LOG_DIR:-$HOME/.local/share/devin/cli/logs}
 MAX=${FM_DEVIN_RETRY_MAX:-4}
 BACKOFF=${FM_DEVIN_RETRY_BACKOFF:-15}
@@ -179,34 +180,76 @@ reset_seconds() {  # <error-line>
   esac
 }
 
-# Claims the home-wide retry slot at or after <epoch>, at least SPACING after
-# the latest slot any worker in this home claimed; prints the claimed epoch.
-# When the lock stays held by a live claimant, it prints <epoch> unstaggered
-# and leaves the slot and the lock alone.
-claim_slot() {  # <epoch>
-  local want=$1 last lock="$SLOT.lock" held acquired='' _
+# The home-wide lock around the last-send record; fails when a live holder
+# keeps it for the whole wait. A holder that died leaves the lock behind, and
+# the section it guards takes milliseconds, so one older than 30 seconds is
+# abandoned.
+send_lock() {
+  local held _
   for _ in $(seq 1 50); do
-    mkdir "$lock" 2>/dev/null && {
-      acquired=1
-      break
-    }
-    # A holder that died leaves the lock behind; the section below takes
-    # milliseconds, so a lock older than 30 seconds is abandoned.
-    held=$(fm_lock_path_mtime "$lock") || held=
-    case "$held" in '' | *[!0-9]*) ;; *) [ $(($(date +%s) - held)) -le 30 ] || rmdir "$lock" 2>/dev/null || true ;; esac
+    mkdir "$SEND_LOCK" 2>/dev/null && return 0
+    held=$(fm_lock_path_mtime "$SEND_LOCK") || held=
+    case "$held" in '' | *[!0-9]*) ;; *) [ $(($(date +%s) - held)) -le 30 ] || rmdir "$SEND_LOCK" 2>/dev/null || true ;; esac
     sleep 0.2
   done
-  [ -n "$acquired" ] || {
-    log_event unstaggered "the retry slot lock stayed held; retry scheduled without home-wide spacing"
-    printf '%s' "$want"
-    return 0
-  }
-  last=$(cat "$SLOT" 2>/dev/null) || last=0
+  return 1
+}
+
+send_unlock() {
+  rmdir "$SEND_LOCK" 2>/dev/null || true
+}
+
+# The epoch of the latest retry send any worker in this home started or
+# finished. A send still in flight - its record names a live sender pid, for
+# at most 300 seconds - counts as happening now. A real send records at most
+# one second ahead, so anything later is not trusted to hold others back.
+last_send() {
+  local last pid now
+  read -r last pid <"$LAST_SEND" 2>/dev/null || last=0
   case "$last" in '' | *[!0-9]*) last=0 ;; esac
-  [ "$want" -ge $((last + SPACING)) ] || want=$((last + SPACING))
-  printf '%s\n' "$want" >"$SLOT.$$" && mv -f "$SLOT.$$" "$SLOT"
-  rmdir "$lock" 2>/dev/null || true
-  printf '%s' "$want"
+  now=$(date +%s)
+  case "${pid-}" in
+  '' | *[!0-9]*) ;;
+  *) ! kill -0 "$pid" 2>/dev/null || [ $((now - last)) -ge 300 ] || last=$((now + 1)) ;;
+  esac
+  [ "$last" -le $((now + 1)) ] || last=$((now + 1))
+  printf '%s' "$last"
+}
+
+# Records a send at the current second rounded up, never moving the record
+# back, marked in flight by this process until the finishing call; the
+# caller holds the lock.
+record_send() {  # [in-flight]
+  local at last
+  at=$(($(date +%s) + 1))
+  last=$(last_send)
+  [ "$at" -ge "$last" ] || at=$last
+  printf '%s%s\n' "$at" "${1:+ $$}" >"$LAST_SEND.$$" && mv -f "$LAST_SEND.$$" "$LAST_SEND"
+}
+
+# Waits until SPACING has passed since the latest retry send in this home, then
+# records this send's start under the lock so no other worker starts inside
+# the gap. Fails when the turn's token is replaced first. When a live holder
+# keeps the lock throughout, it goes ahead unstaggered and records nothing.
+take_send_turn() {  # <token>
+  while :; do
+    wait_turn_until "$1" $(($(last_send) + SPACING)) || return 1
+    send_lock || {
+      log_event unstaggered "the retry send lock stayed held; retry sent without home-wide spacing"
+      turn_is "$1"
+      return
+    }
+    turn_is "$1" || {
+      send_unlock
+      return 1
+    }
+    if [ "$(date +%s)" -ge $(($(last_send) + SPACING)) ]; then
+      record_send in-flight
+      send_unlock
+      return 0
+    fi
+    send_unlock
+  done
 }
 
 cmd_arm() {
@@ -259,7 +302,7 @@ wait_turn_until() {  # <token> <epoch>
 
 cmd_watch() {
   local token=$1 log=$2 seen=$3 started now total segment line reset count \
-    delay due slot
+    delay due
   started=$(date +%s)
   line=
   while :; do
@@ -288,11 +331,10 @@ cmd_watch() {
   delay=$((reset + BACKOFF * (1 << count) + RANDOM % (JITTER + 1)))
   due=$(($(date +%s) + delay))
   log_event detected "reset ${reset}s; retry $((count + 1)) of $MAX due at $due"
-  # The home-wide slot is claimed only once this retry is due, so a longer
-  # reset detected first, or a retry later superseded, never delays another
-  # worker's.
-  if ! wait_turn_until "$token" "$due" || ! slot=$(claim_slot "$due") ||
-    ! wait_turn_until "$token" "$slot"; then
+  # Spacing is taken only once this retry is due and measured from real
+  # sends, so a longer reset detected first, or a retry later superseded,
+  # never delays another worker's.
+  if ! wait_turn_until "$token" "$due" || ! take_send_turn "$token"; then
     log_event superseded "a new prompt or turn end arrived before retry $((count + 1))"
     return 0
   fi
@@ -309,6 +351,11 @@ cmd_watch() {
       printf '%s\n' "$count" >"$DIR/count.$$" && mv -f "$DIR/count.$$" "$DIR/count"
     fi
     log_event failed "retry $((count + 1)) of $MAX could not be sent through fm-send"
+  fi
+  # The gap to the next worker's retry counts from when this send finished.
+  if send_lock; then
+    record_send
+    send_unlock
   fi
 }
 

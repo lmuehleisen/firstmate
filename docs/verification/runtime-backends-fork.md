@@ -546,9 +546,18 @@ The lifecycle hooks are:
 - `Stop`: touches `$TURNEND` and applies `idle` with event `stop`.
 - `SessionEnd`: applies `idle` with event `session-end`.
 - `PreToolUse`, `PermissionRequest`, and `PostToolUse`, plus a second `UserPromptSubmit`, `Stop`, and `SessionEnd` entry: the permission policy hooks above.
+- A third `UserPromptSubmit`, `Stop`, and `SessionEnd` entry: the rate-limit retry owned by `bin/fm-devin-rate-limit-retry.sh`.
 
 `SessionStart` is omitted because it fires on resume (`source=resume`) with an empty composer, which would strand a false `busy` record.
 Each hook command appends `>/dev/null 2>&1 || true`.
+
+### Turn-ending errors and the rate-limit retry
+
+Verified live on 2026-09-25 with `devin 3000.11.3 (9c803229faa4)`: a turn that ends on an error fires no hook, not even `Stop`.
+A probe config recording every `UserPromptSubmit`, `Stop`, and `SessionEnd` payload saw a normal turn record `submit` then `stop`, and a turn whose network was then cut record `submit` only, ending on `Something went wrong` with the session-log line `Sending error response ... method=session/prompt error=Error { ... message: "Connection error, send a message to continue retrying" ... }`.
+The session log is `~/.local/share/devin/cli/logs/devin_<date>_<pid>.log`, named for the `devin` process that also runs the hooks.
+The 2026-09-24 fleet logs record the rate-limit stop on the same `session/prompt` error-response path, with the reset in the message (`Your limit will reset in 40 seconds.`, `... in 3 minutes.`).
+The rate-limit error cannot be forced on demand, so the live guard proves session-log discovery, the `Stop` retire, and that the sentinel follows the real log after a hook-less cancel, while `tests/fm-devin-rate-limit-retry.test.sh` pins the error text with the captured lines.
 
 ### Control, interruption, and exit
 
@@ -573,9 +582,23 @@ While busy, the delivery token `(esc twice to interrupt)` (or `(esc again to int
 Run the portable regression and live guard with:
 
 ```sh
-bin/fm-test-run.sh tests/fm-devin-harness.test.sh tests/fm-devin-permission-policy.test.sh
+bin/fm-test-run.sh tests/fm-devin-harness.test.sh tests/fm-devin-permission-policy.test.sh tests/fm-devin-rate-limit-retry.test.sh
 FM_DEVIN_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-devin-signals-live-e2e.test.sh
 FM_DEVIN_PERMISSION_LIVE=1 bin/fm-test-run.sh tests/fm-devin-permission-policy-live-e2e.test.sh
+```
+
+The signals live guard passed on 2026-09-25 against `devin 3000.11.3 (9c803229faa4)`:
+
+```text
+ok - devin: launches in smart mode without workspace trust prompt
+ok - devin: #{pane_current_command} reports devin
+ok - devin: initial turn completed with report write and git staging
+ok - devin: the rate-limit arm hook finds the session log and Stop retires it
+ok - devin: double Escape cancels running turn and prints Canceled
+ok - devin: the rate-limit sentinel follows the real session log after a hook-less cancel
+ok - devin: plain exit cleanly terminates process to shell, unambiguous against /revert
+ok - devin: delivery busy regex matches thinking tokens
+# all devin signals live checks passed (devin 3000.11.3 (9c803229faa4))
 ```
 
 The permission live guard passed on 2026-09-15 against `devin 3000.10.21 (611c1cba)`:
