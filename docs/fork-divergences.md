@@ -240,6 +240,14 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Guard: `tests/fm-operational-input.test.sh`; `tests/fm-calm-claude-mod.test.sh`; `tests/fm-calm-pi-extension.test.sh`.
 - Upstream: merged; the remaining fork diff is small, so verify it against upstream's version and drop this entry once it is zero.
 
+### away-watchdog
+
+- Intent: a detached watchdog outside tmux reports a lost fleet tmux server or a stopped away watcher; README "Away watchdog outside tmux".
+- Class: carried.
+- Seam: fork-only `bin/fm-afk-sentinel.sh`, plus its start and stop call sites in `bin/fm-afk-launch.sh`, its gap lines and marker cleanup in `bin/fm-afk-return.sh`, its row in `docs/scripts.md`, its trigger in `docs/wedge-alarm.md`, and its family entry in `bin/fm-test-run.sh` (shared).
+- Guard: fork-only `tests/fm-afk-sentinel.test.sh`; `tests/fm-afk-return.test.sh` `test_return_brief_reports_away_watchdog_findings`.
+- Upstream: has no watchdog outside the fleet's tmux server, and its opt-in supervision host shares that failure domain; drop once upstream reports a lost fleet server equivalently.
+
 ## Incidental
 
 - `codex-animation-port`: the fork's port of upstream #4297 (`tests/fixtures/codex-animation/`), which upstream replaced with #4532; kept for now at a known cost.

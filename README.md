@@ -37,6 +37,7 @@ Use this fork's repository when cloning for these changes; the upstream project 
 - **Reviewed worker permissions:** Claude and Codex launches default to automatic permission review, with a manual-review option, instead of bypassing permissions or the sandbox; see [worker permission modes](docs/configuration.md#worker-permission-mode-configcrew-permissions).
   agy workers default to accept-edits mode and run bypass only under a policed permission hook, and Devin workers run in reviewed mode behind the same kind of hook, never in bypass.
 - **Remote-less local work:** explicit `local-only` ship tasks can start from local `main` or `master` without a remote, while rejecting dirty or divergent task bases.
+- **Away watchdog outside tmux:** while away, a detached watchdog alarms through the [wedge-alarm channels](docs/wedge-alarm.md) if the fleet's tmux server or the away watcher stops, and the return brief names what stopped and when.
 - **Durable approval waits:** completed ship work awaiting merge approval remains tracked and visible in Bearings, with quiet supervision after the finished worker is verified stopped.
 
 Maintainers: the [fork divergences ledger](docs/fork-divergences.md) records every deliberate difference from upstream, with its seam and guard test.

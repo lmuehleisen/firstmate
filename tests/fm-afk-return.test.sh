@@ -782,6 +782,27 @@ test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap() {
   pass "the return brief does not report an already-acked watcher-down marker as an open gap"
 }
 
+test_return_brief_reports_away_watchdog_findings() {
+  local dir out dead
+  dir="$TMP_ROOT/brief-watchdog"
+  install_runner "$dir"
+  cp "$ROOT/bin/fm-afk-sentinel.sh" "$dir/bin/"
+  contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
+  touch "$dir/home/state/.last-watcher-beat"
+  printf 'the fleet tmux server (pid 4242, socket /tmp/fleet.sock) stopped; detected 2026-09-25T03:53:04Z\n' > "$dir/home/state/.afk-sentinel-alarm"
+  sh -c 'exit 0' &
+  dead=$!
+  wait "$dead"
+  printf 'pid=%s\nidentity=gone\n' "$dead" > "$dir/home/state/.afk-sentinel"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a clean fleet with watchdog findings should still clear the gate: $out"
+  assert_contains "$out" 'GAP: the away watchdog found the fleet tmux server (pid 4242, socket /tmp/fleet.sock) stopped; detected 2026-09-25T03:53:04Z' "the watchdog finding was not reported as a gap"
+  assert_contains "$out" 'GAP: the away watchdog was not running at return' "a dead watchdog was not reported as a gap"
+  assert_not_contains "$out" 'no detected gap' "a watchdog finding was reported as a clean window"
+  [ ! -e "$dir/home/state/.afk-sentinel-alarm" ] || fail "the watchdog marker survived a clean catch-up"
+  pass "the return brief names what the away watchdog found stopped, and when, and clears it after catch-up"
+}
+
 test_return_brief_without_a_record_reports_the_legacy_flag() {
   local dir out
   dir="$TMP_ROOT/brief-legacy"
@@ -887,4 +908,5 @@ test_statusful_leftover_record_lets_catchup_clear
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
+test_return_brief_reports_away_watchdog_findings
 test_return_brief_without_a_record_reports_the_legacy_flag

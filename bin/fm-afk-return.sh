@@ -257,7 +257,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.afk-sentinel-alarm"
 }
 
 # The lifecycle retention reasons the gate kept, one per line, empty when the
@@ -319,7 +320,7 @@ return_guard() {
 # --- supervisor health, snapshotted before anything is shut down ------------
 
 health_snapshot() {  # <evidence-file>
-  local evidence=$1 beat_age lines=""
+  local evidence=$1 beat_age lines="" finding
   beat_age=$(fm_path_age "$STATE/.last-watcher-beat")
   if [ -e "$STATE/.watcher-down" ]; then
     # The marker survives past its episode in an acked:* state
@@ -343,6 +344,16 @@ GAP: the away daemon was not running at return (the away flag stood with no live
     lines="$lines
 GAP: the watcher beat was ${beat_age}s old at return (grace ${RETURN_GRACE}s)"
   fi
+  # Fork-only: findings of the detached away watchdog (bin/fm-afk-sentinel.sh).
+  if [ -s "$STATE/.afk-sentinel-alarm" ]; then
+    while IFS= read -r finding; do
+      [ -n "$finding" ] && lines="$lines
+GAP: the away watchdog found $finding"
+    done < "$STATE/.afk-sentinel-alarm"
+  fi
+  "$SCRIPT_DIR/fm-afk-sentinel.sh" status >/dev/null 2>&1
+  [ "$?" -ne 1 ] || lines="$lines
+GAP: the away watchdog was not running at return"
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     lines="$lines
 delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)"

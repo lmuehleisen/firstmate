@@ -229,8 +229,14 @@ fm_afk_launch_record_require() {
 }
 
 fm_afk_launch_enter() {
+  local rc
   fm_afk_launch_catchup_pending && return 1
   "$FM_AFK_CONTRACT_CMD" enter "$@"
+  rc=$?
+  # Fork-only: the detached away watchdog outlives a lost fleet tmux server.
+  [ "$rc" -ne 0 ] || "$FM_AFK_LAUNCH_DIR/fm-afk-sentinel.sh" start \
+    || fm_afk_launch_log "the away watchdog did not start; a lost fleet tmux server will not alarm this window"
+  return "$rc"
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -733,6 +739,7 @@ fm_afk_launch_stop() {
       result=1
     fi
   fi
+  [ "$result" -ne 0 ] || "$FM_AFK_LAUNCH_DIR/fm-afk-sentinel.sh" stop || true
   if [ "$result" -eq 0 ]; then
     if [ "$closed_daemon_terminal" -eq 1 ]; then
       fm_afk_launch_log "away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived"
