@@ -42,15 +42,16 @@
 #       when none is stated) and schedules one retry at
 #         reset + BACKOFF * 2^count + random(0..JITTER)
 #       where count is the number of automatic retries already sent since the
-#       task's last normal Stop. The home-wide slot file
-#       <state-dir>/devin-rate-limit-slot then pushes that time to at least
-#       SPACING seconds after the latest retry any other worker in this home
-#       scheduled, so workers that hit the limit together retry apart; when
-#       another claimant holds the slot's lock throughout, the retry keeps its
-#       own time unstaggered. It sleeps to the slot, gives up if the turn token changed meanwhile, and
-#       sends one ordinary steer through bin/fm-send.sh, so the message lands
-#       in the task's durable inbox and the doorbell submit starts the retry
-#       turn; a send that fails is logged and not counted. Once count reaches MAX it sends nothing and appends one
+#       task's last normal Stop. When that time comes, the home-wide slot file
+#       <state-dir>/devin-rate-limit-slot pushes it to at least SPACING
+#       seconds after the latest retry any other worker in this home sent or
+#       is about to send, so workers that hit the limit together retry apart;
+#       when another claimant holds the slot's lock throughout, the retry
+#       keeps its own time unstaggered. It gives up if the turn token changes
+#       while it waits, and otherwise sends one ordinary steer through
+#       bin/fm-send.sh, so the message lands in the task's durable inbox and
+#       the doorbell submit starts the retry turn; a send that fails is logged
+#       and not counted. Once count reaches MAX it sends nothing and appends one
 #       `blocked [key=devin-rate-limit]` status line instead.
 #
 # Every arm, detection, retry, cap, and failure is one JSON line in the
@@ -245,6 +246,17 @@ cmd_retire() {
   rm -rf -- "$DIR"
 }
 
+# Sleeps until <epoch>; fails as soon as this turn's token is replaced.
+wait_turn_until() {  # <token> <epoch>
+  local now
+  while :; do
+    turn_is "$1" || return 1
+    now=$(date +%s)
+    [ "$now" -lt "$2" ] || return 0
+    if [ $(($2 - now)) -lt "$POLL" ]; then sleep $(($2 - now)); else sleep "$POLL"; fi
+  done
+}
+
 cmd_watch() {
   local token=$1 log=$2 seen=$3 started now total segment line reset count \
     delay due slot
@@ -275,17 +287,15 @@ cmd_watch() {
   fi
   delay=$((reset + BACKOFF * (1 << count) + RANDOM % (JITTER + 1)))
   due=$(($(date +%s) + delay))
-  slot=$(claim_slot "$due")
-  log_event detected "reset ${reset}s; retry $((count + 1)) of $MAX at $slot"
-  while :; do
-    turn_is "$token" || {
-      log_event superseded "a new prompt or turn end arrived before retry $((count + 1))"
-      return 0
-    }
-    now=$(date +%s)
-    [ "$now" -lt "$slot" ] || break
-    if [ $((slot - now)) -lt "$POLL" ]; then sleep $((slot - now)); else sleep "$POLL"; fi
-  done
+  log_event detected "reset ${reset}s; retry $((count + 1)) of $MAX due at $due"
+  # The home-wide slot is claimed only once this retry is due, so a longer
+  # reset detected first, or a retry later superseded, never delays another
+  # worker's.
+  if ! wait_turn_until "$token" "$due" || ! slot=$(claim_slot "$due") ||
+    ! wait_turn_until "$token" "$slot"; then
+    log_event superseded "a new prompt or turn end arrived before retry $((count + 1))"
+    return 0
+  fi
   # The count is written before the send, because the delivered retry starts
   # the next turn whose sentinel reads it, and restored when nothing was sent,
   # so the cap counts only retries the worker actually received.

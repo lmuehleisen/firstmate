@@ -10,7 +10,8 @@
 # scheduled retry, the lines that must not trigger a retry, the consecutive
 # cap with its blocked line and the resolved line a later normal Stop writes,
 # the home-wide stagger between two workers, the unarmed case, retire, a
-# reused pid's stale log, an undelivered retry, and a held slot lock.
+# reused pid's stale log, an undelivered retry, a held slot lock, and a long
+# reset that must not delay a shorter one.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -238,3 +239,17 @@ has_event "$H" unstaggered || fail "a held slot lock must be logged as unstagger
 assert_equals 4000000000 "$(cat "$H/state/devin-rate-limit-slot")" "a claimant without the lock must not rewrite the slot"
 [ -d "$H/state/devin-rate-limit-slot.lock" ] || fail "a claimant without the lock must not remove it"
 pass "a slot lock held throughout leaves the slot alone and the retry unstaggered"
+
+# 13. A longer reset detected first does not delay another worker's shorter
+# one, because the slot is claimed only when a retry is due.
+H=$(new_home long-first)
+LOG1=$(FM_DEVIN_RETRY_SPACING=5 fake_devin "$H" t1 arm)
+rate_limit_line "1 hour" >>"$LOG1"
+wait_for 10 "the long reset's detection" has_event "$H" detected
+LOG2=$(FM_DEVIN_RETRY_SPACING=5 fake_devin "$H" t2 arm)
+rate_limit_line "1 second" >>"$LOG2"
+wait_for 15 "the short reset's retry" sent_at_least "$H" 1
+assert_equals t2 "$(cut -d'|' -f4 "$H/sent")" "only the short reset's worker may have retried"
+hook "$H" t1 stop
+wait_for 10 "the long reset's superseded event" has_event "$H" superseded
+pass "a longer reset detected first does not delay another worker's shorter one"
