@@ -20,8 +20,8 @@ agy self-updates aggressively and without asking - it moved 1.1.25 -> 1.1.28 -> 
 | Exit | `/exit` (alias `quit`), one Enter; prints `Resume with -c (or command below): agy --conversation=<uuid>`. |
 | Interrupt | Single `Escape`, which prints `Interrupted · What should Antigravity CLI do instead?` and leaves the composer EMPTY, so no clear key is needed. |
 | Resume | `agy -c` / `--continue` for the most recent conversation, or `agy --conversation=<uuid>` from the id printed at exit. |
-| Models | `--model <model>`; `agy models` lists the account's ids. Effort is also encoded as a model-id suffix - see "Model and effort". |
-| Effort | `--effort low|medium|high` ONLY; anything above is refused. See "Model and effort". |
+| Models | `--model <model>`, checked against `agy models` before launch; effort is also encoded as a model-id suffix - see "Model and effort". |
+| Effort | Firstmate emits `--effort low|medium|high` only; `xhigh` is refused and agy 1.2.11 also accepts `max`. See "Model and effort". |
 | Marker | `JETSKI_APP_DATA_DIR=antigravity-cli` on tool subprocesses, alongside `ANTIGRAVITY_LS_VERSION=cli-<version>`, `ANTIGRAVITY_PROJECT_ID`, `ANTIGRAVITY_TRAJECTORY_ID`, `ANTIGRAVITY_LS_ADDRESS`, and `ANTIGRAVITY_SOURCE_METADATA`. agy does NOT set `GEMINI_CLI`. |
 | Composer | `>` between solid rules and the native footer; `../../../../../bin/fm-composer-lib.sh` owns shape and placeholder classification. |
 | Skill | `/<skill>`; typing `/` opens a filtered command menu and ONE Enter selects and submits. |
@@ -168,10 +168,14 @@ Effort is published TWICE and the two forms conflict:
 - `--effort low|medium|high` is a separate flag.
 
 Passing both refuses the launch: `--model gemini-3.8-flash-high --effort low` exits with `--model gemini-3.8-flash-high conflicts with --effort=low`.
-The unsuffixed base id is accepted even though the listing does not show it, and composes with the flag.
+The unsuffixed base id is not listed, but agy accepts it with `--effort` when the listing carries that base at that level; without `--effort`, or with a level the listing lacks for it, agy refuses.
 The adapter therefore emits at most one: a model id already carrying a level wins and no effort flag is sent.
 
-Firstmate's `xhigh` and `max` are above agy's ceiling - `--effort xhigh` is refused with `invalid --effort "xhigh" (valid: low, medium, high)` - so both cap onto `high` rather than being dropped, per `../common/model-and-effort.md`.
+Before any endpoint exists, spawn checks the selected model against a bounded `agy models` listing: a listed id or a supported base-plus-level alias launches, anything else refuses with the concrete reason, and a listing that fails, is empty, or times out launches the model unvalidated with a notice.
+`../../../../../bin/fm-spawn.sh`'s header owns the bound and the exact acceptance rule.
+
+Firstmate's `xhigh` is above agy's ceiling - `--effort xhigh` is refused with `invalid --effort "xhigh" (valid: low, medium, high, max)` on agy 1.2.11 - so it caps onto `high` rather than being dropped, per `../common/model-and-effort.md`.
+Firstmate's `max` caps onto `high` too; agy 1.2.11's own `max` level is not yet adopted.
 The requested level stays recorded in task metadata.
 
 ## Interruptions Firstmate cannot suppress

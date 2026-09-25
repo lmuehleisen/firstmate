@@ -53,20 +53,44 @@ TMP_ROOT=$(fm_test_tmproot fm-agy-harness)
 
 # --- detection --------------------------------------------------------------
 
+# bin/fm-harness.sh lets a structural ancestor of a DIFFERENT harness outrank a
+# marker, so a marker case run under whichever real harness launched this suite
+# (a Claude or Codex parent, say) would assert that parent's verdict instead of
+# the marker's. Marker cases therefore run with the ancestry walk blinded by a
+# fake ps that reports a bash chain ending at pid 1; the ancestry cases below
+# use real processes, and the precedence case pins what the blinding hides.
+BLIND_PS=$(fm_fakebin "$TMP_ROOT/blind-ps")
+cat > "$BLIND_PS/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'ppid='*) printf '%s\n' 1 ;;
+  *) printf '%s\n' bash ;;
+esac
+SH
+chmod +x "$BLIND_PS/ps"
+
+marker_verdict() {  # [env args...] -> the verdict from markers alone
+  env "$@" PATH="$BLIND_PS:$PATH" "$HARNESS"
+}
+
 test_agy_marker_outranks_inherited_claudecode() {
   local out
+  # The blinding must leave no ancestor to answer, or every marker case below
+  # could be passing on an ancestry verdict.
+  out=$(marker_verdict)
+  [ "$out" = unknown ] || fail "the blinded ancestry walk must leave no verdict, got '$out'"
   # agy was not verified to scrub an inherited CLAUDECODE, so the adapter is
   # ordered before it. Pin that order rather than the hope that agy clears it.
-  out=$(CLAUDECODE=1 JETSKI_APP_DATA_DIR=antigravity-cli "$HARNESS")
+  out=$(marker_verdict CLAUDECODE=1 JETSKI_APP_DATA_DIR=antigravity-cli)
   [ "$out" = agy ] || fail "CLAUDECODE + agy marker must detect agy, got '$out'"
   # Drive the signals apart so the case above cannot go quietly vacuous: each
   # marker alone must still produce its own verdict.
-  out=$(env -u CLAUDECODE JETSKI_APP_DATA_DIR=antigravity-cli "$HARNESS")
+  out=$(marker_verdict JETSKI_APP_DATA_DIR=antigravity-cli)
   [ "$out" = agy ] || fail "the agy marker alone must detect agy, got '$out'"
-  out=$(env -u JETSKI_APP_DATA_DIR CLAUDECODE=1 "$HARNESS")
+  out=$(marker_verdict CLAUDECODE=1)
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # Cursor's marker still outranks agy's, preserving the documented order.
-  out=$(CURSOR_AGENT=1 JETSKI_APP_DATA_DIR=antigravity-cli "$HARNESS")
+  out=$(marker_verdict CURSOR_AGENT=1 JETSKI_APP_DATA_DIR=antigravity-cli)
   [ "$out" = cursor ] || fail "CURSOR_AGENT must still outrank the agy marker, got '$out'"
   pass "fm-harness.sh: agy's marker outranks an inherited CLAUDECODE"
 }
@@ -75,10 +99,10 @@ test_agy_marker_is_the_cli_not_the_ide() {
   local out
   # The Antigravity IDE keeps its state under ~/.gemini/antigravity, so its app
   # data dir is `antigravity`. Only the CLI's exact value is agy.
-  out=$(JETSKI_APP_DATA_DIR=antigravity "$HARNESS")
+  out=$(marker_verdict JETSKI_APP_DATA_DIR=antigravity)
   [ "$out" != agy ] \
     || fail "the IDE's app data dir must not be read as the agy CLI, got '$out'"
-  out=$(JETSKI_APP_DATA_DIR=antigravity-cli-other "$HARNESS")
+  out=$(marker_verdict JETSKI_APP_DATA_DIR=antigravity-cli-other)
   [ "$out" != agy ] \
     || fail "a non-exact app data dir must not claim agy, got '$out'"
   pass "fm-harness.sh: only the CLI's exact app data dir claims agy"
@@ -90,55 +114,93 @@ test_agy_does_not_claim_the_gemini_identity() {
   # but does NOT set GEMINI_CLI (verified in an agy tool process environment).
   # A GEMINI_CLI session must stay gemini, and an agy session must not be
   # reported as gemini.
-  out=$(GEMINI_CLI=1 "$HARNESS")
+  out=$(marker_verdict GEMINI_CLI=1)
   [ "$out" = gemini ] || fail "GEMINI_CLI must still detect gemini, got '$out'"
-  out=$(JETSKI_APP_DATA_DIR=antigravity-cli "$HARNESS")
+  out=$(marker_verdict JETSKI_APP_DATA_DIR=antigravity-cli)
   [ "$out" = agy ] || fail "an agy session must not be read as gemini, got '$out'"
   pass "fm-harness.sh: agy and the Gemini CLI keep separate identities"
 }
 
-test_agy_ancestry_matches_only_the_exact_command_name() {
-  local dir="$TMP_ROOT/ancestry" out clean probe
-  mkdir -p "$dir"
-  # The verdict has to come from a live process tree rather than a string this
-  # test also wrote, so each case runs a real executable under the name being
-  # checked. It must be a locally BUILT executable: copying a system binary
-  # under a new name is SIGKILLed by macOS code signing (exit 137), and a
-  # symlink does not work either because `ps -o comm=` resolves it back to the
-  # real binary's name. A tiny C launcher that runs the probe as a CHILD keeps
-  # the tested name in the ancestry the walk reads.
-  command -v cc >/dev/null 2>&1 || {
-    printf 'skip - fm-harness.sh: agy ancestry needs cc to build a named process\n'
-    return 0
-  }
-  cat > "$dir/run.c" <<'C'
+# The verdict has to come from a live process tree rather than a string this
+# test also wrote, so each ancestry case runs a real executable under the name
+# being checked. It must be a locally BUILT executable: copying a system binary
+# under a new name is SIGKILLed by macOS code signing (exit 137), and a symlink
+# does not work either because `ps -o comm=` resolves it back to the real
+# binary's name. A tiny C launcher that runs the probe as a CHILD keeps the
+# tested name in the ancestry the walk reads. Returns 2 when cc is absent.
+build_named_probe() {  # <dir> <name> -> path
+  command -v cc >/dev/null 2>&1 || return 2
+  mkdir -p "$1"
+  [ -f "$1/run.c" ] || cat > "$1/run.c" <<'C'
 #include <stdlib.h>
 int main(int argc, char **argv) { if (argc < 2) return 1; return system(argv[1]) == 0 ? 0 : 1; }
 C
-  # The marker layer outranks ancestry, so every foreign marker is dropped -
-  # otherwise these cases would assert a marker's verdict, not the ancestry
-  # match they exist to pin.
-  clean="env -u JETSKI_APP_DATA_DIR -u CLAUDECODE -u CURSOR_AGENT"
-  clean="$clean -u CURSOR_INVOKED_AS -u GEMINI_CLI -u PI_CODING_AGENT"
-  clean="$clean -u GROK_AGENT -u ATLASSIAN_AGENT_TYPE"
-  clean="$clean -u FM_DEVIN_HARNESS -u FM_OMP_HARNESS"
-  probe="$clean $HARNESS"
+  cc -o "$1/$2" "$1/run.c" 2>/dev/null || return 1
+  printf '%s\n' "$1/$2"
+}
 
-  cc -o "$dir/agy" "$dir/run.c" 2>/dev/null \
-    || fail "could not build the agy ancestry probe"
-  out=$("$dir/agy" "$probe" | tr -d '\n')
+# Every foreign marker is dropped from an ancestry probe, so a case asserts the
+# markers it names and nothing inherited.
+ANCESTRY_CLEAN="env -u JETSKI_APP_DATA_DIR -u CLAUDECODE -u CURSOR_AGENT"
+ANCESTRY_CLEAN="$ANCESTRY_CLEAN -u CURSOR_INVOKED_AS -u GEMINI_CLI -u PI_CODING_AGENT"
+ANCESTRY_CLEAN="$ANCESTRY_CLEAN -u GROK_AGENT -u ATLASSIAN_AGENT_TYPE"
+ANCESTRY_CLEAN="$ANCESTRY_CLEAN -u FM_DEVIN_HARNESS -u FM_OMP_HARNESS"
+
+test_agy_marker_yields_to_a_different_native_ancestor() {
+  local dir="$TMP_ROOT/precedence" codex agy out rc
+  # A marker names a harness, but a structural ancestor of a DIFFERENT harness
+  # owns the process tree and wins: this is what a retained agy marker under a
+  # native Codex parent must resolve to, and why the marker cases above blind
+  # the walk. The symmetric case keeps an inherited CLAUDECODE from renaming a
+  # real agy worker.
+  rc=0
+  codex=$(build_named_probe "$dir" codex) || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    printf 'skip - fm-harness.sh: agy precedence needs cc to build a named process\n'
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || fail "could not build the codex ancestry probe"
+  agy=$(build_named_probe "$dir" agy) || fail "could not build the agy ancestry probe"
+  out=$("$codex" "$ANCESTRY_CLEAN JETSKI_APP_DATA_DIR=antigravity-cli $HARNESS" | tr -d '\n')
+  [ "$out" = codex ] \
+    || fail "a native codex ancestor must outrank a retained agy marker, got '$out'"
+  out=$("$agy" "$ANCESTRY_CLEAN CLAUDECODE=1 $HARNESS" | tr -d '\n')
+  [ "$out" = agy ] \
+    || fail "a native agy ancestor must outrank an inherited CLAUDECODE, got '$out'"
+  # Drive the layers apart: the same markers with the walk blinded still name
+  # their own harness, so the verdicts above are ancestry's, not the markers'.
+  out=$(marker_verdict JETSKI_APP_DATA_DIR=antigravity-cli)
+  [ "$out" = agy ] || fail "the agy marker alone must detect agy, got '$out'"
+  out=$(marker_verdict CLAUDECODE=1)
+  [ "$out" = claude ] || fail "CLAUDECODE alone must detect claude, got '$out'"
+  pass "fm-harness.sh: a different native ancestor outranks the agy marker, and agy's outranks a foreign one"
+}
+
+test_agy_ancestry_matches_only_the_exact_command_name() {
+  local dir="$TMP_ROOT/ancestry" out probe bin rc
+  rc=0
+  bin=$(build_named_probe "$dir" agy) || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    printf 'skip - fm-harness.sh: agy ancestry needs cc to build a named process\n'
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || fail "could not build the agy ancestry probe"
+  # Every marker is dropped, so each verdict below is the ancestry walk's.
+  probe="$ANCESTRY_CLEAN $HARNESS"
+
+  out=$("$bin" "$probe" | tr -d '\n')
   [ "$out" = agy ] || fail "an exact agy ancestor must detect agy, got '$out'"
 
   # Anchored, never *agy*: both of these would match a careless glob. They must
   # not merely fail to say agy - they must fall THROUGH to whatever really
   # launched this suite, which is what proves the arm did not fire.
-  cc -o "$dir/legacy" "$dir/run.c" 2>/dev/null \
+  bin=$(build_named_probe "$dir" legacy) \
     || fail "could not build the legacy ancestry probe"
-  out=$("$dir/legacy" "$probe" | tr -d '\n')
+  out=$("$bin" "$probe" | tr -d '\n')
   [ "$out" != agy ] || fail "a 'legacy' command must not be misread as agy"
-  cc -o "$dir/agyrate" "$dir/run.c" 2>/dev/null \
+  bin=$(build_named_probe "$dir" agyrate) \
     || fail "could not build the agyrate ancestry probe"
-  out=$("$dir/agyrate" "$probe" | tr -d '\n')
+  out=$("$bin" "$probe" | tr -d '\n')
   [ "$out" != agy ] || fail "an 'agyrate' command must not be misread as agy"
   pass "fm-harness.sh: agy ancestry is anchored to the exact command name"
 }
@@ -391,8 +453,26 @@ SH
   chmod +x "$fakebin/tmux"
   # A stand-in `agy` on PATH: the spawn resolves the executable to an absolute
   # path before launching, and refuses when none exists, so the resolver needs
-  # something executable to find. It is never run by these cases.
-  fm_fake_exit0 "$fakebin" agy gh-axi gh
+  # something executable to find. Only its `models` catalog is ever run, shaped
+  # like agy 1.2.11's: suffixed ids, a model with no medium level, and one
+  # unsuffixed id. FM_FAKE_AGY_MODELS_FAIL and _HANG model an unreachable and a
+  # stalled listing.
+  cat > "$fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = models ]; then
+  [ "${FM_FAKE_AGY_MODELS_FAIL:-0}" = 1 ] && exit 3
+  if [ "${FM_FAKE_AGY_MODELS_HANG:-0}" = 1 ]; then cat > /dev/null; sleep 30; exit 0; fi
+  printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n'
+  printf 'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
+  printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'
+  printf 'gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n'
+  printf 'gemini-3.1-pro-low\tGemini 3.1 Pro (Low)\n'
+  printf 'claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/agy"
+  fm_fake_exit0 "$fakebin" gh-axi gh
   fm_fake_treehouse_lease "$fakebin"
   printf '%s\n' "$fakebin"
 }
@@ -673,6 +753,128 @@ EOF
     *) fail "an unsuffixed model id must still carry --effort, got: $launch" ;;
   esac
   pass "fm-spawn.sh: agy emits a suffixed model id or --effort, never both"
+}
+
+# --- model catalog ----------------------------------------------------------
+
+# One scout spawn per model case; prints "<exit>|<home>" and leaves the
+# spawn's output in <home>/spawn.out.
+agy_catalog_spawn() {  # <case-name> [spawn args...]
+  local name=$1 fields case_dir home proj wt fakebin id rc=0
+  shift
+  fields=$(make_spawn_case "$name")
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout "$@" \
+    > "$home/spawn.out" || rc=$?
+  printf '%s|%s\n' "$rc" "$home"
+}
+
+test_agy_catalog_accepts_listed_ids_and_base_aliases() {
+  local spec model effort result home out
+  # A listed id launches as is, and an unsuffixed base launches when the
+  # catalog lists <base>-<level> for the level the launch passes: xhigh caps
+  # onto high, so gemini-3.8-flash-high is what makes that case supported.
+  for spec in gemini-3.8-flash-high:low claude-sonnet-4-6: \
+    gemini-3.8-flash:medium gemini-3.8-flash:xhigh gemini-3.1-pro:low; do
+    model=${spec%%:*}
+    effort=${spec#*:}
+    if [ -n "$effort" ]; then
+      result=$(agy_catalog_spawn "catalog-ok-$model-$effort" --model "$model" --effort "$effort")
+    else
+      result=$(agy_catalog_spawn "catalog-ok-$model" --model "$model")
+    fi
+    home=${result#*|}
+    out=$(cat "$home/spawn.out")
+    case "$out" in
+      *"agy model '"* | *"'agy models'"*)
+        fail "a supported agy model ($spec) must pass the catalog check silently, got: $out" ;;
+    esac
+    grep -Fq -- "--model '$model'" "$home/launch.log" 2>/dev/null \
+      || fail "a supported agy model ($spec) must reach the launch, got: $out"
+  done
+  pass "fm-spawn.sh: agy launches listed ids and base ids whose level the catalog lists"
+}
+
+test_agy_catalog_refuses_unsupported_models_before_launch() {
+  local spec model effort result rc home out want
+  # Each shape is one agy 1.2.11 itself refuses: an id it never lists, a base
+  # with no --effort, a base with a level the catalog lacks for it, and a
+  # suffixed id naming that missing level.
+  for spec in \
+    "gemini-9.9-nonexistent::not listed by 'agy models'" \
+    "gemini-3.8-flash::listed only as effort variants (high,medium,low), and this launch would pass --effort 'none'" \
+    "gemini-3.1-pro:medium:listed only as effort variants (high,low), and this launch would pass --effort 'medium'" \
+    "gemini-3.1-pro-medium:low:not listed by 'agy models'"; do
+    model=${spec%%:*}
+    effort=${spec#*:}
+    want=${effort#*:}
+    effort=${effort%%:*}
+    if [ -n "$effort" ]; then
+      result=$(agy_catalog_spawn "catalog-bad-$model-$effort" --model "$model" --effort "$effort")
+    else
+      result=$(agy_catalog_spawn "catalog-bad-$model" --model "$model")
+    fi
+    rc=${result%%|*}
+    home=${result#*|}
+    out=$(cat "$home/spawn.out")
+    [ "$rc" -ne 0 ] || fail "an unsupported agy model ($model${effort:+ --effort $effort}) must refuse the spawn"
+    assert_contains "$out" "$want" "the refusal for $model must name its concrete reason"
+    [ ! -s "$home/launch.log" ] && [ ! -e "$home/launch.log.window" ] \
+      || fail "a refused agy model ($model) must not create an endpoint or launch"
+  done
+  pass "fm-spawn.sh: an agy model the catalog cannot support refuses before any endpoint"
+}
+
+test_agy_unreachable_listing_launches_unvalidated() {
+  local result rc home out
+  result=$(FM_FAKE_AGY_MODELS_FAIL=1 agy_catalog_spawn catalog-unreachable \
+    --model gemini-9.9-nonexistent)
+  rc=${result%%|*}
+  home=${result#*|}
+  out=$(cat "$home/spawn.out")
+  expect_code 0 "$rc" "an unreachable model listing must not block the spawn: $out"
+  assert_contains "$out" "listing is unreachable (exit 3)" \
+    "an unreachable listing launched without its notice"
+  grep -Fq -- "--model 'gemini-9.9-nonexistent'" "$home/launch.log" \
+    || fail "an unreachable listing must launch the requested model unvalidated"
+  pass "fm-spawn.sh: an unreachable agy listing establishes nothing and launches"
+}
+
+test_agy_hung_listing_is_cut_off_and_launches() {
+  local result rc home out started elapsed
+  started=$(date +%s)
+  result=$(FM_FAKE_AGY_MODELS_HANG=1 FM_AGY_MODELS_TIMEOUT=1 \
+    agy_catalog_spawn catalog-hung --model gemini-3.8-flash-low)
+  elapsed=$(( $(date +%s) - started ))
+  rc=${result%%|*}
+  home=${result#*|}
+  out=$(cat "$home/spawn.out")
+  expect_code 0 "$rc" "a hung model listing must not block the spawn: $out"
+  [ "$elapsed" -lt 20 ] || fail "the model probe was not cut off by its bound (took ${elapsed}s)"
+  assert_contains "$out" "did not answer within 1s" "a hung listing launched without its timeout notice"
+  grep -Fq -- "--model 'gemini-3.8-flash-low'" "$home/launch.log" \
+    || fail "a hung listing dropped the requested model instead of launching it unvalidated"
+  pass "fm-spawn.sh: a hung agy listing is cut off by the shared bound and launches unvalidated"
+}
+
+test_agy_invalid_model_timeout_is_clamped_to_the_default_bound() {
+  local result rc home out started elapsed
+  # Zero would disable the deadline outright; it must fall back to the default.
+  started=$(date +%s)
+  result=$(FM_FAKE_AGY_MODELS_HANG=1 FM_AGY_MODELS_TIMEOUT=0 \
+    agy_catalog_spawn catalog-zero-bound --model gemini-3.8-flash-low)
+  elapsed=$(( $(date +%s) - started ))
+  rc=${result%%|*}
+  home=${result#*|}
+  out=$(cat "$home/spawn.out")
+  expect_code 0 "$rc" "a hung listing with a zero bound must not block the spawn: $out"
+  [ "$elapsed" -lt 25 ] || fail "a zero model bound disabled the deadline (took ${elapsed}s)"
+  assert_contains "$out" "did not answer within 15s" \
+    "a zero model bound was not clamped to the documented default"
+  pass "fm-spawn.sh: an invalid FM_AGY_MODELS_TIMEOUT is clamped to the default bound"
 }
 
 # --- task kinds -------------------------------------------------------------
@@ -1655,6 +1857,7 @@ test_agy_session_identity() {
 test_agy_marker_outranks_inherited_claudecode
 test_agy_marker_is_the_cli_not_the_ide
 test_agy_does_not_claim_the_gemini_identity
+test_agy_marker_yields_to_a_different_native_ancestor
 test_agy_ancestry_matches_only_the_exact_command_name
 test_agy_tmux_names_the_native_binary_an_agent
 test_herdr_done_with_live_registry_stays_live
@@ -1671,6 +1874,11 @@ test_agy_grants_resolve_a_symlinked_worktree
 test_agy_effort_caps_at_high
 test_agy_effort_passes_supported_levels_through
 test_agy_suffixed_model_id_suppresses_the_effort_flag
+test_agy_catalog_accepts_listed_ids_and_base_aliases
+test_agy_catalog_refuses_unsupported_models_before_launch
+test_agy_unreachable_listing_launches_unvalidated
+test_agy_hung_listing_is_cut_off_and_launches
+test_agy_invalid_model_timeout_is_clamped_to_the_default_bound
 test_agy_secondmate_launch_is_supported
 test_agy_spawn_confirms_the_brief_started
 test_agy_spawn_fails_and_closes_when_the_brief_never_starts
