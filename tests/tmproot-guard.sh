@@ -40,16 +40,19 @@ FM_TEST_TMPROOT_GUARD_CHECKOUT=$(fm_test_tmproot_guard_canonical_dir "$(dirname 
     "${BASH_SOURCE[0]}" >&2
   exit 1
 }
-FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR=${TMPDIR:-/tmp}
+# Captured canonical, so a relative TMPDIR still names the same directory after
+# a suite changes its working directory.
+FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR=$(fm_test_tmproot_guard_canonical_dir "${TMPDIR:-/tmp}") ||
+  FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR=
 
 # Every fixture root lives under TMPDIR and the guard refuses anything inside
 # the checkout, so a TMPDIR inside the checkout would only produce fixtures no
 # cleanup may remove. Refuse it here, where every suite that removes a root -
 # through tests/lib.sh or directly - is sure to pass.
-case "$(fm_test_tmproot_guard_canonical_dir "$FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR")/" in
+case "$FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR/" in
   / | // | "$FM_TEST_TMPROOT_GUARD_CHECKOUT"/*)
     printf 'not ok - tests/tmproot-guard.sh precondition unmet: TMPDIR (%s) must be an existing directory outside the checkout %s\n' \
-      "$FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR" "$FM_TEST_TMPROOT_GUARD_CHECKOUT" >&2
+      "${TMPDIR:-/tmp}" "$FM_TEST_TMPROOT_GUARD_CHECKOUT" >&2
     exit 1
     ;;
 esac
@@ -91,20 +94,22 @@ fm_test_tmproot_guard_reason() {
     printf 'empty path\n'
     return 0
   fi
-  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+  # Drop trailing slashes before testing existence: `broken-link/` reads as
+  # absent through the slash even though the link itself is there.
+  base=${path%"${path##*[!/]}"}
+  if [ -z "$base" ]; then
+    printf 'the filesystem root\n'
+    return 0
+  fi
+  if [ ! -e "$base" ] && [ ! -L "$base" ]; then
     printf 'absent\n'
     return 0
   fi
   if ! canon=$(fm_test_tmproot_guard_resolve "$path"); then
-    base=${path%"${path##*[!/]}"}
-    if [ -z "$base" ]; then
-      printf 'the filesystem root\n'
-    else
-      case "${base##*/}" in
-        . | ..) printf 'a relative directory component\n' ;;
-        *) printf 'its parent directory cannot be resolved\n' ;;
-      esac
-    fi
+    case "${base##*/}" in
+      . | ..) printf 'a relative directory component\n' ;;
+      *) printf 'its parent directory cannot be resolved\n' ;;
+    esac
     return 0
   fi
   case "$FM_TEST_TMPROOT_GUARD_CHECKOUT/" in
@@ -160,8 +165,8 @@ fm_test_rm_tmproot() {  # <path>...
 fm_test_rm_checkout_lab() {  # <path>
   local canon name
   [ -n "${1-}" ] || return 0
-  [ -e "$1" ] || [ -L "$1" ] || return 0
   canon=$(fm_test_tmproot_guard_resolve "$1") || canon=
+  [ -z "$canon" ] || [ -e "$canon" ] || [ -L "$canon" ] || return 0
   name=${canon##*/}
   if [ -z "$canon" ] || [ "${canon%/*}" != "$FM_TEST_TMPROOT_GUARD_CHECKOUT" ] ||
     [ -L "$canon" ] || [ ! -d "$canon" ] ||

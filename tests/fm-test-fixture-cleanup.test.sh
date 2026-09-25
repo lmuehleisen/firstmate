@@ -283,6 +283,25 @@ PROBE
       || fail "the guard did not remove the temp symlink spelled with '$spelling'"
   done
 
+  # A broken symlink spelled with a trailing slash is still the link itself.
+  ln -s "$harness/no-such-target" "$harness/broken-link"
+  out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_rm_tmproot "$1"; echo "rc=$?"' _ "$harness/broken-link/" 2>&1)
+  assert_contains "$out" rc=0 "the guard refused a broken temp symlink spelled with a trailing slash"
+  [ ! -L "$harness/broken-link" ] || fail "a broken temp symlink spelled with a trailing slash was left behind"
+
+  # A relative TMPDIR is captured canonically, so cleanup still recognizes its
+  # roots after the suite changes directory.
+  mkdir -p "$harness/rel-tmp"
+  out=$(cd "$harness" && TMPDIR=rel-tmp bash -c '
+    . "$1/tests/tmproot-guard.sh"
+    d=$(mktemp -d "$TMPDIR/fm-rel.XXXXXX") && d=$(cd "$d" && pwd -P)
+    cd /
+    fm_test_rm_tmproot "$d"; echo "rc=$?"
+    [ -e "$d" ] && echo "left:$d"
+  ' _ "$copy" 2>&1)
+  assert_contains "$out" rc=0 "the guard refused a root under a relative TMPDIR after a directory change"
+  assert_not_contains "$out" "left:" "a root under a relative TMPDIR survived cleanup after a directory change"
+
   # The in-checkout live-lab exception removes only its exact shape.
   mkdir -p "$copy/.demo-live-e2e.123/inner" "$copy/.hidden" "$harness/.stray-live-e2e.9"
   ln -s "$copy/project" "$copy/.linked-live-e2e.7"
