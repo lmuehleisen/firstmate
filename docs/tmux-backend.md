@@ -52,7 +52,8 @@ A worker's bare `tmux`, `tmux -L <label>`, and the Firstmate scripts it drives i
 Secondmates keep `TMUX`, because a secondmate places its own crew on the fleet server; its ship and scout workers get the same treatment.
 The behavior test runner applies the same boundary to every suite with a per-run directory.
 This is an environment boundary, not a sandbox: naming the fleet socket with `-S`, killing tmux by process name, or clearing the environment before running tmux still reaches the fleet, and the worker rules forbid the first two.
-`bin/fm-worker-tmux-lib.sh` owns the directory derivation, its ownership checks, and the retire, and `tests/fm-worker-tmux-isolation.test.sh` is the regression.
+`bin/fm-worker-tmux-lib.sh` owns the directory derivation, its ownership checks, and the retire.
+`tests/fm-worker-tmux-isolation.test.sh` is the regression, and [runtime backend verification](verification/runtime-backends-fork.md#worker-isolation-from-the-fleet-server) records the live per-harness evidence.
 
 ### Shell command submission
 

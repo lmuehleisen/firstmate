@@ -48,11 +48,11 @@ trap cleanup_worker_tmux EXIT
 # shellcheck source=bin/fm-worker-tmux-lib.sh
 . "$ROOT/bin/fm-worker-tmux-lib.sh"
 
+# Sets PRIVATE_DIR rather than printing it, so the cleanup list is extended in
+# this shell and not in a command substitution's subshell.
 private_dir_for() {  # <home> <id>
-  local d
-  d=$(fm_worker_tmux_dir "$1" "$2") || return 1
-  PRIVATE_DIRS+=("$d")
-  printf '%s\n' "$d"
+  PRIVATE_DIR=$(fm_worker_tmux_dir "$1" "$2") || return 1
+  PRIVATE_DIRS+=("$PRIVATE_DIR")
 }
 
 # (Re)start the lab fleet with a captain window and one worker window, and set
@@ -141,7 +141,8 @@ $2"
 # The probe's view of one worker launch, checked against its recorded directory.
 assert_private_worker() {  # <label> <out> <home> <id>
   local label=$1 out=$2 home=$3 id=$4 dir real
-  dir=$(private_dir_for "$home" "$id")
+  private_dir_for "$home" "$id" || fail "could not derive the private tmux directory"
+  dir=$PRIVATE_DIR
   assert_equals "worker_tmux_dir=$dir" "$(grep '^worker_tmux_dir=' "$home/state/$id.meta")" \
     "$label: the task record should name the worker's private tmux directory"
   assert_equals unset "$(probe_value TMUX "$out")" "$label: the worker must not inherit the fleet's TMUX"
@@ -315,7 +316,8 @@ test_relaunch_rebuilds_the_boundary() {
     printf 'codex' > "$dir/fake/command"
     printf '%s\n' "fm-$id" > "$dir/fake/windows"
     printf '%s' "$wt" > "$dir/fake/cwd"
-    private=$(private_dir_for "$home" "$id")
+    private_dir_for "$home" "$id" || fail "could not derive the private tmux directory"
+    private=$PRIVATE_DIR
     {
       echo "window=fmses:fm-$id"
       echo "endpoint_task_id=$id"
@@ -371,7 +373,8 @@ test_socket_budget_for_a_maximum_length_id() {
   out=$(run_case_spawn "$id" "$PROJ_DIR" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "maximum-length id spawn should succeed: $out"
-  dir=$(private_dir_for "$HOME_DIR" "$id")
+  private_dir_for "$HOME_DIR" "$id" || fail "could not derive the private tmux directory"
+  dir=$PRIVATE_DIR
   real=$(cd "$dir" && pwd -P)
   # Longer than the longest label a current suite uses under a runner directory.
   label="fm-sessionstart-instruction-refresh-9999999-xyz"
@@ -398,7 +401,8 @@ test_unsafe_existing_directory_refuses() {
   local rec out status dir id=unsafe-dir-t1
   rec=$(make_case unsafe-dir codex "$id")
   read_case "$rec"
-  dir=$(private_dir_for "$HOME_DIR" "$id")
+  private_dir_for "$HOME_DIR" "$id" || fail "could not derive the private tmux directory"
+  dir=$PRIVATE_DIR
   ln -s "$CASE_DIR" "$dir"
   out=$(run_case_spawn "$id" "$PROJ_DIR" --mode direct-PR --yolo off)
   status=$?
@@ -442,7 +446,9 @@ SH
     "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$case_dir/wt" \
     "project=$case_dir/project" "kind=ship" "mode=local-only" "spawn_gen=worker-tmux-$id"
 
-  dir=$(private_dir_for "$home" "$id")
+  private_dir_for "$home" "$id" || fail "could not derive the private tmux directory"
+
+  dir=$PRIVATE_DIR
   fm_worker_tmux_prepare "$dir" || fail "could not prepare the leak case's private directory"
   env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" "$REAL_TMUX" new-session -d -s leaked 'sleep 600' ||
     fail "could not start the leaked private server"

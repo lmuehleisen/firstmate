@@ -120,6 +120,46 @@ The real-shell test uses a `sleep` process as its launch postcondition; it does 
 Relaunch reuses the existing agent-liveness classifier and its live-harness evidence in [runtime-backends.md](runtime-backends.md#agent-liveness-name-sources).
 The operator boundary is [tmux shell command submission](../tmux-backend.md#shell-command-submission).
 
+### Worker isolation from the fleet server
+
+Verified on 2026-09-25 with tmux 3.7c on macOS 26.6.2.
+The portable regression drives real spawn, relaunch, and teardown against a private lab "fleet" server and replaces the harness with a probe that runs a bare `tmux kill-server`:
+
+```sh
+bin/fm-test-run.sh tests/fm-worker-tmux-isolation.test.sh
+```
+
+```text
+ok - ship and scout launches, with and without an allowlist, reach only a private tmux server
+ok - a compound raw launch still starts its agent on the private tmux server
+ok - a secondmate launch keeps the fleet's TMUX in both allowlist postures
+ok - relaunch rebuilds the private tmux boundary in both allowlist postures
+ok - the private directory leaves room for long socket labels on a maximum-length id
+ok - a pre-existing unsafe private tmux directory refuses the spawn
+ok - teardown stops a leaked private tmux server and leaves the fleet running
+ok - control: without the launch boundary an inherited TMUX outranks TMUX_TMPDIR
+```
+
+The live guard starts each installed harness from a process holding a lab fleet's `TMUX`, behind the exact launch statements, and has it run one probe through its own shell tool:
+
+```sh
+FM_WORKER_TMUX_LIVE=1 FM_WORKER_TMUX_LIVE_GUARDS=1 bin/fm-test-run.sh tests/fm-worker-tmux-live-e2e.test.sh
+```
+
+```text
+ok - claude (2.1.282 (Claude Code)): its shell tool reaches only the private tmux server
+ok - codex (codex-cli 0.156.1): its shell tool reaches only the private tmux server
+ok - devin (devin 3000.11.3 (9c803229faa4)): its shell tool reaches only the private tmux server
+not ok - fm-composer-matrix-live-e2e fails behind the worker boundary
+ok - fm-harness-liveness-drift-live-e2e passes behind the worker boundary
+# harnesses launched through the boundary: claude codex grok pi
+```
+
+Behind the boundary, the liveness drift guard classified claude 2.1.282, codex-cli 0.156.1, pi 0.87.1, and grok as alive and identified each by ancestry.
+The composer matrix classified the claude and codex idle composers empty, cursor-anchored and cursorless.
+Its pi and grok checks failed identically with and without the boundary on this host: pi parked on its folder-trust dialog in an untrusted worktree, and `grok --version` hung, so those two composers remain unverified here rather than regressed.
+opencode, pi-signed, kimi, cursor, muse, omp, and rovo are not installed on this host and are unverified.
+
 ## Claude Code operational input
 
 Claude Code 2.1.277 added removal of invisible Unicode formatting characters from every submitted prompt, and U+2063 is always removed.
