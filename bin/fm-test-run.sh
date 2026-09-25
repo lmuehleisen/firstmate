@@ -284,7 +284,7 @@ family_for_basename() {
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-captain-hold-completed-ship.test.sh|fm-captain-hold-rehold.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-forge-detect.test.sh|fm-grok-harness.test.sh|\
-    fm-devin-permission-policy.test.sh|\
+    fm-devin-permission-policy.test.sh|fm-devin-rate-limit-retry.test.sh|\
     fm-agy-permission-policy.test.sh|\
     fm-harness-precedence.test.sh|\
     fm-kimi-harness.test.sh|fm-devin-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
@@ -1509,8 +1509,14 @@ families_for_changed_path() {
     bin/fm-devin-lib.sh)
       printf '%s\n' __script__:fm-devin-harness.test.sh
       printf '%s\n' __script__:fm-devin-permission-policy.test.sh
+      printf '%s\n' __script__:fm-devin-rate-limit-retry.test.sh
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-devin-rate-limit-retry.sh)
+      printf '%s\n' __script__:fm-devin-rate-limit-retry.test.sh
+      printf '%s\n' __script__:fm-devin-harness.test.sh
+      printf '%s\n' __script__:fm-devin-signals-live-e2e.test.sh
       ;;
     bin/fm-agy-lib.sh)
       printf '%s\n' __script__:fm-agy-harness.test.sh

@@ -13,6 +13,12 @@
 #   5. The plain `exit` alias cleanly terminates the session (the `/exit`
 #      slash form is ambiguous against devin's `/revert <step>` fuzzy search).
 #   6. The delivery busy regex matches the rendered thinking tokens.
+#   7. The rate-limit retry's arm hook finds Devin's own session log from its
+#      process ancestry, Stop retires it, and after a hook-less cancel the
+#      sentinel still follows that real log and detects a rate-limit line
+#      appended to it. The rate-limit error itself cannot be forced, so its
+#      text stays pinned by the captured lines in
+#      tests/fm-devin-rate-limit-retry.test.sh.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -21,14 +27,29 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEVIN_BIN=$(command -v devin 2>/dev/null || true)
 LAB=
+RETRY_STATE=
+INJECTED_LOG=
 SOCKET="fm-devin-signals-$$"
 SESSION=devin-signals
 TARGET="$SESSION:devin"
 DEVIN_VERSION=
 
+# Removes the line this guard appended to Devin's own session log, rewriting
+# the file in place so the inode Devin wrote to keeps every vendor line. It
+# runs only once Devin has exited, so nothing is appended meanwhile.
+strip_injected_line() {
+  [ -n "$INJECTED_LOG" ] && [ -f "$INJECTED_LOG" ] || return 0
+  grep -qF 'fm-live-guard' "$INJECTED_LOG" || return 0
+  grep -vF 'fm-live-guard' "$INJECTED_LOG" >"$LAB/session-log.clean" || true
+  cat "$LAB/session-log.clean" >"$INJECTED_LOG"
+  INJECTED_LOG=
+}
+
 cleanup() {
   local rc=$?
+  [ -z "${RETRY_STATE:-}" ] || "$ROOT/bin/fm-devin-rate-limit-retry.sh" retire "$RETRY_STATE" live - </dev/null
   [ -z "${REAL_TMUX:-}" ] || "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  strip_injected_line
   if [ "$rc" -ne 0 ] && [ -n "$LAB" ]; then
     printf 'Devin worker failure evidence retained: %s\n' "$LAB" >&2
   else
@@ -60,10 +81,12 @@ fm_test_require_tmproot "$LAB"
 WORKSPACE="$LAB/workspace"
 TASK_TMP="$LAB/tasktmp"
 REPORT="$LAB/report.md"
-mkdir -p "$WORKSPACE/.devin" "$TASK_TMP"
+RETRY_STATE="$LAB/state"
+mkdir -p "$WORKSPACE/.devin" "$TASK_TMP" "$RETRY_STATE"
+RETRY_HOOK="FM_DEVIN_RETRY_POLL=1 FM_DEVIN_RETRY_BACKOFF=600 $ROOT/bin/fm-devin-rate-limit-retry.sh"
 
 cat > "$WORKSPACE/.devin/config.local.json" <<EOF
-{"permissions":{"allow":["Exec(git add)","Write($REPORT)","Write($TASK_TMP)"]}}
+{"permissions":{"allow":["Exec(git add)","Write($REPORT)","Write($TASK_TMP)"]},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$RETRY_HOOK arm $RETRY_STATE live $LAB >/dev/null 2>&1 || true","timeout":30}]}],"Stop":[{"hooks":[{"type":"command","command":"$RETRY_HOOK stop $RETRY_STATE live $LAB >/dev/null 2>&1 || true","timeout":30}]}]}}
 EOF
 
 git init -q "$WORKSPACE" || fail "could not initialize workspace fixture"
@@ -160,6 +183,14 @@ for _ in $(seq 1 15); do
 done
 [ "$settled" = 1 ] || fail "Devin's initial turn did not settle to idle within 15s (capture: $capture)"
 
+! grep -q '"event":"unarmed"' "$RETRY_STATE/devin-rate-limit-log.jsonl" 2>/dev/null \
+  || fail "the rate-limit arm hook found no devin_*_<pid>.log in its process ancestry"
+case "$(cat "$RETRY_STATE/live.devin-retry/turn" 2>/dev/null)" in
+  ended.*) ;;
+  *) fail "the Stop hook did not retire the rate-limit sentinel" ;;
+esac
+pass "devin: the rate-limit arm hook finds the session log and Stop retires it"
+
 # 4. Test interrupt on a long essay turn. Unlike the launch prompt above
 # (typed at a shell prompt, not Devin's own composer), an Enter sent
 # immediately after a long literal block lands into Devin's live composer
@@ -205,6 +236,36 @@ done
 [ "$canceled" = 1 ] || fail "double Escape did not cancel execution (capture: $capture)"
 pass "devin: double Escape cancels running turn and prints Canceled"
 
+# The cancel fired no Stop, like a rate-limited turn, so the essay turn's
+# sentinel is still following the session log of the devin process that ran
+# its hook; a rate-limit line appended there must be detected. BACKOFF keeps
+# the retry far off, retire ends the sentinel before it could send, and the
+# line is removed from Devin's log again once Devin has exited.
+watch_pid=$(pgrep -f "fm-devin-rate-limit-retry.sh watch $RETRY_STATE live " | head -1)
+watch_args=$(ps -o args= -p "${watch_pid:-0}" 2>/dev/null)
+session_log=$(printf '%s\n' "$watch_args" | awk '{print $(NF-1)}')
+log_pid=${session_log##*_}
+log_pid=${log_pid%.log}
+case "$session_log" in
+  */devin_*_*.log) ;;
+  *) fail "no rate-limit sentinel follows a devin_*_<pid>.log after the cancel (sentinel: $watch_args)" ;;
+esac
+ps -o args= -p "$log_pid" 2>/dev/null | grep -q devin \
+  || fail "the followed session log $session_log does not name a live devin process"
+INJECTED_LOG=$session_log
+printf '%s\n' '2026-09-24T19:57:19.830119Z  WARN run_acp_server: agent_client_protocol::jsonrpc::outgoing_actor: Sending error response id=Str("fm-live-guard") method=session/prompt error=Error { code: -32010: Unknown error, message: "Reached free model rate limit. Upgrade to Max for higher limits, or switch to a different model. Your limit will reset in 40 seconds. (trace ID: fm-live-guard)", data: Some(Object {"cognition.ai/errorKind": String("unavailable"), "cognition.ai/retryable": Bool(true)}) }' >>"$session_log"
+detected=0
+for _ in $(seq 1 15); do
+  sleep 1
+  grep -q '"event":"detected"' "$RETRY_STATE/devin-rate-limit-log.jsonl" 2>/dev/null && {
+    detected=1
+    break
+  }
+done
+"$ROOT/bin/fm-devin-rate-limit-retry.sh" retire "$RETRY_STATE" live - </dev/null
+[ "$detected" = 1 ] || fail "the rate-limit sentinel did not detect a rate-limit line in the real session log $session_log"
+pass "devin: the rate-limit sentinel follows the real session log after a hook-less cancel"
+
 # 5. Clean exit via the plain `exit` alias. The `/exit` slash form is
 # ambiguous against devin's `/revert <step>` fuzzy command search and was
 # live-observed opening that menu instead of exiting (fm-control-lib.sh's
@@ -240,6 +301,9 @@ for _ in $(seq 1 30); do
 done
 [ "$exited" = 1 ] || fail "Devin did not exit after '$exit_cmd' (pane command: $pane_cmd)"
 pass "devin: plain exit cleanly terminates process to shell, unambiguous against /revert"
+
+strip_injected_line
+! grep -qF 'fm-live-guard' "$session_log" || fail "the injected rate-limit line must be removed from Devin's session log"
 
 # 6. Delivery busy regex
 printf '%s\n' "⠀⠸ Thinking · 1s (esc twice to interrupt)" | bash -c '. "$1/bin/fm-composer-lib.sh"; fm_busy_lines_match devin' _ "$ROOT" \

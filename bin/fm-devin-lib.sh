@@ -4,9 +4,9 @@
 #
 # Kept out of the upstream-owned spawn and teardown scripts so a weekly
 # upstream merge meets one-line call sites there instead of the whole Devin
-# arm. Each function below is the code those scripts ran inline before, moved
-# unchanged; the harness-adapters devin reference owns the operating facts and
-# bin/fm-devin-permission-policy.sh owns the permission policy.
+# arm. The harness-adapters devin reference owns the operating facts,
+# bin/fm-devin-permission-policy.sh owns the permission policy, and
+# bin/fm-devin-rate-limit-retry.sh owns the rate-limit retry.
 #
 #   resolve_devin_binary
 #       prints the absolute devin executable, or refuses when none is on PATH
@@ -27,7 +27,7 @@
 # fm_devin_spawn_wire runs inside bin/fm-spawn.sh after the busy-state arm and
 # reads that script's globals rather than taking them as arguments: RAW_LAUNCH,
 # WT, STATE_REAL, ID, BUSY_GEN, TURNEND, TASK_TMP, BRIEF, FM_ROOT, SCRIPT_DIR,
-# and DEVIN_BIN, plus its shell_quote, json_escape, and exclude_path helpers.
+# FM_HOME, and DEVIN_BIN, plus its shell_quote, json_escape, and exclude_path helpers.
 # It exits the spawn on a refusal, exactly as the inline arm did.
 # remove_devin_managed_wiring reads the harness through bin/fm-teardown.sh's
 # meta_value, and both retire paths rely on bin/fm-control-lib.sh's
@@ -77,7 +77,8 @@ fm_devin_permission_flags() {  # <crew-permission-mode>
 fm_devin_spawn_wire() {
   local managed busy_cmd_prefix busy_suffix d_submit d_stop d_sessionend \
     devin_task_data d_write_status d_write_inbox d_write_tmp devin_policy \
-    devin_grants_sha policy_cmd policy_file d_pre d_perm d_post d_policy_stop
+    devin_grants_sha policy_cmd policy_file d_pre d_perm d_post d_policy_stop \
+    retry_cmd retry_args d_retry_arm d_retry_stop d_retry_end
   [ "$RAW_LAUNCH" -eq 0 ] || return 0
   # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
   # a turn (busy); Stop and SessionEnd close it (idle). SessionStart is
@@ -150,8 +151,17 @@ fm_devin_spawn_wire() {
   d_perm=$(json_escape "$policy_cmd permission-request $policy_file")
   d_post=$(json_escape "$policy_cmd post-tool-use $policy_file")
   d_policy_stop=$(json_escape "$policy_cmd stop $policy_file")
+  # The rate-limit retry (bin/fm-devin-rate-limit-retry.sh, whose header owns
+  # it): UserPromptSubmit arms a per-turn sentinel on Devin's session log,
+  # Stop and SessionEnd retire it, because the rate-limit error itself fires
+  # no hook.
+  retry_cmd="$(shell_quote "$FM_ROOT/bin/fm-devin-rate-limit-retry.sh")"
+  retry_args="$(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$FM_HOME") >/dev/null 2>&1 || true"
+  d_retry_arm=$(json_escape "$retry_cmd arm $retry_args")
+  d_retry_stop=$(json_escape "$retry_cmd stop $retry_args")
+  d_retry_end=$(json_escape "$retry_cmd end $retry_args")
   cat >"$WT/.devin/config.local.json" <<EOF
-{"permissions":{"allow":["Exec(git add)","Exec(git commit)","Exec(git push)","Exec(git checkout)","Exec(git remote)","Exec(git fetch)","Exec(git status)","Exec(git log)","Exec(git diff)","Exec(ls)","Exec(gh pr create)","Exec(gh pr view)","Exec(gh pr list)","Exec(gh pr checks)","Exec(bin/fm-lint.sh)","Exec(./bin/fm-lint.sh)","Exec(bash bin/fm-lint.sh)","Exec(bin/fm-test-run.sh)","Exec(./bin/fm-test-run.sh)","Exec(bash bin/fm-test-run.sh)","Exec(bin/fm-install-shellcheck.sh)","Exec(./bin/fm-install-shellcheck.sh)","Exec(bash bin/fm-install-shellcheck.sh)","Exec(bin/fm-install-actionlint.sh)","Exec(./bin/fm-install-actionlint.sh)","Exec(bash bin/fm-install-actionlint.sh)","$d_write_status","$d_write_inbox","$d_write_tmp"],"deny":["Exec(git push --force)","Exec(git push --force-with-lease)","Exec(git push --force-if-includes)","Exec(git push -f)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"},{"type":"command","command":"$d_policy_stop","timeout":30}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"},{"type":"command","command":"$d_policy_stop","timeout":30}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"},{"type":"command","command":"$d_policy_stop","timeout":30}]}],"PreToolUse":[{"matcher":"^exec$","hooks":[{"type":"command","command":"$d_pre","timeout":30}]}],"PermissionRequest":[{"matcher":"","hooks":[{"type":"command","command":"$d_perm","timeout":120}]}],"PostToolUse":[{"matcher":"","hooks":[{"type":"command","command":"$d_post","timeout":30}]}]}}
+{"permissions":{"allow":["Exec(git add)","Exec(git commit)","Exec(git push)","Exec(git checkout)","Exec(git remote)","Exec(git fetch)","Exec(git status)","Exec(git log)","Exec(git diff)","Exec(ls)","Exec(gh pr create)","Exec(gh pr view)","Exec(gh pr list)","Exec(gh pr checks)","Exec(bin/fm-lint.sh)","Exec(./bin/fm-lint.sh)","Exec(bash bin/fm-lint.sh)","Exec(bin/fm-test-run.sh)","Exec(./bin/fm-test-run.sh)","Exec(bash bin/fm-test-run.sh)","Exec(bin/fm-install-shellcheck.sh)","Exec(./bin/fm-install-shellcheck.sh)","Exec(bash bin/fm-install-shellcheck.sh)","Exec(bin/fm-install-actionlint.sh)","Exec(./bin/fm-install-actionlint.sh)","Exec(bash bin/fm-install-actionlint.sh)","$d_write_status","$d_write_inbox","$d_write_tmp"],"deny":["Exec(git push --force)","Exec(git push --force-with-lease)","Exec(git push --force-if-includes)","Exec(git push -f)"]},"attribution":false,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$d_submit"},{"type":"command","command":"$d_policy_stop","timeout":30},{"type":"command","command":"$d_retry_arm","timeout":30}]}],"Stop":[{"hooks":[{"type":"command","command":"$d_stop"},{"type":"command","command":"$d_policy_stop","timeout":30},{"type":"command","command":"$d_retry_stop","timeout":30}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$d_sessionend"},{"type":"command","command":"$d_policy_stop","timeout":30},{"type":"command","command":"$d_retry_end","timeout":30}]}],"PreToolUse":[{"matcher":"^exec$","hooks":[{"type":"command","command":"$d_pre","timeout":30}]}],"PermissionRequest":[{"matcher":"","hooks":[{"type":"command","command":"$d_perm","timeout":120}]}],"PostToolUse":[{"matcher":"","hooks":[{"type":"command","command":"$d_post","timeout":30}]}]}}
 EOF
   cat >"$WT/.devin/rules/firstmate-attribution.md" <<'EOF'
 ---
@@ -169,6 +179,7 @@ EOF
 # status file.
 fm_devin_relaunch_retire_policy() {  # <harness> <state-dir> <id>
   [ "${1-}" = devin ] || return 0
+  "$SCRIPT_DIR/fm-devin-rate-limit-retry.sh" retire "$2" "$3" - </dev/null || return 1
   "$SCRIPT_DIR/fm-devin-permission-policy.sh" retire "$2/$3.devin-permission.json" </dev/null
 }
 
@@ -211,8 +222,18 @@ remove_devin_managed_wiring() {  # <meta> <worktree>
 }
 
 # The per-task policy file, plus the permission-policy escalation markers and
-# verdict cache (bin/fm-devin-permission-policy.sh).
+# verdict cache (bin/fm-devin-permission-policy.sh), and the rate-limit retry
+# state, whose removal also ends a running sentinel
+# (bin/fm-devin-rate-limit-retry.sh). A retry state that cannot be retired
+# stops teardown before the task record goes, as the agy retire does, so its
+# open blocker is never orphaned and a re-run retries it.
 fm_devin_teardown_remove_state() {  # <state-dir> <id>
   rm -f "$1/$2.devin-permission.json"
   rm -rf "$1/$2.devin-permission-pending" "$1/$2.devin-permission-cache"
+  # Only a task that left retry state behind, current or mid-retire, has
+  # anything to retire.
+  [ -e "$1/$2.devin-retry" ] || compgen -G "$1/$2.devin-retry.retiring.*" >/dev/null || return 0
+  "$SCRIPT_DIR/fm-devin-rate-limit-retry.sh" retire "$1" "$2" - </dev/null && return 0
+  echo "error: $2's Devin rate-limit retry state under $1 could not be retired (see $1/devin-rate-limit-log.jsonl); fix it and re-run teardown" >&2
+  return 1
 }
