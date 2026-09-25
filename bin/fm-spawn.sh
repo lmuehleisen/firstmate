@@ -1927,7 +1927,17 @@ launch_template() {
   # codex's grants replace upstream's bypass flag ahead of the permission flags,
   # so a flag always ends the variadic --add-dir before the positional brief.
   template=${template//__CLAUDEPERMFLAG__ /${permission_flags:-} __PERMISSIONDIRS__}
-  [ "$harness" = codex ] && template=${template//--dangerously-bypass-approvals-and-sandbox /__PERMISSIONDIRS__$permission_flags }
+  if [ "$harness" = codex ]; then
+    template=${template//--dangerously-bypass-approvals-and-sandbox /__PERMISSIONDIRS__$permission_flags }
+    # Refuse rather than launch in bypass mode if the upstream template drifted
+    # so the substitution above no longer matched exactly once.
+    local rest=${template#*"__PERMISSIONDIRS__$permission_flags "}
+    if [ "$rest" = "$template" ] || [ "$rest" != "${rest#*__PERMISSIONDIRS__}" ] ||
+      [ "$template" != "${template#*dangerously-bypass-approvals}" ]; then
+      echo "error: codex $kind launch template drifted from upstream's '--dangerously-bypass-approvals-and-sandbox ' flag; refusing to launch without the $CREW_PERMISSION_MODE permission flags" >&2
+      return 1
+    fi
+  fi
   printf '%s' "$template"
 }
 
