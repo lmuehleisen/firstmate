@@ -28,8 +28,8 @@
 #       found is logged as unarmed and gets no automatic retry.
 #   stop (Stop)
 #       The turn ended normally: retires the sentinel, resets the
-#       consecutive-retry count, and when the cap line below was written,
-#       appends `resolved [key=devin-rate-limit]` to close it.
+#       consecutive-retry count, and when the blocked line below was
+#       written, appends `resolved [key=devin-rate-limit]` to close it.
 #   end (SessionEnd)
 #       Retires the sentinel without touching the count.
 #   retire (not a hook)
@@ -51,9 +51,10 @@
 #       throughout, the retry goes out unstaggered. It gives up if the turn
 #       token changes while it waits, and otherwise sends one ordinary steer
 #       through bin/fm-send.sh, so the message lands in the task's durable
-#       inbox and the doorbell submit starts the retry turn; a send that fails
-#       is logged and not counted. Once count reaches MAX it sends nothing and
-#       appends one `blocked [key=devin-rate-limit]` status line instead.
+#       inbox and the doorbell submit starts the retry turn. Once count
+#       reaches MAX it sends nothing and appends one
+#       `blocked [key=devin-rate-limit]` status line instead; a send that fails
+#       is not counted and appends the same keyed line.
 #
 # Every arm, detection, retry, cap, and failure is one JSON line in the
 # home-wide <state-dir>/devin-rate-limit-log.jsonl, the evidence for how often
@@ -370,6 +371,32 @@ wait_turn_until() {  # <token> <epoch>
   done
 }
 
+# Publishes the keyed blocked line for <token>'s turn once, marked by the
+# capped file that the turn's Stop or retire resolves. It is published only
+# while the turn is still current, under the lock a new prompt, Stop, and
+# retire take, so the turn's end always sees it; fails when nothing was
+# published for this turn.
+publish_blocked() {  # <token> <reason>
+  local published=
+  task_lock || {
+    [ ! -d "$DIR" ] || log_event failed "the task's retry lock stayed held; the blocked line was not published"
+    return 1
+  }
+  if turn_is "$1"; then
+    published=1
+    if [ ! -e "$DIR/capped" ]; then
+      : >"$DIR/capped"
+      status_append "blocked [at=$(date +%s)] [key=$KEY]: $2"
+      # A Stop or retire that gave up waiting for the lock may have ended
+      # the turn while this line was written; resolve it here in that case.
+      turn_is "$1" ||
+        status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin turn ended while its blocker was being recorded"
+    fi
+  fi
+  task_unlock
+  [ -n "$published" ]
+}
+
 cmd_watch() {
   local token=$1 log=$2 seen=$3 started now total segment line reset count \
     delay due
@@ -391,24 +418,8 @@ cmd_watch() {
   reset=$(reset_seconds "$line")
   count=$(retry_count)
   if [ "$count" -ge "$MAX" ]; then
-    # Published only while this turn is still current, under the lock a new
-    # prompt, Stop, and retire take, so the turn's end always sees the cap.
-    task_lock || {
-      [ ! -d "$DIR" ] || log_event failed "the task's retry lock stayed held; the retry cap was not published"
-      return 0
-    }
-    if turn_is "$token"; then
-      if [ ! -e "$DIR/capped" ]; then
-        : >"$DIR/capped"
-        status_append "blocked [at=$(date +%s)] [key=$KEY]: Devin stopped on its model rate limit again after $count automatic retries; send it a message to retry, or move the work to another harness"
-        # A Stop or retire that gave up waiting for the lock may have ended
-        # the turn while this line was written; resolve it here in that case.
-        turn_is "$token" ||
-          status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin turn ended while its cap was being recorded"
-      fi
+    publish_blocked "$token" "Devin stopped on its model rate limit again after $count automatic retries; send it a message to retry, or move the work to another harness" &&
       log_event capped "rate limit after $count automatic retries; reset ${reset}s; no retry sent"
-    fi
-    task_unlock
     return 0
   fi
   delay=$((reset + BACKOFF * (1 << count) + RANDOM % (JITTER + 1)))
@@ -439,6 +450,7 @@ cmd_watch() {
       printf '%s\n' "$count" >"$DIR/count.$$" && mv -f "$DIR/count.$$" "$DIR/count"
     fi
     log_event failed "retry $((count + 1)) of $MAX could not be sent through fm-send"
+    publish_blocked "$token" "Devin stopped on its model rate limit and its automatic retry could not be sent; send it a message to retry" || true
   fi
   # The gap to the next worker's retry counts from when this send finished.
   if send_lock; then

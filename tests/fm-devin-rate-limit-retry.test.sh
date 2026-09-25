@@ -240,14 +240,18 @@ rate_limit_line "1 second" >>"$LOG"
 wait_for 15 "the retry send" sent_at_least "$H" 1
 pass "a reused pid's older session log does not hide the live one"
 
-# 11. A retry fm-send could not deliver is logged and not counted.
+# 11. A retry fm-send could not deliver is not counted and raises the keyed
+# blocked line, which the turn's next normal Stop resolves.
 H=$(new_home send-fails)
 : >"$H/fail-send"
 LOG=$(fake_devin "$H" t1 arm)
 rate_limit_line "1 second" >>"$LOG"
 wait_for 15 "the failed event" has_event "$H" failed
 assert_absent "$H/state/t1.devin-retry/count" "an undelivered retry must not count toward the cap"
-pass "an undelivered retry is logged and not counted toward the cap"
+wait_for 5 "the blocked line" grep -q '^blocked \[at=[0-9]*\] \[key=devin-rate-limit\]: .*could not be sent' "$H/state/t1.status"
+hook "$H" t1 stop
+assert_equals 1 "$(grep -c '^resolved \[at=[0-9]*\] \[key=devin-rate-limit\]: ' "$H/state/t1.status")" "a normal Stop must resolve the undelivered retry's blocker"
+pass "an undelivered retry is not counted and raises a blocker a normal Stop resolves"
 
 # 12. A send lock held by a live holder throughout leaves the last-send record
 # and the lock alone, and the retry still goes out on its own time.
