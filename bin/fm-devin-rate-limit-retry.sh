@@ -76,8 +76,6 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-# shellcheck source=bin/fm-lock-lib.sh
-. "$SCRIPT_DIR/fm-lock-lib.sh"
 
 usage() {
   sed -n '2,/^set -u$/p' "$SELF" | sed '$d; s/^# \{0,1\}//'
@@ -97,6 +95,11 @@ esac
 
 EVENT=$1 STATE=$2 TASK=$3 HOME_DIR=$4
 shift 4
+# The owner-checked locks (fm_lock_try_acquire / fm_lock_release); pointed at
+# this state dir because the library resolves and creates its own on load.
+FM_STATE_OVERRIDE=$STATE
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 DIR="$STATE/$TASK.devin-retry"
 EVENT_LOG="$STATE/devin-rate-limit-log.jsonl"
 STATUS="$STATE/$TASK.status"
@@ -189,20 +192,19 @@ reset_seconds() {  # <error-line>
   esac
 }
 
-# Takes a mkdir lock; fails when its directory is gone. A holder that died
-# leaves the lock behind, and every section these locks guard takes
-# milliseconds, so one older than 5 seconds is abandoned well inside the
-# 10-second wait, and only a holder re-taking it throughout can outlast that.
+# Takes an owner-checked lock (bin/fm-wake-lib.sh): only a lock whose owner
+# process died is taken over, and only its owner releases it. Fails when the
+# lock's directory is gone or a live owner keeps it past a 10-second wait;
+# every section these locks guard takes milliseconds.
 take_lock() {  # <lock-path>
-  local held _
-  for _ in $(seq 1 50); do
-    mkdir "$1" 2>/dev/null && return 0
+  local deadline
+  deadline=$(($(date +%s) + 10))
+  while :; do
     [ -d "${1%/*}" ] || return 1
-    held=$(fm_lock_path_mtime "$1") || held=
-    case "$held" in '' | *[!0-9]*) ;; *) [ $(($(date +%s) - held)) -le 5 ] || rmdir "$1" 2>/dev/null || true ;; esac
-    sleep 0.2
+    fm_lock_try_acquire "$1" && return 0
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 0.1
   done
-  return 1
 }
 
 # The home-wide lock around the last-send record.
@@ -211,7 +213,7 @@ send_lock() {
 }
 
 send_unlock() {
-  rmdir "$SEND_LOCK" 2>/dev/null || true
+  fm_lock_release "$SEND_LOCK" 2>/dev/null || true
 }
 
 # The epoch of the latest retry send any worker in this home started or
@@ -298,7 +300,7 @@ task_lock() {
 }
 
 task_unlock() {
-  rmdir "$DIR/.lock" 2>/dev/null || true
+  fm_lock_release "$DIR/.lock" 2>/dev/null || true
 }
 
 cmd_stop() {

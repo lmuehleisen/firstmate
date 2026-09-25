@@ -28,7 +28,7 @@ command -v jq >/dev/null 2>&1 || {
 TMP_ROOT=$(fm_test_tmproot fm-devin-rate-limit-retry)
 BIN="$TMP_ROOT/bin"
 mkdir -p "$BIN"
-cp "$ROOT/bin/fm-devin-rate-limit-retry.sh" "$ROOT/bin/fm-lock-lib.sh" "$BIN/"
+cp "$ROOT/bin/fm-devin-rate-limit-retry.sh" "$ROOT/bin/fm-wake-lib.sh" "$BIN/"
 RETRY="$BIN/fm-devin-rate-limit-retry.sh"
 cat >"$BIN/fm-send.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -114,6 +114,15 @@ wait_for() {
 sent_count() { if [ -f "$1/sent" ]; then wc -l <"$1/sent" | tr -d ' '; else printf 0; fi; }
 has_event() { grep -q "\"event\":\"$2\"" "$1/state/devin-rate-limit-log.jsonl" 2>/dev/null; }
 sent_at_least() { [ "$(sent_count "$1")" -ge "$2" ]; }
+# hold_lock <state-dir> <lock> <script>: takes <lock> through the retry's own
+# lock library in a background process that then runs <script>; sets HOLDER to
+# its pid. The trailing `:` keeps bash from exec-ing the script in its place,
+# which would change the lock owner's identity.
+hold_lock() {
+  FM_STATE_OVERRIDE=$1 bash -c '. "$1/fm-wake-lib.sh"; fm_lock_try_acquire "$2" || exit 1; eval "$3"; :' _ "$BIN" "$2" "$3" >/dev/null 2>&1 &
+  HOLDER=$!
+}
+lock_present() { [ -L "$1" ] || [ -e "$1" ]; }
 detected_at_least() { [ "$(grep -c '"event":"detected"' "$1/state/devin-rate-limit-log.jsonl" 2>/dev/null)" -ge "$2" ]; }
 
 # 1. A turn-ending rate-limit error sends one retry through fm-send after the
@@ -242,9 +251,9 @@ pass "an undelivered retry is logged and not counted toward the cap"
 # and the lock alone, and the retry still goes out on its own time.
 H=$(new_home lock-held)
 printf '%s\n' 1000000000 >"$H/state/devin-rate-limit-last-send"
-mkdir "$H/state/devin-rate-limit-last-send.lock"
-(for _ in $(seq 1 60); do touch "$H/state/devin-rate-limit-last-send.lock"; sleep 0.5; done) &
-toucher=$!
+hold_lock "$H/state" "$H/state/devin-rate-limit-last-send.lock" 'sleep 40'
+toucher=$HOLDER
+wait_for 5 "the held send lock" lock_present "$H/state/devin-rate-limit-last-send.lock"
 LOG=$(FM_DEVIN_RETRY_SPACING=30 fake_devin "$H" t1 arm)
 rate_limit_line "1 second" >>"$LOG"
 wait_for 25 "the retry send" sent_at_least "$H" 1
@@ -254,7 +263,7 @@ wait "$toucher" 2>/dev/null || true
 wait_for 20 "the retried event" has_event "$H" retried
 has_event "$H" unstaggered || fail "a held send lock must be logged as unstaggered"
 assert_equals 1000000000 "$(cat "$H/state/devin-rate-limit-last-send")" "a sender without the lock must not rewrite the last-send record"
-[ -d "$H/state/devin-rate-limit-last-send.lock" ] || fail "a sender without the lock must not remove it"
+lock_present "$H/state/devin-rate-limit-last-send.lock" || fail "a sender without the lock must not remove it"
 pass "a send lock held throughout leaves the record alone and the retry unstaggered"
 
 # 13. A longer reset detected first does not delay another worker's shorter
@@ -326,11 +335,11 @@ pass "retiring a capped task's retry state resolves its blocked line"
 H=$(new_home cap-after-stop)
 : >"$H/state/t1.status"
 LOG=$(FM_DEVIN_RETRY_MAX=0 fake_devin "$H" t1 arm)
-mkdir "$H/state/t1.devin-retry/.lock"
+hold_lock "$H/state" "$H/state/t1.devin-retry/.lock" "sleep 3; printf 'ended.1\\n' >'$H/state/t1.devin-retry/turn'; fm_lock_release '$H/state/t1.devin-retry/.lock'"
+holder=$HOLDER
+wait_for 5 "the held task lock" lock_present "$H/state/t1.devin-retry/.lock"
 rate_limit_line "1 second" >>"$LOG"
-sleep 3
-printf 'ended.1\n' >"$H/state/t1.devin-retry/turn"
-rmdir "$H/state/t1.devin-retry/.lock"
+wait "$holder" || fail "the lock holder must retire the turn and release"
 sleep 3
 assert_no_grep 'blocked' "$H/state/t1.status" "a cap for a retired turn must not write a blocked line"
 ! has_event "$H" capped || fail "a cap for a retired turn must not be logged as capped"
@@ -341,8 +350,10 @@ pass "a cap detected after its turn was retired publishes nothing"
 H=$(new_home dead-lock)
 : >"$H/state/t1.status"
 LOG=$(FM_DEVIN_RETRY_MAX=0 fake_devin "$H" t1 arm)
-mkdir "$H/state/t1.devin-retry/.lock"
-touch -t 202001010000 "$H/state/t1.devin-retry/.lock"
+hold_lock "$H/state" "$H/state/t1.devin-retry/.lock" ':'
+holder=$HOLDER
+wait "$holder" || fail "the lock holder must take the lock before it dies"
+lock_present "$H/state/t1.devin-retry/.lock" || fail "the dead holder must leave its lock behind"
 rate_limit_line "1 second" >>"$LOG"
 wait_for 15 "the capped event" has_event "$H" capped
 assert_equals 1 "$(grep -c '^blocked \[at=[0-9]*\] \[key=devin-rate-limit\]: ' "$H/state/t1.status")" "a dead holder's lock must not stop the cap"
