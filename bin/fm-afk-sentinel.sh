@@ -21,6 +21,8 @@
 #                              no watchdog was recorded, and 3 when the home
 #                              cannot be resolved.
 #   fm-afk-sentinel.sh run ... Internal: the loop `start` detaches.
+#   fm-afk-sentinel.sh notify <summary>
+#                              Internal: fire the wedge-alarm channels once.
 #
 # LOOP. While state/.afk-contract exists it checks every poll interval:
 #   1. The recorded fleet tmux server: its pid gone or its identity changed,
@@ -164,20 +166,24 @@ sentinel_stop() {
   return 0
 }
 
-# Fire the wedge-alarm channels. Sourcing the daemon for its channel block puts
-# it in library mode, which defaults the notifier seam to discard; this is an
-# executed production program like the daemon itself, so restore the seam to
-# exactly what the caller's environment set.
+# Fire the wedge-alarm channels in a child process (the `notify` subcommand).
+# Sourcing the daemon for its channel block puts it in library mode, which
+# defaults the notifier seam to discard; this is an executed production program
+# like the daemon itself, so restore the seam to exactly what the caller's
+# environment set.
 sentinel_alarm() {  # <summary>
-  (
-    had_exec=${FM_WEDGE_ALARM_EXEC+set}
-    exec_value=${FM_WEDGE_ALARM_EXEC-}
-    # shellcheck source=bin/fm-supervise-daemon.sh
-    . "$SENTINEL_DIR/fm-supervise-daemon.sh"
-    if [ -n "$had_exec" ]; then FM_WEDGE_ALARM_EXEC=$exec_value; else unset FM_WEDGE_ALARM_EXEC; fi
-    LOG=$SENTINEL_LOG
-    wedge_alarm_notify "$1" "$MARKER"
-  ) >/dev/null 2>&1
+  "$SENTINEL_DIR/fm-afk-sentinel.sh" notify "$1" >/dev/null 2>&1 || true
+}
+
+sentinel_notify() {  # <summary>
+  local had_exec exec_value
+  had_exec=${FM_WEDGE_ALARM_EXEC+set}
+  exec_value=${FM_WEDGE_ALARM_EXEC-}
+  # shellcheck source=bin/fm-supervise-daemon.sh
+  . "$SENTINEL_DIR/fm-supervise-daemon.sh"
+  if [ -n "$had_exec" ]; then FM_WEDGE_ALARM_EXEC=$exec_value; else unset FM_WEDGE_ALARM_EXEC; fi
+  LOG=$SENTINEL_LOG
+  wedge_alarm_notify "$1" "$MARKER"
 }
 
 SLEEP_PID=""
@@ -205,14 +211,17 @@ sentinel_run() {
     exit 0
   fi
   tmp=$(mktemp "$STATE/.afk-sentinel.XXXXXX") || exit 1
-  {
+  if ! {
     printf 'pid=%s\n' "$SELF_PID"
     printf 'identity=%s\n' "$(fm_pid_identity "$SELF_PID")"
     printf 'server_pid=%s\n' "$server_pid"
     printf 'server_identity=%s\n' "$server_identity"
     printf 'server_socket=%s\n' "$server_socket"
     printf 'started=%s\n' "$(date +%s)"
-  } > "$tmp" && mv "$tmp" "$RECORD" || { rm -f "$tmp"; exit 1; }
+  } > "$tmp" || ! mv "$tmp" "$RECORD"; then
+    rm -f "$tmp"
+    exit 1
+  fi
   sentinel_log "started pid $SELF_PID; tmux server pid ${server_pid:-none}; poll ${poll}s, beacon limit ${beat_limit}s"
   while :; do
     fm_afk_contract_present "$STATE" || { sentinel_log "away record gone"; sentinel_exit; }
@@ -261,6 +270,7 @@ case "${1:-}" in
   stop) sentinel_stop ;;
   status) sentinel_status ;;
   run) shift; sentinel_run "$@" ;;
+  notify) sentinel_notify "${2:-}" ;;
   -h|--help|help) sed -n '/^# Usage:/,/^# LOOP\./p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' ;;
   *) sed -n '/^# Usage:/,/^# LOOP\./p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

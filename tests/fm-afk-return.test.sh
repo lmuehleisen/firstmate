@@ -800,7 +800,15 @@ test_return_brief_reports_away_watchdog_findings() {
   assert_contains "$out" 'GAP: the away watchdog was not running at return' "a dead watchdog was not reported as a gap"
   assert_not_contains "$out" 'no detected gap' "a watchdog finding was reported as a clean window"
   [ ! -e "$dir/home/state/.afk-sentinel-alarm" ] || fail "the watchdog marker survived a clean catch-up"
-  pass "the return brief names what the away watchdog found stopped, and when, and clears it after catch-up"
+  dir="$TMP_ROOT/brief-watchdog-absent"
+  install_runner "$dir"
+  cp "$ROOT/bin/fm-afk-sentinel.sh" "$dir/bin/"
+  contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a clean fleet with no watchdog record should still clear the gate: $out"
+  assert_contains "$out" 'GAP: the away watchdog was not running at return' "a window whose watchdog never started was not reported as a gap"
+  pass "the return brief names what the away watchdog found stopped, and when, reports a dead or never-started watchdog, and clears the marker after catch-up"
 }
 
 test_return_brief_without_a_record_reports_the_legacy_flag() {

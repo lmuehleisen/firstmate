@@ -344,16 +344,20 @@ GAP: the away daemon was not running at return (the away flag stood with no live
     lines="$lines
 GAP: the watcher beat was ${beat_age}s old at return (grace ${RETURN_GRACE}s)"
   fi
-  # Fork-only: findings of the detached away watchdog (bin/fm-afk-sentinel.sh).
+  # Fork-only: the detached away watchdog (bin/fm-afk-sentinel.sh). It must be
+  # running while the record stands; stop it before reading its findings so none
+  # lands after this one-time snapshot.
+  if [ -x "$SCRIPT_DIR/fm-afk-sentinel.sh" ] && fm_afk_contract_present "$STATE"; then
+    "$SCRIPT_DIR/fm-afk-sentinel.sh" status >/dev/null 2>&1 || lines="$lines
+GAP: the away watchdog was not running at return"
+    "$SCRIPT_DIR/fm-afk-sentinel.sh" stop >/dev/null 2>&1 || true
+  fi
   if [ -s "$STATE/.afk-sentinel-alarm" ]; then
     while IFS= read -r finding; do
       [ -n "$finding" ] && lines="$lines
 GAP: the away watchdog found $finding"
     done < "$STATE/.afk-sentinel-alarm"
   fi
-  "$SCRIPT_DIR/fm-afk-sentinel.sh" status >/dev/null 2>&1
-  [ "$?" -ne 1 ] || lines="$lines
-GAP: the away watchdog was not running at return"
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     lines="$lines
 delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)"

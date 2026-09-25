@@ -63,9 +63,9 @@ sentinel_pid() {  # <home>
 }
 
 wait_for() {  # <seconds> <command...>
-  local limit=$1 i
+  local limit=$1 _
   shift
-  for i in $(seq 1 $((limit * 10))); do
+  for _ in $(seq 1 $((limit * 10))); do
     "$@" && return 0
     sleep 0.1
   done
