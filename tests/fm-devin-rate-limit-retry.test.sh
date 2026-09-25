@@ -15,7 +15,8 @@
 # a superseded retry that leaves nothing behind, a stale log under a non-devin
 # ancestor, a capped task whose retry state is retired, a cap detected after
 # its turn was retired, a task lock a dead holder left behind, and a retire
-# that cannot remove the state, and a retire whose state dir is gone.
+# that cannot remove the state, a retire whose state dir is gone, and a cap on
+# a task with no status file yet.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -362,9 +363,12 @@ hook "$H" t1 stop
 pass "a task lock a dead holder left behind does not stop the cap"
 
 # 20. A retire that cannot remove the task's retry state reports it, so a
-# relaunch does not proceed past a sentinel it could not retire.
+# relaunch does not proceed past a sentinel it could not retire, and leaves a
+# capped task's blocker open.
 H=$(new_home retire-fails)
+: >"$H/state/t1.status"
 hook "$H" t1 arm
+: >"$H/state/t1.devin-retry/capped"
 mkdir -p "$H/state/t1.devin-retry/pinned"
 : >"$H/state/t1.devin-retry/pinned/file"
 chmod a-w "$H/state/t1.devin-retry/pinned"
@@ -376,6 +380,7 @@ fi
 chmod u+w "$H/state/t1.devin-retry/pinned"
 if [ -e "$H/state/t1.devin-retry" ]; then
   assert_equals 1 "$retire_rc" "a retire that left the state behind must exit 1"
+  assert_no_grep 'resolved' "$H/state/t1.status" "a retire that left the state behind must not resolve the cap"
   pass "a retire that cannot remove the retry state exits 1"
 else
   pass "a retire that cannot remove the retry state exits 1 (skipped: this user can remove read-only directories)"
@@ -387,3 +392,13 @@ gone="$TMP_ROOT/gone-home/state"
 "$RETRY" retire "$gone" t1 - </dev/null || fail "retiring an absent task must succeed"
 assert_absent "$TMP_ROOT/gone-home" "retiring an absent task must not create its state dir"
 pass "retiring a task whose state dir is gone creates nothing"
+
+# 22. A cap on a task with no status file yet creates it, so the blocked line
+# is never dropped.
+H=$(new_home no-status)
+LOG=$(FM_DEVIN_RETRY_MAX=0 fake_devin "$H" t1 arm)
+rate_limit_line "1 second" >>"$LOG"
+wait_for 10 "the capped event" has_event "$H" capped
+assert_equals 1 "$(grep -c '^blocked \[at=[0-9]*\] \[key=devin-rate-limit\]: ' "$H/state/t1.status" 2>/dev/null)" "the cap must create the status file with its blocked line"
+hook "$H" t1 stop
+pass "a cap on a task with no status file yet creates it"

@@ -28,15 +28,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEVIN_BIN=$(command -v devin 2>/dev/null || true)
 LAB=
 RETRY_STATE=
+INJECTED_LOG=
 SOCKET="fm-devin-signals-$$"
 SESSION=devin-signals
 TARGET="$SESSION:devin"
 DEVIN_VERSION=
 
+# Removes the line this guard appended to Devin's own session log, rewriting
+# the file in place so the inode Devin wrote to keeps every vendor line. It
+# runs only once Devin has exited, so nothing is appended meanwhile.
+strip_injected_line() {
+  [ -n "$INJECTED_LOG" ] && [ -f "$INJECTED_LOG" ] || return 0
+  grep -qF 'fm-live-guard' "$INJECTED_LOG" || return 0
+  grep -vF 'fm-live-guard' "$INJECTED_LOG" >"$LAB/session-log.clean" || true
+  cat "$LAB/session-log.clean" >"$INJECTED_LOG"
+  INJECTED_LOG=
+}
+
 cleanup() {
   local rc=$?
   [ -z "${RETRY_STATE:-}" ] || "$ROOT/bin/fm-devin-rate-limit-retry.sh" retire "$RETRY_STATE" live - </dev/null
   [ -z "${REAL_TMUX:-}" ] || "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  strip_injected_line
   if [ "$rc" -ne 0 ] && [ -n "$LAB" ]; then
     printf 'Devin worker failure evidence retained: %s\n' "$LAB" >&2
   else
@@ -225,7 +238,8 @@ pass "devin: double Escape cancels running turn and prints Canceled"
 # The cancel fired no Stop, like a rate-limited turn, so the essay turn's
 # sentinel is still following the session log of the devin process that ran
 # its hook; a rate-limit line appended there must be detected. BACKOFF keeps
-# the retry far off, and retire ends the sentinel before it could send.
+# the retry far off, retire ends the sentinel before it could send, and the
+# line is removed from Devin's log again once Devin has exited.
 watch_pid=$(pgrep -f "fm-devin-rate-limit-retry.sh watch $RETRY_STATE live " | head -1)
 watch_args=$(ps -o args= -p "${watch_pid:-0}" 2>/dev/null)
 session_log=$(printf '%s\n' "$watch_args" | awk '{print $(NF-1)}')
@@ -237,6 +251,7 @@ case "$session_log" in
 esac
 ps -o args= -p "$log_pid" 2>/dev/null | grep -q devin \
   || fail "the followed session log $session_log does not name a live devin process"
+INJECTED_LOG=$session_log
 printf '%s\n' '2026-09-24T19:57:19.830119Z  WARN run_acp_server: agent_client_protocol::jsonrpc::outgoing_actor: Sending error response id=Str("fm-live-guard") method=session/prompt error=Error { code: -32010: Unknown error, message: "Reached free model rate limit. Upgrade to Max for higher limits, or switch to a different model. Your limit will reset in 40 seconds. (trace ID: fm-live-guard)", data: Some(Object {"cognition.ai/errorKind": String("unavailable"), "cognition.ai/retryable": Bool(true)}) }' >>"$session_log"
 detected=0
 for _ in $(seq 1 15); do
@@ -285,6 +300,9 @@ for _ in $(seq 1 30); do
 done
 [ "$exited" = 1 ] || fail "Devin did not exit after '$exit_cmd' (pane command: $pane_cmd)"
 pass "devin: plain exit cleanly terminates process to shell, unambiguous against /revert"
+
+strip_injected_line
+! grep -qF 'fm-live-guard' "$session_log" || fail "the injected rate-limit line must be removed from Devin's session log"
 
 # 6. Delivery busy regex
 printf '%s\n' "⠀⠸ Thinking · 1s (esc twice to interrupt)" | bash -c '. "$1/bin/fm-composer-lib.sh"; fm_busy_lines_match devin' _ "$ROOT" \

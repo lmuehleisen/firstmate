@@ -119,9 +119,11 @@ log_event() {  # <event> <detail>
     >>"$EVENT_LOG" 2>/dev/null || true
 }
 
+# Appends one status line, creating the task's status file when this is its
+# first event; nothing is written once the task's state dir is gone.
 status_append() {  # <line>
-  [ -f "$STATUS" ] || return 0
-  printf '%s\n' "$1" >>"$STATUS" 2>/dev/null || true
+  [ -d "$STATE" ] || return 0
+  printf '%s\n' "$1" >>"$STATUS" 2>/dev/null || log_event failed "could not append to $STATUS: $1"
 }
 
 set_turn() {  # <token>
@@ -334,15 +336,20 @@ cmd_end() {
 }
 
 cmd_retire() {
+  local capped
   [ -d "$DIR" ] || return 0
   # The lock goes with the directory, so it is never released here.
   task_lock || true
-  if [ -e "$DIR/capped" ]; then
+  capped=
+  [ ! -e "$DIR/capped" ] || capped=1
+  rm -rf -- "$DIR" 2>/dev/null
+  [ ! -e "$DIR" ] || return 1
+  # Resolved only once the state is gone, so a retire that fails leaves the
+  # blocker open alongside the worker it still describes.
+  if [ -n "$capped" ]; then
     status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired"
     log_event resolved "the retry state was retired after the retry cap"
   fi
-  rm -rf -- "$DIR" || return 1
-  [ ! -e "$DIR" ]
 }
 
 # Sleeps until <epoch>; fails as soon as this turn's token is replaced.
