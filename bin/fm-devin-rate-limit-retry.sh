@@ -346,7 +346,11 @@ cmd_retire() {
   capped=
   [ ! -e "$DIR/capped" ] || capped=1
   rm -rf -- "$DIR" 2>/dev/null
-  [ ! -e "$DIR" ] || return 1
+  if [ -e "$DIR" ]; then
+    # A partial removal may have taken the marker; a later retire needs it.
+    [ -z "$capped" ] || : >"$DIR/capped" 2>/dev/null || true
+    return 1
+  fi
   # Resolved only once the state is gone, so a retire that fails leaves the
   # blocker open alongside the worker it still describes.
   if [ -n "$capped" ]; then

@@ -381,6 +381,9 @@ chmod u+w "$H/state/t1.devin-retry/pinned"
 if [ -e "$H/state/t1.devin-retry" ]; then
   assert_equals 1 "$retire_rc" "a retire that left the state behind must exit 1"
   assert_no_grep 'resolved' "$H/state/t1.status" "a retire that left the state behind must not resolve the cap"
+  [ -e "$H/state/t1.devin-retry/capped" ] || fail "a retire that left the state behind must keep the cap marker for the next retire"
+  "$RETRY" retire "$H/state" t1 - </dev/null || fail "a retire after the removal problem is fixed must succeed"
+  assert_equals 1 "$(grep -c '^resolved ' "$H/state/t1.status")" "the retire that finally removes the state must resolve the cap"
   pass "a retire that cannot remove the retry state exits 1"
 else
   pass "a retire that cannot remove the retry state exits 1 (skipped: this user can remove read-only directories)"
