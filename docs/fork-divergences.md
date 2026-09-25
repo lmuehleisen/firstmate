@@ -15,7 +15,7 @@ Classes:
 - `carried`: a fork fix or port kept only until upstream ships an equivalent; each integration run checks whether it can be dropped.
 - `incidental`: no reason to differ; realign when convenient.
 
-A `Seam:` claims only the hunks that carry its entry's behavior, not the whole file; a hunk in a file shared with upstream that no entry's scope covers is unclassified, and the integration run reports it as incidental.
+A `Seam:` claims only the hunks that carry its entry's behavior, not the whole file; a hunk in a file shared with upstream that no entry's scope covers, or a fork-only path no entry names, is unclassified, and the integration run reports it.
 An entry whose convergence is still under investigation says so in its `Class:` line and is not a decision.
 
 Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam:` naming the files (fork-only or shared), `Guard:` naming the test that fails if the divergence is lost (or `none`, which is itself a finding), and `Upstream:` with what upstream does instead and, for carried entries, what would let the fork drop it.
@@ -82,7 +82,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: Devin workers run in reviewed mode behind firstmate's permission hook, never in bypass; fork PRs 30, 32, 34, and 46.
 - Class: intended.
-- Seam: fork-only `bin/fm-devin-permission-policy.sh` and `bin/fm-devin-lib.sh`, plus small spawn hooks in `bin/fm-spawn.sh` (shared).
+- Seam: fork-only `bin/fm-devin-permission-policy.sh`, `bin/fm-devin-lib.sh`, and the live guard `tests/fm-devin-permission-policy-live-e2e.test.sh`, plus small spawn hooks in `bin/fm-spawn.sh` (shared).
 - Guard: `tests/fm-devin-permission-policy.test.sh`.
 - Upstream: its own Devin adapter launches with `--permission-mode dangerous`.
 
@@ -130,7 +130,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: the fork's prose describes the fork rather than upstream: README "Personal fork: what differs" and every fork wording in shared prose that states the behavior of another entry here, plus the inventory rows that register fork-only prose.
 - Class: intended.
-- Seam: any shared prose surface, including `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `VISION.md`, `docs/` (for example `docs/configuration.md`, `docs/architecture.md`, and `docs/scripts.md`), and skill prose under `.agents/skills/`, limited to hunks that describe another entry's behavior; and the `docs/documentation-audiences.json` rows that classify fork-only surfaces such as this ledger and `docs/upstream-integration.md`, while any other hunk in these files is still classified on its own.
+- Seam: any shared prose surface, including `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `VISION.md`, `docs/` (for example `docs/configuration.md`, `docs/architecture.md`, and `docs/scripts.md`), and skill prose under `.agents/skills/`, limited to hunks that describe another entry's behavior; fork-only records such as `docs/verification/runtime-backends-fork.md`; and the `docs/documentation-audiences.json` rows that classify fork-only surfaces such as this ledger and `docs/upstream-integration.md`, while any other hunk in these files is still classified on its own.
 - Guard: none; the integration run's ledger-update step reviews these files against the fork each run.
 - Upstream: describes upstream's own tools, pipeline, and permission defaults.
 
@@ -138,7 +138,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: Devin and agy are routine worker runtimes.
 - Class: intended.
-- Seam: fork-only `bin/fm-devin-lib.sh` and `bin/fm-agy-lib.sh`, plus shared adapter-list and composer lines.
+- Seam: fork-only `bin/fm-devin-lib.sh`, `bin/fm-agy-lib.sh`, `bin/fm-agy-hook.sh`, `.agents/hooks.json` (agy primary hooks), `docs/supervision-protocols/agy.md`, `tests/fm-tmux-submit-busy-agy.test.sh`, and the agy live guards `tests/fm-agy-*-live-e2e.test.sh` with `tests/agy-primary-live-probe.py`, plus shared adapter-list and composer lines.
 - Guard: `tests/fm-devin-harness.test.sh`; `tests/fm-agy-harness.test.sh`; `tests/fm-composer-agy.test.sh`.
 - Upstream: ships its own Devin and agy adapters; how much of the fork's mechanics to keep is the open question in the carried entries below.
 
@@ -220,7 +220,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: Claude StopFailure recovery, auto-arm timeout, away-digest integrity, and a dropped Enter on spawn; fork PRs 40, 41, 43, and 44.
 - Class: carried.
-- Seam: `bin/fm-claude-stop-autoarm.sh` (shared).
+- Seam: `bin/fm-claude-stop-autoarm.sh` (shared), and the fork-only live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
 - Guard: `tests/fm-claude-stop-autoarm.test.sh`.
 - Upstream: equivalence unknown; check each run.
 
@@ -237,4 +237,4 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - `codex-animation-port`: the fork's port of upstream #4297 (`tests/fixtures/codex-animation/`), which upstream replaced with #4532; kept for now at a known cost.
 - `ci-shard-timeout`: a small `.github/workflows/ci.yml` difference awaiting CI samples.
 - `muse-fixture-symlink`: fork PR 7, which upstream PR #3539 duplicates.
-- Test adaptations in upstream-owned suites are not entries of their own; they ride under the entry whose behavior they pin, and the classification step flags any that pin nothing.
+- Test adaptations in upstream-owned suites, and fork-only cases moved out of them such as `tests/fm-control-relaunch-bindings.test.sh`, are not entries of their own; they ride under the entry whose behavior they pin, and the classification step flags any that pin nothing.
