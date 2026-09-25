@@ -108,19 +108,6 @@ pass() {
 # early, because a test that keeps running past a half-initialized library
 # builds its fixtures - and aims its cleanup - at empty or undefined roots.
 
-# Every fixture root lives under TMPDIR, and the removal guard refuses anything
-# inside the checkout, so a TMPDIR inside the checkout could never yield a
-# usable root.
-fm_test_lib_tmp_base=$(fm_test_tmproot_guard_canonical_dir "${TMPDIR:-/tmp}") || fm_test_lib_tmp_base=
-case "$fm_test_lib_tmp_base/" in
-  / | // | "$FM_TEST_TMPROOT_GUARD_CHECKOUT"/*)
-    printf 'not ok - tests/lib.sh precondition unmet: TMPDIR (%s) must be an existing directory outside the checkout %s\n' \
-      "${TMPDIR:-/tmp}" "$FM_TEST_TMPROOT_GUARD_CHECKOUT" >&2
-    exit 1
-    ;;
-esac
-unset fm_test_lib_tmp_base
-
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || {
   printf 'not ok - tests/lib.sh precondition unmet: cannot create a cleanup registry in %s\n' \

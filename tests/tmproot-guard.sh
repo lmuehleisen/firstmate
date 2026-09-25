@@ -42,6 +42,18 @@ FM_TEST_TMPROOT_GUARD_CHECKOUT=$(fm_test_tmproot_guard_canonical_dir "$(dirname 
 }
 FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR=${TMPDIR:-/tmp}
 
+# Every fixture root lives under TMPDIR and the guard refuses anything inside
+# the checkout, so a TMPDIR inside the checkout would only produce fixtures no
+# cleanup may remove. Refuse it here, where every suite that removes a root -
+# through tests/lib.sh or directly - is sure to pass.
+case "$(fm_test_tmproot_guard_canonical_dir "$FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR")/" in
+  / | // | "$FM_TEST_TMPROOT_GUARD_CHECKOUT"/*)
+    printf 'not ok - tests/tmproot-guard.sh precondition unmet: TMPDIR (%s) must be an existing directory outside the checkout %s\n' \
+      "$FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR" "$FM_TEST_TMPROOT_GUARD_CHECKOUT" >&2
+    exit 1
+    ;;
+esac
+
 # fm_test_tmproot_guard_resolve <path>: print the canonical path that removing
 # <path> would act on - trailing slashes dropped and the parent resolved, the
 # final component left unfollowed - or return non-zero when there is none (an

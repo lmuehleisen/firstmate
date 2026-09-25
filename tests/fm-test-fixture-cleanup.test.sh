@@ -329,6 +329,23 @@ PROBE
   after=$(tree_listing "$copy")
   [ "$before" = "$after" ] || fail "an in-checkout TMPDIR left files behind in the checkout"
 
+  # A suite that sources only the guard gets the same precondition.
+  cat > "$copy/tests/guard-only-probe.test.sh" <<'PROBE'
+set -u
+. "$(dirname "${BASH_SOURCE[0]}")/tmproot-guard.sh"
+LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-guard-only.XXXXXX")
+printf 'reached with lab <%s>\n' "$LAB"
+PROBE
+  before=$(tree_listing "$copy")
+  rc=0
+  out=$(cd "$copy" && TMPDIR="$copy/tmp" bash tests/guard-only-probe.test.sh 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the guard accepted a TMPDIR inside the checkout: $out"
+  assert_contains "$out" "must be an existing directory outside the checkout" \
+    "the guard-only in-checkout TMPDIR failure did not name the precondition"
+  assert_not_contains "$out" "reached with lab" "a guard-only suite kept running with a TMPDIR inside the checkout"
+  after=$(tree_listing "$copy")
+  [ "$before" = "$after" ] || fail "a guard-only suite left files behind in the checkout"
+
   # TMPDIR moved into the checkout after sourcing: the rejected root is rolled
   # back and the owning test stops instead of receiving an empty root.
   cat > "$copy/tests/late-probe.test.sh" <<'PROBE'
