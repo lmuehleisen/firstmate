@@ -33,9 +33,11 @@
 #   end (SessionEnd)
 #       Retires the sentinel without touching the count.
 #   retire (not a hook)
-#       bin/fm-devin-lib.sh's teardown and relaunch retire: resolves the cap
-#       line when one was written, then removes the per-task directory, which
-#       also ends any sentinel within one poll.
+#       bin/fm-devin-lib.sh's teardown and relaunch retire: renames the
+#       per-task directory away, which ends any sentinel within one poll,
+#       resolves the blocked line when one was written, and removes it; when
+#       the rename or the resolve fails, the state is left in place and
+#       retire exits 1.
 #   watch (internal; started by arm)
 #       Follows the session log until this turn's token is replaced (a new
 #       prompt, a Stop, a SessionEnd, or a retire) or a turn-ending rate-limit
@@ -62,9 +64,9 @@
 #   jq -s 'group_by(.event) | map({event: .[0].event, n: length})' state/devin-rate-limit-log.jsonl
 #
 # Every hook invocation exits 0 so a failure here never breaks Devin's
-# lifecycle; `retire`, which is not a hook, exits 1 when the task's retry state
-# is still there afterwards, so a relaunch does not proceed past a sentinel it
-# could not retire.
+# lifecycle; `retire`, which is not a hook, exits 1 when it left the task's
+# retry state in place, so a relaunch does not proceed past a sentinel it
+# could not retire or a blocker it could not resolve.
 #
 # Tuning (environment, read by the sentinel; seconds unless noted):
 #   FM_DEVIN_RETRY_MAX      consecutive automatic retries before the cap (4)
@@ -344,25 +346,31 @@ cmd_end() {
 }
 
 cmd_retire() {
-  local capped
+  local capped retiring="$DIR.retiring.$$"
   [ -d "$DIR" ] || return 0
-  # The lock goes with the directory, so it is never released here.
   task_lock || true
   capped=
   [ ! -e "$DIR/capped" ] || capped=1
-  rm -rf -- "$DIR" 2>/dev/null
-  if [ -e "$DIR" ]; then
-    # A partial removal may have taken the marker; a later retire needs it.
-    [ -z "$capped" ] || : >"$DIR/capped" 2>/dev/null || true
+  # One rename retires the turn at once, ending any sentinel, while keeping the
+  # marker until the resolved line is written; a retire that cannot rename or
+  # resolve restores the state and exits 1, so the blocker and its marker stay
+  # together for the next retire.
+  if ! mv -- "$DIR" "$retiring" 2>/dev/null; then
+    task_unlock
     return 1
   fi
-  # Resolved only once the state is gone, so a retire that fails leaves the
-  # blocker open alongside the worker it still describes.
-  if [ -n "$capped" ]; then
-    status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired" ||
-      return 1
-    log_event resolved "the retry state was retired after the retry cap"
+  if [ -n "$capped" ] &&
+    ! status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired"; then
+    if mv -- "$retiring" "$DIR" 2>/dev/null; then
+      task_unlock
+    else
+      log_event failed "could not restore $DIR after a failed resolve; its marker is in $retiring"
+    fi
+    return 1
   fi
+  [ -z "$capped" ] || log_event resolved "the retry state was retired after the retry cap"
+  rm -rf -- "$retiring" 2>/dev/null || log_event failed "could not remove the retired $retiring"
+  return 0
 }
 
 # Sleeps until <epoch>; fails as soon as this turn's token is replaced.
@@ -390,11 +398,18 @@ publish_blocked() {  # <token> <reason>
   if turn_is "$1"; then
     published=1
     if [ ! -e "$DIR/capped" ]; then
-      if ! status_append "blocked [at=$(date +%s)] [key=$KEY]: $2"; then
+      # The marker is written first and taken back when the line fails, so a
+      # published blocked line always has the marker its resolution needs.
+      if ! : >"$DIR/capped" 2>/dev/null; then
+        log_event failed "could not record the blocker's marker in $DIR; the blocked line was not published"
         task_unlock
         return 1
       fi
-      : >"$DIR/capped" 2>/dev/null || log_event failed "could not record the blocker's marker in $DIR"
+      if ! status_append "blocked [at=$(date +%s)] [key=$KEY]: $2"; then
+        rm -f "$DIR/capped"
+        task_unlock
+        return 1
+      fi
       # A Stop or retire that gave up waiting for the lock may have ended
       # the turn while this line was written; resolve it here in that case.
       turn_is "$1" ||

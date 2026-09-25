@@ -14,9 +14,10 @@
 # that must not delay a shorter one, spacing measured from a slow send's end,
 # a superseded retry that leaves nothing behind, a stale log under a non-devin
 # ancestor, a capped task whose retry state is retired, a cap detected after
-# its turn was retired, a task lock a dead holder left behind, and a retire
-# that cannot remove the state, a retire whose state dir is gone, and a cap on
-# a task with no status file yet, and a status line that cannot be written.
+# its turn was retired, a task lock a dead holder left behind, a retire that
+# cannot move the state aside, a retire whose state dir is gone, a cap on a
+# task with no status file yet, a status line that cannot be written, and a
+# retire whose resolved line cannot be written.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -366,31 +367,30 @@ assert_equals 1 "$(grep -c '^blocked \[at=[0-9]*\] \[key=devin-rate-limit\]: ' "
 hook "$H" t1 stop
 pass "a task lock a dead holder left behind does not stop the cap"
 
-# 20. A retire that cannot remove the task's retry state reports it, so a
+# 20. A retire that cannot move the task's retry state aside reports it, so a
 # relaunch does not proceed past a sentinel it could not retire, and leaves a
-# capped task's blocker open.
+# capped task's blocker open with its marker for the next retire.
 H=$(new_home retire-fails)
 : >"$H/state/t1.status"
 hook "$H" t1 arm
 : >"$H/state/t1.devin-retry/capped"
-mkdir -p "$H/state/t1.devin-retry/pinned"
-: >"$H/state/t1.devin-retry/pinned/file"
-chmod a-w "$H/state/t1.devin-retry/pinned"
+chmod a-w "$H/state"
 if "$RETRY" retire "$H/state" t1 - </dev/null; then
   retire_rc=0
 else
   retire_rc=$?
 fi
-chmod u+w "$H/state/t1.devin-retry/pinned"
+chmod u+w "$H/state"
 if [ -e "$H/state/t1.devin-retry" ]; then
-  assert_equals 1 "$retire_rc" "a retire that left the state behind must exit 1"
-  assert_no_grep 'resolved' "$H/state/t1.status" "a retire that left the state behind must not resolve the cap"
-  [ -e "$H/state/t1.devin-retry/capped" ] || fail "a retire that left the state behind must keep the cap marker for the next retire"
-  "$RETRY" retire "$H/state" t1 - </dev/null || fail "a retire after the removal problem is fixed must succeed"
-  assert_equals 1 "$(grep -c '^resolved ' "$H/state/t1.status")" "the retire that finally removes the state must resolve the cap"
-  pass "a retire that cannot remove the retry state exits 1"
+  assert_equals 1 "$retire_rc" "a retire that left the state in place must exit 1"
+  assert_no_grep 'resolved' "$H/state/t1.status" "a retire that left the state in place must not resolve the cap"
+  [ -e "$H/state/t1.devin-retry/capped" ] || fail "a retire that left the state in place must keep the cap marker"
+  "$RETRY" retire "$H/state" t1 - </dev/null || fail "a retire once the state dir is writable again must succeed"
+  assert_absent "$H/state/t1.devin-retry" "the retire that succeeds must remove the state"
+  assert_equals 1 "$(grep -c '^resolved ' "$H/state/t1.status")" "the retire that succeeds must resolve the cap"
+  pass "a retire that cannot move the retry state aside exits 1 and keeps the blocker for the next retire"
 else
-  pass "a retire that cannot remove the retry state exits 1 (skipped: this user can remove read-only directories)"
+  pass "a retire that cannot move the retry state aside exits 1 (skipped: this user can write read-only directories)"
 fi
 
 # 21. Retiring a task whose state dir is gone creates nothing, so teardown of
@@ -435,4 +435,24 @@ else
   assert_absent "$H/state/t1.devin-retry/capped" "the next Stop that writes its resolved line must clear the marker"
   assert_equals 1 "$(grep -c '^resolved ' "$H/state/t1.status")" "the next Stop must resolve the blocker"
   pass "a status line that cannot be written keeps the state it would change"
+fi
+
+# 24. A retire whose resolved line cannot be written puts the state back with
+# its marker and exits 1, and the next retire resolves it.
+H=$(new_home retire-resolve-fails)
+: >"$H/state/t1.status"
+hook "$H" t1 arm
+: >"$H/state/t1.devin-retry/capped"
+chmod a-w "$H/state/t1.status"
+if printf 'probe\n' 2>/dev/null >>"$H/state/t1.status"; then
+  chmod u+w "$H/state/t1.status"
+  pass "a retire whose resolved line cannot be written keeps the blocker (skipped: this user can write read-only files)"
+else
+  if "$RETRY" retire "$H/state" t1 - </dev/null; then fail "a retire that could not resolve must exit 1"; fi
+  [ -e "$H/state/t1.devin-retry/capped" ] || fail "a retire that could not resolve must put the state back with its marker"
+  chmod u+w "$H/state/t1.status"
+  "$RETRY" retire "$H/state" t1 - </dev/null || fail "the next retire must succeed"
+  assert_equals 1 "$(grep -c '^resolved ' "$H/state/t1.status")" "the next retire must resolve the cap"
+  assert_absent "$H/state/t1.devin-retry" "the next retire must remove the state"
+  pass "a retire whose resolved line cannot be written keeps the blocker for the next retire"
 fi
