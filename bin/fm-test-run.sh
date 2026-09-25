@@ -120,12 +120,9 @@
 # configuration, including one that sources no test helper of its own;
 # tests/git-config-helpers.sh owns that contract and its limits.
 # Every selected script also runs with TMUX and TMUX_PANE unset and TMUX_TMPDIR
-# pointed at a short private per-run directory, so a suite's bare tmux reaches
-# only a private server and never the tmux server the runner was started from.
-# The run stops every server whose socket is anywhere under that directory,
-# by its exact socket, and removes it on exit. Ship and scout workers get the same boundary at launch
-# (bin/fm-worker-tmux-lib.sh); this runner keeps its own copy of the few lines
-# because suites run standalone copies of it.
+# on a short private /tmp directory (socket paths are capped), so a suite's bare
+# tmux never reaches the server the runner was started from; on exit the run
+# stops each server socketed there and removes the directory.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -381,8 +378,7 @@ family_for_basename() {
     fm-send-inbox-doorbell-live-e2e.test.sh|\
     fm-calm-claude-mod-plugin.test.sh|fm-calm-claude-mod-live-e2e.test.sh|\
     fm-afk-claude-long-digest-live-e2e.test.sh|\
-    fm-herdr-submit-confirm-live-e2e.test.sh|\
-    fm-worker-tmux-live-e2e.test.sh)
+    fm-herdr-submit-confirm-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -869,8 +865,7 @@ tests/fm-watch-checkpoint.test.sh 6076
 tests/fm-watch-recovery-loop.test.sh 58946
 tests/fm-watch-triage.test.sh 697969
 tests/fm-watcher-lock.test.sh 108940
-tests/fm-worker-tmux-isolation.test.sh 60000
-tests/fm-worker-tmux-live-e2e.test.sh 50
+tests/fm-worker-tmux-isolation.test.sh 15000
 EOF
 }
 
@@ -2370,8 +2365,6 @@ cleanup_run() {
 }
 
 trap cleanup_run EXIT
-# Short and under /tmp rather than TMPDIR, because a socket path is capped
-# (103 bytes on macOS) and suites add their own labels under it.
 RUN_TMUX_TMPDIR=$(mktemp -d /tmp/fmtr.XXXXXXXX) || die "could not create the private tmux directory for this run"
 
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
@@ -2464,7 +2457,6 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   # shellcheck source=tests/git-config-helpers.sh
   . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
-  # The private tmux server boundary from this script's header.
   local -a tmux_env=(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$RUN_TMUX_TMPDIR")
   : "$id"
   set +e

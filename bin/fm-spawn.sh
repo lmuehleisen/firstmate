@@ -310,10 +310,8 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
-#   Whatever the allowlist posture, every ship and scout launch then drops TMUX
-#   and TMUX_PANE and points TMUX_TMPDIR at a private per-task directory, so the
-#   worker's bare tmux never reaches the fleet server; bin/fm-worker-tmux-lib.sh
-#   owns that contract.
+#   Ship and scout agents then start with TMUX and TMUX_PANE unset and
+#   TMUX_TMPDIR on a private per-task directory (docs/tmux-backend.md).
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
 #   receives this process's own CLAUDE_CONFIG_DIR when it is set, and Pi the
@@ -617,14 +615,12 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # than discovered by a worker whose first residue call finds no judge.
 # shellcheck source=bin/fm-judge-tier-lib.sh
 . "$SCRIPT_DIR/fm-judge-tier-lib.sh"
-# The fork-only Devin, agy, and worker tmux wiring (their headers list the
-# globals they read).
+# The fork-only Devin and agy worker wiring (their headers list the globals
+# they read).
 # shellcheck source=bin/fm-devin-lib.sh
 . "$SCRIPT_DIR/fm-devin-lib.sh"
 # shellcheck source=bin/fm-agy-lib.sh
 . "$SCRIPT_DIR/fm-agy-lib.sh"
-# shellcheck source=bin/fm-worker-tmux-lib.sh
-. "$SCRIPT_DIR/fm-worker-tmux-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
@@ -4315,8 +4311,26 @@ if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
   fi
 fi
 mkdir -p "$TASK_TMP/gotmp"
-# A ship or scout worker's private tmux server directory (bin/fm-worker-tmux-lib.sh).
-fm_worker_tmux_spawn_wire || exit 1
+# A ship or scout worker's private tmux directory (docs/tmux-backend.md): short
+# because socket paths are capped, private for the same reason as TASK_TMP.
+WORKER_TMUX_DIR=
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  WORKER_TMUX_DIR=$(printf '%s\n%s' "$(cd "$FM_HOME" && pwd -P)" "$ID" |
+    { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)
+  case "$WORKER_TMUX_DIR" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) echo "error: could not derive a private tmux directory for $ID (needs shasum or sha256sum)" >&2; exit 1 ;;
+  esac
+  WORKER_TMUX_DIR="/tmp/fmwt-$WORKER_TMUX_DIR"
+  if ! (umask 077 && mkdir "$WORKER_TMUX_DIR") 2>/dev/null; then
+    if [ -L "$WORKER_TMUX_DIR" ] || [ ! -d "$WORKER_TMUX_DIR" ] || [ ! -O "$WORKER_TMUX_DIR" ] ||
+      [ -n "$(find "$WORKER_TMUX_DIR" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
+      ! chmod 700 "$WORKER_TMUX_DIR"; then
+      echo "error: private worker tmux directory $WORKER_TMUX_DIR already exists and is not a private directory owned by this user; refusing to launch a worker that could reach another tmux server; inspect and remove it, then retry" >&2
+      exit 1
+    fi
+  fi
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -4809,7 +4823,7 @@ preserve_relaunch_meta() {
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   fm_agy_meta_lines
-  fm_worker_tmux_meta_lines
+  [ -z "$WORKER_TMUX_DIR" ] || echo "worker_tmux_dir=$WORKER_TMUX_DIR"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -5059,8 +5073,8 @@ if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
-# Ship and scout agents start on their private tmux server (bin/fm-worker-tmux-lib.sh).
-fm_worker_tmux_launch_wrap || exit 1
+# Statements, so they cover a compound raw launch and the allowlist's env -i.
+[ -z "$WORKER_TMUX_DIR" ] || LAUNCH="unset TMUX TMUX_PANE; export TMUX_TMPDIR='$WORKER_TMUX_DIR'; $LAUNCH"
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi

@@ -291,13 +291,11 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
-# The fork-only Devin, agy, and worker tmux retires.
+# The fork-only Devin and agy worker retires.
 # shellcheck source=bin/fm-devin-lib.sh
 . "$SCRIPT_DIR/fm-devin-lib.sh"
 # shellcheck source=bin/fm-agy-lib.sh
 . "$SCRIPT_DIR/fm-agy-lib.sh"
-# shellcheck source=bin/fm-worker-tmux-lib.sh
-. "$SCRIPT_DIR/fm-worker-tmux-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -3682,8 +3680,6 @@ remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-# Stop a ship or scout worker's private tmux servers and remove their directory.
-fm_worker_tmux_teardown_retire "$FM_HOME" "$ID"
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {

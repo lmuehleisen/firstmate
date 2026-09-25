@@ -46,14 +46,11 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ### Worker isolation from the fleet server
 
-tmux picks a client's server from an inherited `TMUX` before it ever reads `TMUX_TMPDIR`, so a worker holding its fleet pane's `TMUX` would reach the fleet server with a bare `tmux kill-server`.
-Every ship and scout worker therefore starts with `TMUX` and `TMUX_PANE` removed and `TMUX_TMPDIR` pointed at a short private per-task directory, on every backend, on relaunch, and under the launch-environment allowlist.
-A worker's bare `tmux`, `tmux -L <label>`, and the Firstmate scripts it drives in a lab home all reach a private server there, and teardown stops every server in that directory before removing it.
-Secondmates keep `TMUX`, because a secondmate places its own crew on the fleet server; its ship and scout workers get the same treatment.
-The behavior test runner applies the same boundary to every suite with a per-run directory.
-This is an environment boundary, not a sandbox: naming the fleet socket with `-S`, killing tmux by process name, or clearing the environment before running tmux still reaches the fleet, and the worker rules forbid the first two.
-`bin/fm-worker-tmux-lib.sh` owns the directory derivation, its ownership checks, and the retire.
-`tests/fm-worker-tmux-isolation.test.sh` is the regression, and [runtime backend verification](verification/runtime-backends-fork.md#worker-isolation-from-the-fleet-server) records the live per-harness evidence.
+tmux picks a client's server from an inherited `TMUX` before it reads `TMUX_TMPDIR`, and without either it uses the default server, where the fleet usually runs.
+Every ship and scout agent therefore starts with `TMUX` and `TMUX_PANE` unset and `TMUX_TMPDIR` on a short private per-task directory, so its bare `tmux`, including `tmux kill-server`, reaches only a private server.
+Secondmates keep `TMUX`, because they place their own crew on the fleet server, and the behavior test runner gives every suite the same boundary.
+Naming the fleet socket with `-S`, killing tmux by process name, or clearing the environment still reaches the fleet; the worker rules forbid the first two.
+`tests/fm-worker-tmux-isolation.test.sh` is the regression.
 
 ### Shell command submission
 
