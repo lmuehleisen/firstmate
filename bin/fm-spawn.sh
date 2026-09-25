@@ -310,6 +310,10 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+#   Whatever the allowlist posture, every ship and scout launch then drops TMUX
+#   and TMUX_PANE and points TMUX_TMPDIR at a private per-task directory, so the
+#   worker's bare tmux never reaches the fleet server; bin/fm-worker-tmux-lib.sh
+#   owns that contract.
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
 #   receives this process's own CLAUDE_CONFIG_DIR when it is set, and Pi the
@@ -613,12 +617,14 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # than discovered by a worker whose first residue call finds no judge.
 # shellcheck source=bin/fm-judge-tier-lib.sh
 . "$SCRIPT_DIR/fm-judge-tier-lib.sh"
-# The fork-only Devin and agy worker wiring (their headers list the globals
-# they read).
+# The fork-only Devin, agy, and worker tmux wiring (their headers list the
+# globals they read).
 # shellcheck source=bin/fm-devin-lib.sh
 . "$SCRIPT_DIR/fm-devin-lib.sh"
 # shellcheck source=bin/fm-agy-lib.sh
 . "$SCRIPT_DIR/fm-agy-lib.sh"
+# shellcheck source=bin/fm-worker-tmux-lib.sh
+. "$SCRIPT_DIR/fm-worker-tmux-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
@@ -4309,6 +4315,8 @@ if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
   fi
 fi
 mkdir -p "$TASK_TMP/gotmp"
+# A ship or scout worker's private tmux server directory (bin/fm-worker-tmux-lib.sh).
+fm_worker_tmux_spawn_wire || exit 1
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -4774,7 +4782,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode effective_mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx agy_bypass agy_judge", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode effective_mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx agy_bypass agy_judge worker_tmux_dir", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4801,6 +4809,7 @@ preserve_relaunch_meta() {
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   fm_agy_meta_lines
+  fm_worker_tmux_meta_lines
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -5050,6 +5059,8 @@ if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
+# Ship and scout agents start on their private tmux server (bin/fm-worker-tmux-lib.sh).
+fm_worker_tmux_launch_wrap || exit 1
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi

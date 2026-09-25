@@ -119,6 +119,13 @@
 # Every selected script runs isolated from the host's global and system Git
 # configuration, including one that sources no test helper of its own;
 # tests/git-config-helpers.sh owns that contract and its limits.
+# Every selected script also runs with TMUX and TMUX_PANE unset and TMUX_TMPDIR
+# pointed at a short private per-run directory, so a suite's bare tmux reaches
+# only a private server and never the tmux server the runner was started from.
+# The run stops every server left in that directory by its exact socket and
+# removes it on exit. Ship and scout workers get the same boundary at launch
+# (bin/fm-worker-tmux-lib.sh); this runner keeps its own copy of the few lines
+# because suites run standalone copies of it.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -374,7 +381,8 @@ family_for_basename() {
     fm-send-inbox-doorbell-live-e2e.test.sh|\
     fm-calm-claude-mod-plugin.test.sh|fm-calm-claude-mod-live-e2e.test.sh|\
     fm-afk-claude-long-digest-live-e2e.test.sh|\
-    fm-herdr-submit-confirm-live-e2e.test.sh)
+    fm-herdr-submit-confirm-live-e2e.test.sh|\
+    fm-worker-tmux-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -388,6 +396,7 @@ family_for_basename() {
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
+    fm-worker-tmux-isolation.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -860,6 +869,8 @@ tests/fm-watch-checkpoint.test.sh 6076
 tests/fm-watch-recovery-loop.test.sh 58946
 tests/fm-watch-triage.test.sh 697969
 tests/fm-watcher-lock.test.sh 108940
+tests/fm-worker-tmux-isolation.test.sh 60000
+tests/fm-worker-tmux-live-e2e.test.sh 50
 EOF
 }
 
@@ -2337,6 +2348,7 @@ if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
 fi
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
+RUN_TMUX_TMPDIR=
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
@@ -2347,10 +2359,21 @@ declare -a WORKER_SCRIPTS=()
 # Invoked indirectly by the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup_run() {
+  local sock
+  if [ -n "$RUN_TMUX_TMPDIR" ]; then
+    for sock in "$RUN_TMUX_TMPDIR"/tmux-*/*; do
+      [ -S "$sock" ] || continue
+      env -u TMUX -u TMUX_PANE tmux -S "$sock" kill-server >/dev/null 2>&1 || true
+    done
+    rm -rf "$RUN_TMUX_TMPDIR"
+  fi
   rm -rf "$RUN_TMP"
 }
 
 trap cleanup_run EXIT
+# Short and under /tmp rather than TMPDIR, because a socket path is capped
+# (103 bytes on macOS) and suites add their own labels under it.
+RUN_TMUX_TMPDIR=$(mktemp -d /tmp/fmtr.XXXXXXXX) || die "could not create the private tmux directory for this run"
 
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
@@ -2442,24 +2465,26 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   # shellcheck source=tests/git-config-helpers.sh
   . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
+  # The private tmux server boundary from this script's header.
+  local -a tmux_env=(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$RUN_TMUX_TMPDIR")
   : "$id"
   set +e
   if [ "$stream" -eq 1 ]; then
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${tmux_env[@]}" bash -c \
         'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
       rc=$?
     else
-      bash "$script" 2>&1 | tee "$out"
+      "${tmux_env[@]}" bash "$script" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${tmux_env[@]}" bash "$script" >"$out" 2>&1
     rc=$?
   else
-    bash "$script" >"$out" 2>&1
+    "${tmux_env[@]}" bash "$script" >"$out" 2>&1
     rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then

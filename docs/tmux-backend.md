@@ -44,6 +44,16 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ## Current behavior and safety
 
+### Worker isolation from the fleet server
+
+tmux picks a client's server from an inherited `TMUX` before it ever reads `TMUX_TMPDIR`, so a worker holding its fleet pane's `TMUX` would reach the fleet server with a bare `tmux kill-server`.
+Every ship and scout worker therefore starts with `TMUX` and `TMUX_PANE` removed and `TMUX_TMPDIR` pointed at a short private per-task directory, on every backend, on relaunch, and under the launch-environment allowlist.
+A worker's bare `tmux`, `tmux -L <label>`, and the Firstmate scripts it drives in a lab home all reach a private server there, and teardown stops every server in that directory before removing it.
+Secondmates keep `TMUX`, because a secondmate places its own crew on the fleet server; its ship and scout workers get the same treatment.
+The behavior test runner applies the same boundary to every suite with a per-run directory.
+This is an environment boundary, not a sandbox: naming the fleet socket with `-S`, killing tmux by process name, or clearing the environment before running tmux still reaches the fleet, and the worker rules forbid the first two.
+`bin/fm-worker-tmux-lib.sh` owns the directory derivation, its ownership checks, and the retire, and `tests/fm-worker-tmux-isolation.test.sh` is the regression.
+
 ### Shell command submission
 
 Worktree entry and replacement-agent launch use the shell-submit owner in `bin/fm-tmux-lib.sh`, reached through `bin/backends/tmux.sh`.
@@ -114,6 +124,7 @@ Without that baseline, an `unknown` verdict is preserved untouched, so a busy-lo
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh
+tests/fm-worker-tmux-isolation.test.sh
 tests/fm-tmux-agent-liveness.test.sh
 tests/fm-harness-liveness-drift-live-e2e.test.sh
 tests/fm-composer-ghost.test.sh
