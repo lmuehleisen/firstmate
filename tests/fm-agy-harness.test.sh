@@ -456,12 +456,13 @@ SH
   # something executable to find. Only its `models` catalog is ever run, shaped
   # like agy 1.2.11's: suffixed ids, a model with no medium level, and one
   # unsuffixed id. FM_FAKE_AGY_MODELS_FAIL and _HANG model an unreachable and a
-  # stalled listing.
+  # stalled listing; the stall outlasts AGY_MODEL_HANG_LIMIT by far, so only
+  # the probe's own bound can end it within that limit.
   cat > "$fakebin/agy" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = models ]; then
   [ "${FM_FAKE_AGY_MODELS_FAIL:-0}" = 1 ] && exit 3
-  if [ "${FM_FAKE_AGY_MODELS_HANG:-0}" = 1 ]; then cat > /dev/null; sleep 30; exit 0; fi
+  if [ "${FM_FAKE_AGY_MODELS_HANG:-0}" = 1 ]; then cat > /dev/null; sleep 300; exit 0; fi
   printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n'
   printf 'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
   printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'
@@ -757,6 +758,13 @@ EOF
 
 # --- model catalog ----------------------------------------------------------
 
+# The hung-listing cases time a whole spawn, whose own setup and launch cost
+# varies by host, so the wall-clock limit is generous: it separates a probe the
+# bound cut off from one left to run the stalled listing's full 300 seconds.
+# The timeout notice, which only the bound's exit status produces, is what
+# proves the deadline fired.
+AGY_MODEL_HANG_LIMIT=150
+
 # One scout spawn per model case; prints "<exit>|<home>" and leaves the
 # spawn's output in <home>/spawn.out.
 agy_catalog_spawn() {  # <case-name> [spawn args...]
@@ -853,7 +861,8 @@ test_agy_hung_listing_is_cut_off_and_launches() {
   home=${result#*|}
   out=$(cat "$home/spawn.out")
   expect_code 0 "$rc" "a hung model listing must not block the spawn: $out"
-  [ "$elapsed" -lt 20 ] || fail "the model probe was not cut off by its bound (took ${elapsed}s)"
+  [ "$elapsed" -lt "$AGY_MODEL_HANG_LIMIT" ] \
+    || fail "the model probe was not cut off by its bound (spawn took ${elapsed}s)"
   assert_contains "$out" "did not answer within 1s" "a hung listing launched without its timeout notice"
   grep -Fq -- "--model 'gemini-3.8-flash-low'" "$home/launch.log" \
     || fail "a hung listing dropped the requested model instead of launching it unvalidated"
@@ -871,7 +880,8 @@ test_agy_invalid_model_timeout_is_clamped_to_the_default_bound() {
   home=${result#*|}
   out=$(cat "$home/spawn.out")
   expect_code 0 "$rc" "a hung listing with a zero bound must not block the spawn: $out"
-  [ "$elapsed" -lt 25 ] || fail "a zero model bound disabled the deadline (took ${elapsed}s)"
+  [ "$elapsed" -lt "$AGY_MODEL_HANG_LIMIT" ] \
+    || fail "a zero model bound disabled the deadline (spawn took ${elapsed}s)"
   assert_contains "$out" "did not answer within 15s" \
     "a zero model bound was not clamped to the documented default"
   pass "fm-spawn.sh: an invalid FM_AGY_MODELS_TIMEOUT is clamped to the default bound"
