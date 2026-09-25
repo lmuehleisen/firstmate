@@ -953,6 +953,7 @@ test_own_pr_review_round_shapes() {
   wt=$(jq -r .worktree "$policy")
   printf 'window=x\nkind=ship\npr=https://github.com/Owner/Name/pull/41\n' > "$dir/state/t1.meta"
   mkdir -p "$wt/q"
+  # shellcheck disable=SC2016 # $owner, $name, and $number are GraphQL variables
   printf 'query($owner: String!, $name: String!, $number: Int!) {\n  repository(owner: $owner, name: $name) {\n    pullRequest(number: $number) { reviewThreads(first: 50) { nodes { id isResolved } } }\n  }\n}\n' > "$wt/q/threads.graphql"
   printf 'query { viewer { login } }\nmutation { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }\n' > "$wt/q/hidden.graphql"
   printf '# harmless\nquery { viewer { login } }\n' > "$wt/q/commented.graphql"
