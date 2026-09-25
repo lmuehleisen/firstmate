@@ -97,10 +97,10 @@
 # workers only and never widens what the agy adapter's bypass launch or any
 # judge approves. permission-request approves, uncached, a call whose only
 # objection was that outward action and whose whole command is one `gh api`
-# invocation - no other segment, redirection, substitution, expansion, glob,
-# or ANSI-C quoting, and no flag beyond -X/--method POST, --jq/-q,
-# --silent, and --hostname github.com - of exactly one of these shapes
-# against the task's own PR on github.com:
+# invocation, or a && chain of them each qualifying on its own - no other
+# operator, redirection, substitution, expansion, glob, or ANSI-C quoting,
+# and no flag beyond -X/--method POST, the output filters --jq/-q and
+# --silent, and --hostname github.com - of exactly one of these shapes:
 #   - repos/<owner>/<name>/pulls/<n>/comments with exactly the fields
 #     in_reply_to (a number) and body (a -F body must not start with @, which
 #     would read a file): a reply to an existing review comment;
@@ -109,7 +109,15 @@
 #   - graphql with exactly one raw -f query field holding one
 #     resolveReviewThread mutation with a literal threadId and a plain field
 #     selection, where a read-only graphql lookup confirms the thread belongs
-#     to the task's own PR.
+#     to the task's own PR;
+#   - graphql whose one query document - a raw -f query, or -F query=@<file>
+#     naming a regular, non-symlink file of at most 64 KiB inside the worktree
+#     or task temp root - opens with query, fragment, or {, and never spells
+#     mutation or subscription anywhere in any case; it may add literal
+#     variable fields (no other @file) and --paginate, and names any repo,
+#     since it cannot write. The file is read at approval time, so a worker
+#     that rewrites it before running could send other content.
+# The first three must target the task's own PR on github.com.
 # The task's own PR is the pr= line in state/<task>.meta, beside the status
 # file; before one is recorded it is the single open PR whose head is the
 # worktree's branch, owned by the origin repository's owner. Owner, name, and
@@ -354,13 +362,39 @@ review_thread_query_id() {
   printf '%s\n' "${BASH_REMATCH[2]}"
 }
 
-# own_pr_review_write <command>: 0, with OWN_PR_SHAPE naming the write, when
-# the whole command is one of the three review-round writes against this
-# task's own PR. Any other word, flag, field, or shell construct returns 1 and
-# the call keeps its never-approve escalation.
+# graphql_read_only <document>: 0 when <document> can only read. GraphQL has
+# three operation types, so a document that never spells mutation or
+# subscription anywhere, in any case and even inside a string or comment,
+# holds no write; it must also open as a query, a fragment, or the { query
+# shorthand. Anything else is treated as a possible write.
+graphql_read_only() {
+  local q
+  q=$(lower "$1" | tr '\t\n\r' '   ')
+  case "$q" in *mutation*|*subscription*) return 1 ;; esac
+  q=${q#"${q%%[! ]*}"}
+  case "$q" in '{'*|query|query[' ({']*|fragment' '*) return 0 ;; esac
+  return 1
+}
+
+# graphql_query_file <word>: prints the document an -F query=@<word> field
+# would send, when <word> is a literal path whose physical target is a small
+# regular file inside the worktree or the task temp root.
+graphql_query_file() {
+  local abs
+  case "$1" in ''|-) return 1 ;; esac
+  abs=$(physical_target "$1" "$WORKTREE" 0) || return 1
+  strictly_inside "$abs" "$WORKTREE" || strictly_inside "$abs" "$TASKTMP" || return 1
+  [ -f "$abs" ] && [ ! -L "$abs" ] && [ -r "$abs" ] || return 1
+  [ "$(wc -c < "$abs")" -le 65536 ] || return 1
+  cat "$abs"
+}
+
+# own_pr_review_write <command>: 0, with OWN_PR_SHAPE naming the writes, when
+# the whole command is one review-round call, or a && chain of them, each of
+# which qualifies on its own (see review_segment). Any other shell construct
+# returns 1 and the call keeps its never-approve escalation.
 own_pr_review_write() {
-  local cmd=$1 k n w endpoint='' pattern repo num kind tid got host=''
-  local text='' text_raw=0 nbody=0 reply='' nreply=0 query='' nquery=0 nfield=0
+  local cmd=$1 k n start=0 shapes=''
   OWN_PR_SHAPE=''
   # The tokenizer approximates ANSI-C quoting, so its words are not trusted.
   case "$cmd" in *"\$'"*) return 1 ;; esac
@@ -368,24 +402,57 @@ own_pr_review_write() {
   tokenize "$cmd"
   [ "$P_SUBST" -eq 0 ] && [ "$P_HEREDOC_EXPANDING" -eq 0 ] || return 1
   n=${#T_TXT[@]}
-  for ((k = 0; k < n; k++)); do
-    [ "${T_KIND[k]}" = w ] && [ "${T_VAR[k]}" = 0 ] && [ "${T_GLOB[k]}" = 0 ] || return 1
+  for ((k = 0; k <= n; k++)); do
+    if [ "$k" -lt "$n" ] && [ "${T_KIND[k]}" = w ]; then
+      [ "${T_VAR[k]}" = 0 ] && [ "${T_GLOB[k]}" = 0 ] || return 1
+      continue
+    fi
+    if [ "$k" -lt "$n" ]; then
+      [ "${T_KIND[k]}" = o ] && [ "${T_TXT[k]}" = '&&' ] || return 1
+    fi
+    review_segment "$start" "$k" || return 1
+    case ", $shapes, " in *", $OWN_PR_SHAPE, "*) ;; *) shapes=${shapes:+$shapes, }$OWN_PR_SHAPE ;; esac
+    # Newlines after && tokenize as ';'; Bash rejects a literal one there.
+    while [ $((k + 1)) -lt "$n" ] && [ "${T_KIND[k + 1]}" = o ] && [ "${T_TXT[k + 1]}" = ';' ]; do
+      k=$((k + 1))
+    done
+    start=$((k + 1))
   done
-  [ "$n" -ge 3 ] && [ "${T_TXT[0]}" = gh ] && [ "${T_TXT[1]}" = api ] || return 1
+  OWN_PR_SHAPE=$shapes
+}
+
+# review_segment <first> <end>: 0, with OWN_PR_SHAPE set, when tokens
+# [first, end) are one gh api call of these shapes: a reply to a review
+# comment, a Codex re-review request, or resolving a review thread, each on
+# this task's own PR; or a read-only graphql query. Output filters (--jq, -q,
+# --silent) change only what gh prints.
+review_segment() {
+  local s=$1 n=$2 k w endpoint='' pattern repo num kind tid got host=''
+  local text='' text_raw=0 nbody=0 reply='' nreply=0 query='' nquery=0 nfield=0
+  local qfile='' fileread=0 paginate=0
+  OWN_PR_SHAPE=''
+  [ $((n - s)) -ge 3 ] && [ "${T_TXT[s]}" = gh ] && [ "${T_TXT[s + 1]}" = api ] || return 1
   _field() {  # <raw-flag> <key=value>
     nfield=$((nfield + 1))
     case "$2" in
       body=*) nbody=$((nbody + 1)) text=${2#body=} text_raw=$1 ;;
       in_reply_to=*) nreply=$((nreply + 1)) reply=${2#in_reply_to=} ;;
-      query=*) [ "$1" = 1 ] && nquery=$((nquery + 1)) query=${2#query=} ;;
+      # A typed query is sent as-is only when it names a file to read.
+      query=*)
+        nquery=$((nquery + 1))
+        if [ "$1" = 1 ]; then query=${2#query=}
+        else case "$2" in query=@*) qfile=${2#query=@} ;; *) nquery=2 ;; esac
+        fi ;;
+      *=@*) [ "$1" = 1 ] || fileread=1 ;;
     esac
   }
-  for ((k = 2; k < n; k++)); do
+  for ((k = s + 2; k < n; k++)); do
     w=${T_TXT[k]}
     case "$w" in
-      -X|--method) k=$((k + 1)); [ "${T_TXT[k]-}" = POST ] || return 1 ;;
+      -X|--method) k=$((k + 1)); [ "$k" -lt "$n" ] && [ "${T_TXT[k]}" = POST ] || return 1 ;;
       -XPOST|--method=POST|--silent|--jq=*) ;;
-      --hostname) k=$((k + 1)); [ "${T_TXT[k]-}" = github.com ] || return 1; host=github.com ;;
+      --paginate) paginate=1 ;;
+      --hostname) k=$((k + 1)); [ "$k" -lt "$n" ] && [ "${T_TXT[k]}" = github.com ] || return 1; host=github.com ;;
       --hostname=github.com) host=github.com ;;
       --jq|-q) k=$((k + 1)); [ "$k" -lt "$n" ] || return 1 ;;
       -f|--raw-field|-F|--field)
@@ -399,9 +466,11 @@ own_pr_review_write() {
       *) [ -z "$endpoint" ] || return 1; endpoint=$w ;;
     esac
   done
+  [ "$fileread" = 0 ] || return 1
   endpoint=${endpoint#/}
   pattern='^repos/([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)/(pulls|issues)/([1-9][0-9]*)/comments$'
   if [[ $endpoint =~ $pattern ]]; then
+    [ "$paginate" = 0 ] && [ "$nquery" = 0 ] || return 1
     repo=$(lower "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}") kind=${BASH_REMATCH[3]} num=${BASH_REMATCH[4]}
     if [ "$kind" = pulls ]; then
       # -F reads a file for an @value, so a typed body must not start with @.
@@ -417,7 +486,16 @@ own_pr_review_write() {
       && [ "$repo" = "$OWN_PR_REPO" ] && [ "$num" = "$OWN_PR_NUMBER" ] || { OWN_PR_SHAPE=''; return 1; }
     return 0
   fi
-  [ "$endpoint" = graphql ] && [ "$nfield" = 1 ] && [ "$nquery" = 1 ] || return 1
+  [ "$endpoint" = graphql ] && [ "$nquery" = 1 ] || return 1
+  # A read-only query may carry variables and page; it needs no PR proof.
+  if [ -n "$qfile" ]; then
+    query=$(graphql_query_file "$qfile") || return 1
+  fi
+  if graphql_read_only "$query"; then
+    OWN_PR_SHAPE='a read-only GraphQL query'
+    return 0
+  fi
+  [ -z "$qfile" ] && [ "$nfield" = 1 ] && [ "$paginate" = 0 ] || return 1
   tid=$(review_thread_query_id "$query") || return 1
   { [ -n "$host" ] || github_default_host; } && own_pr || return 1
   # Ownership is read back from the forge: the thread must sit on this PR.
@@ -479,8 +557,8 @@ case "$EVENT" in
     # action was the call's sole objection, and never cached.
     if [ "$TOOL" = exec ] && [ -n "$NEVER_APPROVE" ] && [ "$NOT_APPROVABLE" = "$NEVER_APPROVE" ] \
       && [ -z "$SENSITIVE_HIT" ] && own_pr_review_write "$CMD"; then
-      log_record approve policy "$OWN_PR_SHAPE on this task's own PR"
-      json_reason approve "Approved by firstmate policy: $OWN_PR_SHAPE on this task's own PR"
+      log_record approve policy "own-PR review round: $OWN_PR_SHAPE"
+      json_reason approve "Approved by firstmate policy: own-PR review round: $OWN_PR_SHAPE"
       exit 0
     fi
     if [ -n "$NEVER_APPROVE" ]; then
