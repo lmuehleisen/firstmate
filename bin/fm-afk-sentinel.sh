@@ -27,7 +27,8 @@
 # LOOP. While state/.afk-contract exists it checks every poll interval:
 #   1. The recorded fleet tmux server: its pid gone or its identity changed,
 #      confirmed on one re-read, means the fleet's tmux server stopped. With no
-#      TMUX at start (a non-tmux primary) this check is skipped.
+#      TMUX at start (a non-tmux primary) this check is skipped; a TMUX whose
+#      server cannot be identified is recorded as a finding at start instead.
 #   2. The watcher liveness beacon (state/.last-watcher-beat) older than the
 #      threshold means away monitoring stopped. This check arms only after the
 #      watchdog has seen a fresh beacon, so a home that never ran a watcher does
@@ -111,6 +112,13 @@ sentinel_start() {
     server_pid=${rest%%,*}
     case "$server_pid" in ''|*[!0-9]*) server_pid="" ;; esac
     [ -z "$server_pid" ] || server_identity=$(fm_pid_identity "$server_pid" 2>/dev/null) || server_pid=""
+    if [ -z "$server_pid" ]; then
+      # A tmux primary whose server cannot be identified is a degraded window,
+      # not a non-tmux one: record it so the return brief reports the gap.
+      printf 'the fleet tmux server named by TMUX (%s) could not be identified at away entry, so its loss was not watched; detected %s\n' \
+        "$TMUX" "$(sentinel_iso "$(date +%s)")" >> "$MARKER"
+      echo "fm-afk-sentinel: the fleet tmux server could not be identified; watching the watcher beacon only" >&2
+    fi
   fi
   rm -f "$RECORD"
   # Double fork plus setsid puts the loop in its own session and process group,
