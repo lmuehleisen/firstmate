@@ -998,6 +998,13 @@ gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' | gh
 gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' && && gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Fixed.'
 gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' &&
 EOF
+  multiline=$(printf '%s &&\n\n%s' "gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.'" "gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Also fixed.'")
+  own_pr_hook "$policy" "$multiline"
+  [ "$RC" = 0 ] && [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+    || fail "a && chain continued on the next line must approve, got rc=$RC out=$OUT"
+  own_pr_hook "$policy" "$(printf '%s\n%s' "gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.'" "gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Fixed.'")"
+  [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" != approve ] \
+    || fail "a newline without && must not join review calls into an approved chain"
   pass "fm-devin-permission-policy: output filters, read-only graphql queries, and && chains of review-round calls are approved; near misses escalate"
 }
 

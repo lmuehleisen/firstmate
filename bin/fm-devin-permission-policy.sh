@@ -412,6 +412,10 @@ own_pr_review_write() {
     fi
     review_segment "$start" "$k" || return 1
     case ", $shapes, " in *", $OWN_PR_SHAPE, "*) ;; *) shapes=${shapes:+$shapes, }$OWN_PR_SHAPE ;; esac
+    # Newlines after && tokenize as ';'; Bash rejects a literal one there.
+    while [ $((k + 1)) -lt "$n" ] && [ "${T_KIND[k + 1]}" = o ] && [ "${T_TXT[k + 1]}" = ';' ]; do
+      k=$((k + 1))
+    done
     start=$((k + 1))
   done
   OWN_PR_SHAPE=$shapes
