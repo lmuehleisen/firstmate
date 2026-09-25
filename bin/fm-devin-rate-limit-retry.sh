@@ -377,6 +377,10 @@ cmd_watch() {
       if [ ! -e "$DIR/capped" ]; then
         : >"$DIR/capped"
         status_append "blocked [at=$(date +%s)] [key=$KEY]: Devin stopped on its model rate limit again after $count automatic retries; send it a message to retry, or move the work to another harness"
+        # A Stop or retire that gave up waiting for the lock may have ended
+        # the turn while this line was written; resolve it here in that case.
+        turn_is "$token" ||
+          status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin turn ended while its cap was being recorded"
       fi
       log_event capped "rate limit after $count automatic retries; reset ${reset}s; no retry sent"
     fi
