@@ -257,11 +257,26 @@ PROBE
   out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_rm_tmproot "$1" && [ ! -e "$1" ] && echo removed' _ "$harness/removable" 2>&1)
   assert_contains "$out" removed "the guard refused a genuine temp root"
 
+  # A slash-terminated symlink must be removed as the link itself: rm given
+  # `link/` would otherwise descend into the directory the link points at.
+  local spelling
+  for spelling in / //; do
+    ln -s "$copy" "$harness/link-to-checkout"
+    before=$(tree_listing "$copy")
+    out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_rm_tmproot "$1"; echo "rc=$?"' \
+      _ "$harness/link-to-checkout$spelling" 2>&1)
+    after=$(tree_listing "$copy")
+    [ "$before" = "$after" ] || fail "removing a symlink spelled with '$spelling' deleted its target's contents"
+    assert_contains "$out" rc=0 "the guard refused a temp symlink spelled with '$spelling'"
+    [ ! -e "$harness/link-to-checkout" ] && [ ! -L "$harness/link-to-checkout" ] \
+      || fail "the guard did not remove the temp symlink spelled with '$spelling'"
+  done
+
   rc=0
   out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_require_tmproot ""; echo continued' 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm_test_require_tmproot accepted an empty root"
   assert_not_contains "$out" continued "fm_test_require_tmproot let a test continue on an empty root"
-  pass "the cleanup guard refuses empty, root, non-temporary, and checkout-containing paths"
+  pass "the cleanup guard refuses empty, root, non-temporary, and checkout-containing paths and never follows a slash-terminated symlink"
 }
 
 test_fixture_root_gone_after_normal_exit

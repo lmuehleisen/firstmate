@@ -11,8 +11,9 @@
 # A path is a safe temp root only when it is non-empty, not `/`, strictly below
 # a temporary base (the TMPDIR in force when this file was sourced, the current
 # TMPDIR, or /tmp, each canonicalized), and neither the firstmate checkout this
-# file lives in nor an ancestor of it. The final path component is not
-# followed, so a symlinked root is judged by where the link itself lives.
+# file lives in nor an ancestor of it. Trailing slashes are dropped and the
+# final path component is not followed, so a symlinked root is judged - and
+# removed - as the link itself, never as the directory it points at.
 #
 # The guard exists because a root variable that came back empty - a failed
 # fm_test_tmproot, an unset optional directory - and was then canonicalized
@@ -39,11 +40,39 @@ FM_TEST_TMPROOT_GUARD_CHECKOUT=$(fm_test_tmproot_guard_canonical_dir "$(dirname 
 }
 FM_TEST_TMPROOT_GUARD_SOURCE_TMPDIR=${TMPDIR:-/tmp}
 
+# fm_test_tmproot_guard_resolve <path>: print the canonical path that removing
+# <path> would act on - trailing slashes dropped and the parent resolved, the
+# final component left unfollowed - or return non-zero when there is none (an
+# empty path, the filesystem root, a `.`/`..` final component, or an
+# unresolvable parent). Removal acts on this path, never on the caller's
+# spelling, so `link/` cannot make rm descend through a symlink the check did
+# not follow.
+fm_test_tmproot_guard_resolve() {
+  local base=${1-} parent
+  while :; do
+    case "$base" in
+      */) base=${base%/} ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$base" ] || return 1
+  case "${base##*/}" in
+    . | ..) return 1 ;;
+  esac
+  case "$base" in
+    */*) parent=${base%/*} ;;
+    *) parent=. ;;
+  esac
+  [ -n "$parent" ] || parent=/
+  parent=$(fm_test_tmproot_guard_canonical_dir "$parent") || return 1
+  printf '%s/%s\n' "${parent%/}" "${base##*/}"
+}
+
 # fm_test_tmproot_guard_reason <path>: print why <path> must not be removed and
 # return 0, or print nothing and return 1 when it is a safe temp root. An absent
 # path yields the reason "absent" so callers can treat it as nothing to do.
 fm_test_tmproot_guard_reason() {
-  local path=${1-} parent base canon base_dir under=0
+  local path=${1-} base canon base_dir under=0
   if [ -z "$path" ]; then
     printf 'empty path\n'
     return 0
@@ -52,24 +81,18 @@ fm_test_tmproot_guard_reason() {
     printf 'absent\n'
     return 0
   fi
-  base=${path%/}
-  [ -n "$base" ] || { printf 'the filesystem root\n'; return 0; }
-  case "${base##*/}" in
-    . | ..) printf 'a relative directory component\n'; return 0 ;;
-  esac
-  case "$base" in
-    */*) parent=${base%/*} ;;
-    *) parent=. ;;
-  esac
-  [ -n "$parent" ] || parent=/
-  parent=$(fm_test_tmproot_guard_canonical_dir "$parent") || {
-    printf 'its parent directory cannot be resolved\n'
+  if ! canon=$(fm_test_tmproot_guard_resolve "$path"); then
+    base=${path%"${path##*[!/]}"}
+    if [ -z "$base" ]; then
+      printf 'the filesystem root\n'
+    else
+      case "${base##*/}" in
+        . | ..) printf 'a relative directory component\n' ;;
+        *) printf 'its parent directory cannot be resolved\n' ;;
+      esac
+    fi
     return 0
-  }
-  canon=${parent%/}/${base##*/}
-  case "$canon" in
-    / | //) printf 'the filesystem root\n'; return 0 ;;
-  esac
+  fi
   case "$FM_TEST_TMPROOT_GUARD_CHECKOUT/" in
     "$canon"/*)
       printf 'it is or contains the checkout %s\n' "$FM_TEST_TMPROOT_GUARD_CHECKOUT"
@@ -91,7 +114,7 @@ fm_test_tmproot_guard_reason() {
 }
 
 fm_test_rm_tmproot() {  # <path>...
-  local path reason rc=0
+  local path reason canon rc=0
   for path in "$@"; do
     if reason=$(fm_test_tmproot_guard_reason "$path"); then
       case "$reason" in
@@ -101,18 +124,20 @@ fm_test_rm_tmproot() {  # <path>...
       rc=1
       continue
     fi
-    rm -rf -- "$path" || rc=1
+    canon=$(fm_test_tmproot_guard_resolve "$path") || { rc=1; continue; }
+    rm -rf -- "$canon" || rc=1
   done
   return "$rc"
 }
 
 fm_test_require_tmproot() {  # <path>
-  local reason
+  local reason canon
   if reason=$(fm_test_tmproot_guard_reason "${1-}"); then
     printf 'not ok - fixture temp root is unusable (%s): %s\n' "${1-}" "$reason" >&2
     exit 1
   fi
-  if [ ! -d "$1" ] || [ -L "$1" ]; then
+  canon=$(fm_test_tmproot_guard_resolve "$1") || canon=
+  if [ -z "$canon" ] || [ ! -d "$canon" ] || [ -L "$canon" ]; then
     printf 'not ok - fixture temp root is not a real directory: %s\n' "$1" >&2
     exit 1
   fi
