@@ -290,6 +290,14 @@ take_send_turn() {  # <token>
   done
 }
 
+# Appends a resolved line to the status log holding its blocked line. With no
+# status log - teardown retires it before the retry state - there is no open
+# blocker left, so nothing is written and no orphan log is created.
+status_resolve() {  # <line>
+  [ -f "$STATUS" ] || return 0
+  status_append "$1"
+}
+
 cmd_arm() {
   local token log start locked=
   cat >/dev/null 2>&1 || true
@@ -332,7 +340,7 @@ cmd_stop() {
   set_turn "ended.$(date +%s)" || true
   rm -f "$DIR/count"
   if [ -e "$DIR/capped" ] &&
-    status_append "resolved [at=$(date +%s)] [key=$KEY]: Devin finished a turn normally again after the rate limit"; then
+    status_resolve "resolved [at=$(date +%s)] [key=$KEY]: Devin finished a turn normally again after the rate limit"; then
     rm -f "$DIR/capped"
     log_event resolved "a normal turn ended after the retry cap"
   fi
@@ -381,7 +389,7 @@ cmd_retire() {
     return 1
   fi
   if [ -n "$capped" ] &&
-    ! status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired"; then
+    ! status_resolve "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired"; then
     if mv -- "$retiring" "$DIR" 2>/dev/null; then
       task_unlock
     else
@@ -434,7 +442,7 @@ publish_blocked() {  # <token> <reason>
       # A Stop or retire that gave up waiting for the lock may have ended
       # the turn while this line was written; resolve it here in that case.
       turn_is "$1" ||
-        status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin turn ended while its blocker was being recorded"
+        status_resolve "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin turn ended while its blocker was being recorded"
     fi
   fi
   task_unlock

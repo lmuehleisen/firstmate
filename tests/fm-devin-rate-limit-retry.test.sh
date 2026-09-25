@@ -18,7 +18,8 @@
 # cannot move the state aside, a retire whose state dir is gone, a cap on a
 # task with no status file yet, a status line that cannot be written, and a
 # retire whose resolved line cannot be written, and state an earlier retire left
-# under its retiring name by a dead or live pid.
+# under its retiring name by a dead or live pid, and a retire after the status
+# log is gone.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -478,3 +479,13 @@ mkdir -p "$H/state/t1.devin-retry.retiring.$$"
 if "$RETRY" retire "$H/state" t1 - </dev/null; then fail "a retire must not succeed past retiring state under a live pid"; fi
 [ -e "$H/state/t1.devin-retry.retiring.$$/capped" ] || fail "retiring state under a live pid must be left alone"
 pass "retiring state under a live pid fails the retire"
+
+# 27. A retire after teardown already retired the status log resolves nothing
+# and creates no orphan status log.
+H=$(new_home retire-no-status)
+hook "$H" t1 arm
+: >"$H/state/t1.devin-retry/capped"
+"$RETRY" retire "$H/state" t1 - </dev/null || fail "a retire without a status log must succeed"
+assert_absent "$H/state/t1.status" "a retire without a status log must not create one"
+assert_absent "$H/state/t1.devin-retry" "a retire without a status log must still remove the state"
+pass "a retire after the status log is gone creates no orphan status log"
