@@ -21,7 +21,7 @@
 #   arm (UserPromptSubmit)
 #       Opens a new turn: records a fresh turn token under
 #       <state-dir>/<task-id>.devin-retry/, finds the session log by walking
-#       the hook's process ancestry to the first pid with a
+#       the hook's process ancestry to the first devin process with a
 #       devin_*_<pid>.log (the newest, when a reused pid left an older one),
 #       and starts one detached `watch` sentinel for this
 #       turn from the log's current line count. A turn whose log cannot be
@@ -139,14 +139,22 @@ retry_count() {
   printf '%s' "$n"
 }
 
-# The session log belongs to the `devin acp` process that runs this hook, so
-# the first ancestor with a devin_*_<pid>.log names it; when a reused pid left
-# an older log behind, the most recently written one is the live session's.
+# The session log belongs to the `devin` process that runs this hook, so the
+# first ancestor that is a devin process with a devin_*_<pid>.log names it;
+# other ancestors are skipped even when a reused pid left a log under their
+# number, and when one left an older log for the devin pid itself, the most
+# recently written one is the live session's.
 find_session_log() {
-  local pid=$PPID f newest _
+  local pid=$PPID f newest comm _
   for _ in 1 2 3 4 5 6 7 8; do
     case "$pid" in '' | *[!0-9]* | 0 | 1) return 1 ;; esac
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || comm=
+    comm=${comm%"${comm##*[! ]}"}
     newest=
+    [ "${comm##*/}" = devin ] || {
+      pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+      continue
+    }
     for f in "$LOG_DIR"/devin_*_"$pid".log; do
       [ -f "$f" ] || continue
       if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest=$f; fi

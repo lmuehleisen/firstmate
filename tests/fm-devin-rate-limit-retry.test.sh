@@ -12,7 +12,8 @@
 # the home-wide stagger between two workers, the unarmed case, retire, a
 # reused pid's stale log, an undelivered retry, a held send lock, a long reset
 # that must not delay a shorter one, spacing measured from a slow send's end,
-# and a superseded retry that leaves nothing behind.
+# a superseded retry that leaves nothing behind, and a stale log under a
+# non-devin ancestor.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -35,6 +36,9 @@ cat >"$BIN/fm-send.sh" <<'EOF'
 printf '%s|%s|%s|%s|%s\n' "$(date +%s)" "$FM_HOME" "$FM_STATE_OVERRIDE" "$1" "$2" >>"$FM_HOME/sent"
 EOF
 chmod +x "$BIN/fm-send.sh"
+# The fake `devin` process: bash started under the name devin, as the real
+# CLI's process is.
+ln -s "$(command -v bash)" "$BIN/devin"
 
 cleanup_sentinels() {
   pkill -f "$BIN/fm-devin-rate-limit-retry.sh watch" 2>/dev/null || true
@@ -61,14 +65,16 @@ new_home() {
   printf '%s\n' "$home"
 }
 
-# fake_devin <home> <task> <event...>: runs each hook event from one process
-# that owns devin_test_<pid>.log in the home's log dir, the way `devin acp`
-# runs hooks; prints the log path. With FM_TEST_STALE_LOG=1, an older
+# fake_devin <home> <task> <event...>: runs each hook event from one devin
+# process that owns devin_test_<pid>.log in the home's log dir, the way the
+# real CLI runs hooks; prints the log path. With FM_TEST_STALE_LOG=1, an older
 # devin_aaa_<pid>.log from an earlier process with the same pid sorts first.
+# With FM_TEST_SHELL_LOG=1, each hook runs under an intermediate shell whose
+# reused pid owns a stale devin_zzz_<pid>.log.
 fake_devin() {
   local home=$1 task=$2
   shift 2
-  FM_DEVIN_RETRY_LOG_DIR="$home/logs" bash -c '
+  FM_DEVIN_RETRY_LOG_DIR="$home/logs" "$BIN/devin" -c '
     [ "${FM_TEST_STALE_LOG:-}" != 1 ] || {
       printf "old session\n" >"$1/logs/devin_aaa_$$.log"
       touch -t 202001010000 "$1/logs/devin_aaa_$$.log"
@@ -79,7 +85,11 @@ fake_devin() {
     home=$1 task=$2 retry=$3
     shift 3
     for event in "$@"; do
-      printf "{\"hook_event_name\":\"x\",\"session_id\":\"s1\"}" | "$retry" "$event" "$home/state" "$task" "$home"
+      if [ "${FM_TEST_SHELL_LOG:-}" = 1 ]; then
+        printf "{}" | bash -c "printf \"old\\n\" >\"\$1/logs/devin_zzz_\$\$.log\"; \"\$2\" \"\$3\" \"\$1/state\" \"\$4\" \"\$1\"; :" _ "$home" "$retry" "$event" "$task"
+      else
+        printf "{\"hook_event_name\":\"x\",\"session_id\":\"s1\"}" | "$retry" "$event" "$home/state" "$task" "$home"
+      fi
     done' _ "$home" "$task" "$RETRY" "$@"
 }
 
@@ -287,3 +297,12 @@ hook "$H" t2 stop
 wait_for 15 "the superseded event" has_event "$H" superseded
 assert_equals "$record" "$(cat "$H/state/devin-rate-limit-last-send")" "a superseded retry must not move the last-send record"
 pass "a retry superseded while waiting for its spacing records nothing"
+
+# 16. A reused pid's log under an intermediate, non-devin ancestor is skipped
+# for the devin process's own log.
+H=$(new_home shell-log)
+LOG=$(FM_TEST_SHELL_LOG=1 fake_devin "$H" t1 arm)
+ls "$H"/logs/devin_zzz_*.log >/dev/null 2>&1 || fail "the intermediate shell's stale log must exist for this case to mean anything"
+rate_limit_line "1 second" >>"$LOG"
+wait_for 15 "the retry send" sent_at_least "$H" 1
+pass "a stale log under a non-devin ancestor does not hide the devin process's log"
