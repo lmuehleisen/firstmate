@@ -50,7 +50,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: no required pipeline; `no-mistakes` delivery tokens ship as `direct-PR` unless `config/no-mistakes` opts in; README "No required `no-mistakes`".
 - Class: intended.
-- Seam: `bin/fm-dod-lib.sh`, `bin/fm-brief.sh`, `bin/fm-promote.sh`, `bin/fm-spawn.sh`, `bin/fm-project-mode.sh` (the registry and default remap to `direct-PR`), `bin/fm-home-seed.sh` (no pipeline initialization), `bin/fm-bootstrap.sh`, `bin/fm-pr-check.sh`, `bin/fm-remote-home-provision.sh`, `bin/fm-teardown.sh`, `bin/fm-test-run.sh`, the no-mistakes wording in shared skills under `.agents/skills/` and their harness references, the `CONTRIBUTING.md` required-checks line, and the `VISION.md` Scope line (shared); upstream's `.github/workflows/no-mistakes-required.yml` is deleted.
+- Seam: `bin/fm-dod-lib.sh`, `bin/fm-brief.sh`, `bin/fm-promote.sh`, `bin/fm-spawn.sh`, `bin/fm-project-mode.sh` (the registry and default remap to `direct-PR`), `bin/fm-home-seed.sh` (no pipeline initialization), `bin/fm-bootstrap.sh`, `bin/fm-pr-check.sh`, `bin/fm-remote-home-provision.sh`, `bin/fm-teardown.sh`, `bin/fm-test-run.sh`, `bin/fm-crew-state.sh`, `bin/fm-inactive-reconcile.sh`, the no-mistakes wording in shared skills under `.agents/skills/` and their harness references, the `CONTRIBUTING.md` required-checks line, and the `VISION.md` Scope line (shared); upstream's `.github/workflows/no-mistakes-required.yml` is deleted.
 - Guard: `tests/fm-brief.test.sh` `test_no_mistakes_*`; `tests/fm-task-delivery.test.sh` `test_no_mistakes_*`; `tests/fm-bootstrap.test.sh` `test_no_mistakes_opt_in_reports_unavailable_cli`.
 - Upstream: requires the no-mistakes pipeline for every ship.
 
@@ -122,7 +122,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: completed ship work awaiting merge stays tracked, visible in Bearings, and quietly supervised after its worker is verified stopped; README "Durable approval waits".
 - Class: intended.
-- Seam: `bin/fm-captain-hold.sh` and the watcher (shared).
+- Seam: `bin/fm-captain-hold.sh`, `bin/fm-busy-lib.sh`, and the watcher (shared).
 - Guard: fork-only `tests/fm-captain-hold-completed-ship.test.sh`, `tests/fm-watch-completed-ship-hold.test.sh`, and `tests/fm-fleet-snapshot-captain-hold.test.sh`.
 - Upstream: no completed-ship hold.
 
@@ -146,7 +146,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: Devin and agy are routine worker runtimes.
 - Class: intended.
-- Seam: fork-only `bin/fm-devin-lib.sh`, `bin/fm-agy-lib.sh`, `bin/fm-agy-hook.sh`, `.agents/hooks.json` (agy primary hooks), `docs/supervision-protocols/agy.md`, `tests/fm-tmux-submit-busy-agy.test.sh`, and the agy live guards `tests/fm-agy-*-live-e2e.test.sh` with `tests/agy-primary-live-probe.py`, plus shared adapter-list and composer lines.
+- Seam: fork-only `bin/fm-devin-lib.sh`, `bin/fm-agy-lib.sh`, `bin/fm-agy-hook.sh`, `.agents/hooks.json` (agy primary hooks), `docs/supervision-protocols/agy.md`, `tests/fm-tmux-submit-busy-agy.test.sh`, and the agy live guards `tests/fm-agy-*-live-e2e.test.sh` with `tests/agy-primary-live-probe.py`, plus the shared adapter hunks in `bin/fm-harness.sh`, `bin/fm-composer-lib.sh`, `bin/fm-busy-lib.sh`, `bin/fm-control-lib.sh`, `bin/fm-session-lock-lib.sh`, and `bin/fm-supervision-instructions.sh`.
 - Guard: `tests/fm-devin-harness.test.sh`; `tests/fm-agy-harness.test.sh`; `tests/fm-composer-agy.test.sh`.
 - Upstream: ships its own Devin and agy adapters; how much of the fork's mechanics to keep is the open question in the carried entries below.
 
@@ -180,7 +180,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: decline Claude's external-import prompt correctly; fork PR 12.
 - Class: carried.
-- Seam: Claude trust handling (shared).
+- Seam: `bin/fm-claude-trust.sh` (shared).
 - Guard: `tests/fm-claude-trust.test.sh`.
 - Upstream: still refuses on an Escape dismissal; drop once upstream adopts the fork's rule.
 
@@ -188,7 +188,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: inode-only identity where upstream admits a gap; fork PR 13.
 - Class: carried.
-- Seam: PR poll identity (shared); a small remainder after the last integration took upstream's stricter rule elsewhere.
+- Seam: PR poll identity in `bin/fm-pr-lib.sh` and `bin/fm-watch.sh` (shared); a small remainder after the last integration took upstream's stricter rule elsewhere.
 - Guard: none.
 - Upstream: drop once upstream closes the gap.
 
@@ -196,7 +196,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: recover a stranded steering doorbell; fork PR 14.
 - Class: carried.
-- Seam: steering doorbell delivery (shared).
+- Seam: steering doorbell delivery in `bin/fm-send.sh`, `bin/fm-task-inbox-lib.sh`, `bin/fm-remote-secondmate-control.sh`, `bin/fm-watch.sh`, and `bin/fm-composer-lib.sh` (shared).
 - Guard: none.
 - Upstream: overlaps upstream PR #4485; drop once that lands equivalently.
 
@@ -204,7 +204,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: exact tmux session inventory, fork PR 15, now routed through upstream's window inventory (fork PR 47).
 - Class: carried.
-- Seam: the remainder in the tmux backend (shared).
+- Seam: the remainder in the tmux backend, `bin/fm-backend.sh`, and `bin/fm-crew-state.sh` (shared).
 - Guard: none.
 - Upstream: drop the remainder once upstream's inventory covers it.
 
@@ -229,16 +229,16 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Intent: Claude StopFailure recovery, auto-arm timeout, away-digest integrity, and a dropped Enter on spawn; fork PRs 40, 41, 43, and 44.
 - Class: carried.
 - Seam: `bin/fm-claude-stop-autoarm.sh`, `bin/fm-wake-lib.sh`, `bin/fm-watch-arm.sh`, `bin/fm-supervise-daemon.sh`, `bin/fm-afk-launch.sh`, `bin/fm-afk-start.sh`, `bin/fm-tmux-lib.sh`, `bin/backends/tmux.sh`, `bin/fm-spawn.sh`, and `bin/fm-test-run.sh`, limited to the hunks those PRs added (shared), and the fork-only live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
-- Guard: `tests/fm-claude-stop-autoarm.test.sh`.
+- Guard: `tests/fm-claude-stop-autoarm.test.sh`; `tests/fm-turnend-guard.test.sh`; `tests/fm-watch-arm.test.sh`; `tests/fm-daemon.test.sh`; `tests/fm-afk-launch.test.sh`; `tests/fm-backend-tmux-smoke.test.sh`; `tests/fm-tmux-submit-busy.test.sh`; `tests/fm-control-relaunch.test.sh`; the opt-in live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
 - Upstream: equivalence unknown; check each run.
 
 ### markless-op-header
 
 - Intent: port of upstream #5149; fork PR 42.
 - Class: carried.
-- Seam: `bin/fm-operational-input.sh` (shared).
-- Guard: `tests/fm-operational-input.test.sh`.
-- Upstream: merged; the fork diff should now be zero, so verify and drop this entry.
+- Seam: `bin/fm-operational-input.sh` and its Calm consumers `.claude/mods/firstmate-calm/lib/fm-operational-input.ts` and `.pi/extensions/lib/fm-calm-operational-user-layout.ts` (shared).
+- Guard: `tests/fm-operational-input.test.sh`; `tests/fm-calm-claude-mod.test.sh`; `tests/fm-calm-pi-extension.test.sh`.
+- Upstream: merged; the remaining fork diff is small, so verify it against upstream's version and drop this entry once it is zero.
 
 ## Incidental
 
