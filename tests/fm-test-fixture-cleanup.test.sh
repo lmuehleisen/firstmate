@@ -307,6 +307,48 @@ PROBE
   pass "the cleanup guard refuses empty, root, non-temporary, checkout-containing, and in-checkout paths, never follows a slash-terminated symlink, and limits the in-checkout exception to live-suite labs"
 }
 
+test_tmpdir_inside_checkout_stops_the_test() {
+  local harness copy before after rc out
+  harness=$(fm_test_tmproot fm-test-cleanup-tmpdir-in-checkout)
+  copy=$(make_disposable_checkout "$harness")
+  mkdir -p "$copy/tmp"
+  cat > "$copy/tests/probe.test.sh" <<'PROBE'
+set -u
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+TMP_ROOT=$(fm_test_tmproot fm-probe)
+printf 'reached with root <%s>\n' "$TMP_ROOT"
+PROBE
+  before=$(tree_listing "$copy")
+
+  rc=0
+  out=$(cd "$copy" && TMPDIR="$copy/tmp" bash tests/probe.test.sh 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "tests/lib.sh accepted a TMPDIR inside the checkout: $out"
+  assert_contains "$out" "must be an existing directory outside the checkout" \
+    "the in-checkout TMPDIR failure did not name the precondition"
+  assert_not_contains "$out" "reached with root" "a test kept running with a TMPDIR inside the checkout"
+  after=$(tree_listing "$copy")
+  [ "$before" = "$after" ] || fail "an in-checkout TMPDIR left files behind in the checkout"
+
+  # TMPDIR moved into the checkout after sourcing: the rejected root is rolled
+  # back and the owning test stops instead of receiving an empty root.
+  cat > "$copy/tests/late-probe.test.sh" <<'PROBE'
+set -u
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+export TMPDIR="$1"
+TMP_ROOT=$(fm_test_tmproot fm-late-probe)
+printf 'reached with root <%s>\n' "$TMP_ROOT"
+PROBE
+  before=$(tree_listing "$copy")
+  rc=0
+  out=$(cd "$copy" && bash tests/late-probe.test.sh "$copy/tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a rejected temp root let the owning test succeed: $out"
+  assert_contains "$out" "refusing unsafe temp root" "the rejected temp root was not reported"
+  assert_not_contains "$out" "reached with root" "the owning test continued after its temp root was rejected"
+  after=$(tree_listing "$copy")
+  [ "$before" = "$after" ] || fail "a rejected temp root was left behind inside the checkout"
+  pass "a TMPDIR inside the checkout stops the test instead of yielding an empty root"
+}
+
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_cleanup_registry_resists_precreation
@@ -315,3 +357,4 @@ test_orphan_sweep_respects_fixture_ownership
 test_orphan_sweep_reaps_read_only_package_tree
 test_denied_ps_fails_closed_without_deleting_checkout
 test_cleanup_guard_refuses_unsafe_roots
+test_tmpdir_inside_checkout_stops_the_test

@@ -108,6 +108,19 @@ pass() {
 # early, because a test that keeps running past a half-initialized library
 # builds its fixtures - and aims its cleanup - at empty or undefined roots.
 
+# Every fixture root lives under TMPDIR, and the removal guard refuses anything
+# inside the checkout, so a TMPDIR inside the checkout could never yield a
+# usable root.
+fm_test_lib_tmp_base=$(fm_test_tmproot_guard_canonical_dir "${TMPDIR:-/tmp}") || fm_test_lib_tmp_base=
+case "$fm_test_lib_tmp_base/" in
+  / | // | "$FM_TEST_TMPROOT_GUARD_CHECKOUT"/*)
+    printf 'not ok - tests/lib.sh precondition unmet: TMPDIR (%s) must be an existing directory outside the checkout %s\n' \
+      "${TMPDIR:-/tmp}" "$FM_TEST_TMPROOT_GUARD_CHECKOUT" >&2
+    exit 1
+    ;;
+esac
+unset fm_test_lib_tmp_base
+
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || {
   printf 'not ok - tests/lib.sh precondition unmet: cannot create a cleanup registry in %s\n' \
@@ -206,7 +219,13 @@ fm_test_tmproot() {
   }
   root=$(cd -P -- "$root" && pwd -P) || return 1
   if reason=$(fm_test_tmproot_guard_reason "$root"); then
-    printf 'fm_test_tmproot: refusing unsafe temp root %s: %s\n' "$root" "$reason" >&2
+    # Only a TMPDIR moved somewhere unsafe after sourcing gets here. The new
+    # directory is still empty, so roll it back with rmdir, then stop the owning
+    # test: a command substitution cannot exit its caller, and callers rarely
+    # check this assignment, so returning would hand them an empty root.
+    rmdir -- "$root" 2>/dev/null || true
+    printf 'not ok - fm_test_tmproot: refusing unsafe temp root %s: %s\n' "$root" "$reason" >&2
+    kill -TERM "$$"
     return 1
   fi
   if ! printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$root/.fm-test-fixture" ||
