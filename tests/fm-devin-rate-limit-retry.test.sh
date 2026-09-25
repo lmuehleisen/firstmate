@@ -12,8 +12,8 @@
 # the home-wide stagger between two workers, the unarmed case, retire, a
 # reused pid's stale log, an undelivered retry, a held send lock, a long reset
 # that must not delay a shorter one, spacing measured from a slow send's end,
-# a superseded retry that leaves nothing behind, and a stale log under a
-# non-devin ancestor.
+# a superseded retry that leaves nothing behind, a stale log under a non-devin
+# ancestor, and a capped task whose retry state is retired.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -306,3 +306,15 @@ ls "$H"/logs/devin_zzz_*.log >/dev/null 2>&1 || fail "the intermediate shell's s
 rate_limit_line "1 second" >>"$LOG"
 wait_for 15 "the retry send" sent_at_least "$H" 1
 pass "a stale log under a non-devin ancestor does not hide the devin process's log"
+
+# 17. Retiring a capped task's retry state, as a relaunch or teardown does,
+# resolves its blocked line.
+H=$(new_home cap-retire)
+: >"$H/state/t1.status"
+LOG=$(FM_DEVIN_RETRY_MAX=0 fake_devin "$H" t1 arm)
+rate_limit_line "1 second" >>"$LOG"
+wait_for 10 "the capped event" has_event "$H" capped
+"$RETRY" retire "$H/state" t1 - </dev/null
+assert_equals 1 "$(grep -c '^resolved \[at=[0-9]*\] \[key=devin-rate-limit\]: ' "$H/state/t1.status")" "retiring a capped task must resolve its key"
+assert_absent "$H/state/t1.devin-retry" "retire must still remove the task's retry state"
+pass "retiring a capped task's retry state resolves its blocked line"

@@ -33,8 +33,9 @@
 #   end (SessionEnd)
 #       Retires the sentinel without touching the count.
 #   retire (not a hook)
-#       bin/fm-devin-lib.sh's teardown and relaunch retire: removes the
-#       per-task directory, which also ends any sentinel within one poll.
+#       bin/fm-devin-lib.sh's teardown and relaunch retire: resolves the cap
+#       line when one was written, then removes the per-task directory, which
+#       also ends any sentinel within one poll.
 #   watch (internal; started by arm)
 #       Follows the session log until this turn's token is replaced (a new
 #       prompt, a Stop, a SessionEnd, or a retire) or a turn-ending rate-limit
@@ -294,6 +295,10 @@ cmd_end() {
 }
 
 cmd_retire() {
+  if [ -e "$DIR/capped" ]; then
+    status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired"
+    log_event resolved "the retry state was retired after the retry cap"
+  fi
   rm -rf -- "$DIR"
 }
 
