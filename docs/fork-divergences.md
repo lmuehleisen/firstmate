@@ -43,7 +43,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Intent: decisions and reports use chat, and `/bearings lavish` is a read-only snapshot; README "No required `lavish-axi`".
 - Class: intended.
 - Seam: `bin/fm-bearings-board.sh`, `.agents/skills/bearings/assets/board-template.html`, and the scout-brief Lavish line (shared); upstream's `tests/fm-bearings-board-lavish-live-e2e.test.sh` is deleted.
-- Guard: `tests/fm-bearings-board.test.sh` `test_build_does_not_invoke_lavish`; `tests/fm-bootstrap.test.sh` `test_dropped_tools_are_not_required`.
+- Guard: `tests/fm-bearings-board.test.sh` `test_build_does_not_invoke_lavish`; `tests/fm-brief.test.sh` `test_scout_and_secondmate_scaffold`; `tests/fm-bootstrap.test.sh` `test_dropped_tools_are_not_required`.
 - Upstream: requires `lavish-axi` and drives an interactive board.
 
 ### no-mistakes-optional
