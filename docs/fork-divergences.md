@@ -126,6 +126,14 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Guard: fork-only `tests/fm-upstream-callsite-scan.test.sh`.
 - Upstream: not applicable.
 
+### fork-documentation
+
+- Intent: the fork's prose describes the fork rather than upstream: README "Personal fork: what differs" and the fork wording in `AGENTS.md`, `CONTRIBUTING.md`, and `docs/configuration.md` that states the behavior of the other entries here.
+- Class: intended.
+- Seam: `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, and `docs/configuration.md` (shared); only the hunks that describe another entry's behavior are claimed, and any other hunk in these files is still classified on its own.
+- Guard: none; the integration run's ledger-update step reviews these files against the fork each run.
+- Upstream: describes upstream's own tools, pipeline, and permission defaults.
+
 ### devin-and-agy-first-class
 
 - Intent: Devin and agy are routine worker runtimes.
