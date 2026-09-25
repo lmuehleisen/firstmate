@@ -524,7 +524,7 @@ EOF
   # Rate-limit retry hooks: UserPromptSubmit arms a sentinel on the session
   # log of the devin process running the hook, and Stop retires it. The
   # trailing `:` keeps bash from exec-ing the hook in place of that process.
-  local cmd_retry_arm cmd_retry_stop retry_logs="$case_dir/devin-logs"
+  local cmd_retry_arm cmd_retry_stop fake_devin_script retry_logs="$case_dir/devin-logs"
   cmd_retry_arm=$(jq -r '.hooks.UserPromptSubmit[0].hooks[2].command' "$hook_file")
   cmd_retry_stop=$(jq -r '.hooks.Stop[0].hooks[2].command' "$hook_file")
   case "$(jq -r '.hooks.SessionEnd[0].hooks[2].command' "$hook_file")" in
@@ -533,8 +533,10 @@ EOF
   esac
   mkdir -p "$retry_logs"
   ln -s "$(command -v bash)" "$case_dir/devin"
+  # shellcheck disable=SC2016 # The fake devin is bash; its -c script expands its own arguments.
+  fake_devin_script=': >"$1/devin_test_$$.log"; sh -c "$2"; :'
   printf '{"session_id":"s1"}' | FM_DEVIN_RETRY_LOG_DIR="$retry_logs" FM_DEVIN_RETRY_POLL=1 \
-    "$case_dir/devin" -c ': >"$1/devin_test_$$.log"; sh -c "$2"; :' _ "$retry_logs" "$cmd_retry_arm" \
+    "$case_dir/devin" -c "$fake_devin_script" _ "$retry_logs" "$cmd_retry_arm" \
     || fail "generated rate-limit arm hook failed"
   [ -s "$home/state/$id.devin-retry/turn" ] || fail "the arm hook must open a retry turn for the task"
   ! grep -q '"event":"unarmed"' "$home/state/devin-rate-limit-log.jsonl" 2>/dev/null \

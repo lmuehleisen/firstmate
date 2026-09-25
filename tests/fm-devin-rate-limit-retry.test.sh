@@ -75,6 +75,7 @@ new_home() {
 fake_devin() {
   local home=$1 task=$2
   shift 2
+  # shellcheck disable=SC2016 # The fake devin is bash; its -c script expands its own arguments.
   FM_DEVIN_RETRY_LOG_DIR="$home/logs" "$BIN/devin" -c '
     [ "${FM_TEST_STALE_LOG:-}" != 1 ] || {
       printf "old session\n" >"$1/logs/devin_aaa_$$.log"

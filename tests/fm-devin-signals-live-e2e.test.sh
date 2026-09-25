@@ -226,7 +226,8 @@ pass "devin: double Escape cancels running turn and prints Canceled"
 # sentinel is still following the session log of the devin process that ran
 # its hook; a rate-limit line appended there must be detected. BACKOFF keeps
 # the retry far off, and retire ends the sentinel before it could send.
-watch_args=$(ps -axo args= | grep -F "fm-devin-rate-limit-retry.sh watch $RETRY_STATE live " | grep -v grep | head -1)
+watch_pid=$(pgrep -f "fm-devin-rate-limit-retry.sh watch $RETRY_STATE live " | head -1)
+watch_args=$(ps -o args= -p "${watch_pid:-0}" 2>/dev/null)
 session_log=$(printf '%s\n' "$watch_args" | awk '{print $(NF-1)}')
 log_pid=${session_log##*_}
 log_pid=${log_pid%.log}
