@@ -165,7 +165,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Intent: durable Treehouse task leases, fork PRs 8 and 17; the fork dropped upstream's slot-claim files.
 - Class: carried, open convergence question; not decided.
 - Seam: fork-only `bin/fm-worktree-claims-lib.sh`, plus its shared callers.
-- Guard: none identified.
+- Guard: none.
 - Upstream: has its own slot-owner claims, with further work in open PRs; which design is better is unresolved.
 
 ### claude-trust-escape
@@ -181,7 +181,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Intent: inode-only identity where upstream admits a gap; fork PR 13.
 - Class: carried.
 - Seam: PR poll identity (shared); a small remainder after the last integration took upstream's stricter rule elsewhere.
-- Guard: none identified.
+- Guard: none.
 - Upstream: drop once upstream closes the gap.
 
 ### doorbell-stranded-enter
@@ -189,7 +189,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Intent: recover a stranded steering doorbell; fork PR 14.
 - Class: carried.
 - Seam: steering doorbell delivery (shared).
-- Guard: none identified.
+- Guard: none.
 - Upstream: overlaps upstream PR #4485; drop once that lands equivalently.
 
 ### tmux-presence
@@ -197,7 +197,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Intent: exact tmux session inventory, fork PR 15, now routed through upstream's window inventory (fork PR 47).
 - Class: carried.
 - Seam: the remainder in the tmux backend (shared).
-- Guard: none identified.
+- Guard: none.
 - Upstream: drop the remainder once upstream's inventory covers it.
 
 ### rehold-reason
