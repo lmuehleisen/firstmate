@@ -133,7 +133,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="export COMPACT_ADVISER_DISABLE=1; env -u JETSKI_APP_DATA_DIR env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --permission-mode auto --add-dir '$(cd "$HOME_DIR/state" && pwd -P)' --add-dir '$(cd "$HOME_DIR/data/$id" && pwd -P)' --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="$(fm_test_worker_tmux_prefix "$HOME_DIR/state/$id.meta")export COMPACT_ADVISER_DISABLE=1; env -u JETSKI_APP_DATA_DIR env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --permission-mode auto --add-dir '$(cd "$HOME_DIR/state" && pwd -P)' --add-dir '$(cd "$HOME_DIR/data/$id" && pwd -P)' --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -386,9 +386,9 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
   # The unverified-adapter escape hatch is still an agent this fleet launched,
-  # so it carries the compact-adviser floor; nothing else may rewrite the
-  # captain's own command.
-  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  # so it carries the compact-adviser floor and the private tmux server;
+  # nothing else may rewrite the captain's own command.
+  [ "$launch" = "$(fm_test_worker_tmux_prefix "$HOME_DIR/state/$id.meta")export COMPACT_ADVISER_DISABLE=1; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -1054,7 +1054,7 @@ test_claude_secondmate_launch_omits_task_control_channel_authority() {
 # the same string test_no_profile_keeps_claude_profile_defaults pins.
 fork_claude_expected_launch() {  # <home> <id>
   local home=$1 id=$2
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; env -u JETSKI_APP_DATA_DIR env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --permission-mode auto --add-dir '$(cd "$home/state" && pwd -P)' --add-dir '$(cd "$home/data/$id" && pwd -P)' --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
+  printf '%s' "$(fm_test_worker_tmux_prefix "$home/state/$id.meta")export COMPACT_ADVISER_DISABLE=1; env -u JETSKI_APP_DATA_DIR env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --permission-mode auto --add-dir '$(cd "$home/state" && pwd -P)' --add-dir '$(cd "$home/data/$id" && pwd -P)' --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
 }
 
 test_claude_long_launch_is_delivered_intact() {
@@ -1356,7 +1356,9 @@ SH
         enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
         empty) expected=$(printf '%s\n' unset unset unset unset) ;;
       esac
-      expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n'"$pane_path"$'\nxterm\nsynthetic-pane\n/synthetic/gotmp'
+      # The pane's TMUX stays in the floor, but a ship worker starts on its
+      # private tmux server with TMUX unset (bin/fm-worker-tmux-lib.sh).
+      expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n'"$pane_path"$'\nxterm\n\n/synthetic/gotmp'
       [ "$result" = "$expected" ] || fail "allowlist=$setting worker environment mismatch: $result"
     done
     pass "allowlist=$setting preserves the operational floor and filters only when opted in"
