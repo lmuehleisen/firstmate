@@ -128,9 +128,9 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 ### fork-documentation
 
-- Intent: the fork's prose describes the fork rather than upstream: README "Personal fork: what differs" and the fork wording in `AGENTS.md`, `CONTRIBUTING.md`, and `docs/configuration.md` that states the behavior of the other entries here.
+- Intent: the fork's prose describes the fork rather than upstream: README "Personal fork: what differs" and every fork wording in shared prose that states the behavior of another entry here, plus the inventory rows that register fork-only prose.
 - Class: intended.
-- Seam: `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, and `docs/configuration.md` (shared); only the hunks that describe another entry's behavior are claimed, and any other hunk in these files is still classified on its own.
+- Seam: any shared prose surface, including `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `VISION.md`, `docs/` (for example `docs/configuration.md`, `docs/architecture.md`, and `docs/scripts.md`), and skill prose under `.agents/skills/`, limited to hunks that describe another entry's behavior; and the `docs/documentation-audiences.json` rows that classify fork-only surfaces such as this ledger and `docs/upstream-integration.md`, while any other hunk in these files is still classified on its own.
 - Guard: none; the integration run's ledger-update step reviews these files against the fork each run.
 - Upstream: describes upstream's own tools, pipeline, and permission defaults.
 
