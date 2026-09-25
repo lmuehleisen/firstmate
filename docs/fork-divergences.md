@@ -102,6 +102,14 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Guard: none.
 - Upstream: pre-registers each agy worktree in the global settings file.
 
+### away-merge-grants
+
+- Intent: while the away-posture record exists, a merge proceeds only for a `yolo` task or one granted with `--grant` at `/afk`, and the away words never grant a merge; `AGENTS.md` section 7.
+- Class: intended.
+- Seam: the merge-grant list in `bin/fm-afk-contract.sh`, and the away-mode gate in `bin/fm-merge-authority-lib.sh` and `bin/fm-pr-merge.sh` (shared).
+- Guard: `tests/fm-afk-contract.test.sh` `test_merge_grants_come_only_from_the_grant_flag`; `tests/fm-pr-merge.test.sh` `test_away_grant_and_yolo_and_hold_for_return`.
+- Upstream: keeps no per-task merge-grant list and lets the away session merge green work under its reading of the away words.
+
 ### remote-less-local-only
 
 - Intent: explicit `local-only` ships start from local `main` or `master` with no remote, refusing dirty or divergent bases; README "Remote-less local work".
