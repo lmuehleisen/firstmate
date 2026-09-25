@@ -189,19 +189,25 @@ reset_seconds() {  # <error-line>
   esac
 }
 
-# The home-wide lock around the last-send record; fails when a live holder
-# keeps it for the whole wait. A holder that died leaves the lock behind, and
-# the section it guards takes milliseconds, so one older than 30 seconds is
-# abandoned.
-send_lock() {
+# Takes a mkdir lock; fails when a live holder keeps it for the whole wait or
+# its directory is gone. A holder that died leaves the lock behind, and every
+# section these locks guard takes milliseconds, so one older than 30 seconds
+# is abandoned.
+take_lock() {  # <lock-path>
   local held _
   for _ in $(seq 1 50); do
-    mkdir "$SEND_LOCK" 2>/dev/null && return 0
-    held=$(fm_lock_path_mtime "$SEND_LOCK") || held=
-    case "$held" in '' | *[!0-9]*) ;; *) [ $(($(date +%s) - held)) -le 30 ] || rmdir "$SEND_LOCK" 2>/dev/null || true ;; esac
+    mkdir "$1" 2>/dev/null && return 0
+    [ -d "${1%/*}" ] || return 1
+    held=$(fm_lock_path_mtime "$1") || held=
+    case "$held" in '' | *[!0-9]*) ;; *) [ $(($(date +%s) - held)) -le 30 ] || rmdir "$1" 2>/dev/null || true ;; esac
     sleep 0.2
   done
   return 1
+}
+
+# The home-wide lock around the last-send record.
+send_lock() {
+  take_lock "$SEND_LOCK"
 }
 
 send_unlock() {
@@ -276,9 +282,22 @@ cmd_arm() {
   return 0
 }
 
+# The per-task lock that orders the cap line against Stop and retire, so a cap
+# published by a sentinel is always seen, and resolved, by whichever of them
+# retires its turn. Only these short sections take it, never a send.
+task_lock() {
+  take_lock "$DIR/.lock"
+}
+
+task_unlock() {
+  rmdir "$DIR/.lock" 2>/dev/null || true
+}
+
 cmd_stop() {
+  local locked=
   cat >/dev/null 2>&1 || true
   [ -d "$DIR" ] || return 0
+  ! task_lock || locked=1
   set_turn "ended.$(date +%s)" || true
   rm -f "$DIR/count"
   if [ -e "$DIR/capped" ]; then
@@ -286,6 +305,7 @@ cmd_stop() {
     status_append "resolved [at=$(date +%s)] [key=$KEY]: Devin finished a turn normally again after the rate limit"
     log_event resolved "a normal turn ended after the retry cap"
   fi
+  [ -z "$locked" ] || task_unlock
 }
 
 cmd_end() {
@@ -295,6 +315,9 @@ cmd_end() {
 }
 
 cmd_retire() {
+  [ -d "$DIR" ] || return 0
+  # The lock goes with the directory, so it is never released here.
+  task_lock || true
   if [ -e "$DIR/capped" ]; then
     status_append "resolved [at=$(date +%s)] [key=$KEY]: the rate-limited Devin worker was relaunched or retired"
     log_event resolved "the retry state was retired after the retry cap"
@@ -334,11 +357,20 @@ cmd_watch() {
   reset=$(reset_seconds "$line")
   count=$(retry_count)
   if [ "$count" -ge "$MAX" ]; then
-    if [ ! -e "$DIR/capped" ]; then
-      : >"$DIR/capped"
-      status_append "blocked [at=$(date +%s)] [key=$KEY]: Devin stopped on its model rate limit again after $count automatic retries; send it a message to retry, or move the work to another harness"
+    # Published only while this turn is still current, under the lock Stop
+    # and retire take, so the turn's end always sees the cap and resolves it.
+    task_lock || {
+      [ ! -d "$DIR" ] || log_event failed "the task's retry lock stayed held; the retry cap was not published"
+      return 0
+    }
+    if turn_is "$token"; then
+      if [ ! -e "$DIR/capped" ]; then
+        : >"$DIR/capped"
+        status_append "blocked [at=$(date +%s)] [key=$KEY]: Devin stopped on its model rate limit again after $count automatic retries; send it a message to retry, or move the work to another harness"
+      fi
+      log_event capped "rate limit after $count automatic retries; reset ${reset}s; no retry sent"
     fi
-    log_event capped "rate limit after $count automatic retries; reset ${reset}s; no retry sent"
+    task_unlock
     return 0
   fi
   delay=$((reset + BACKOFF * (1 << count) + RANDOM % (JITTER + 1)))

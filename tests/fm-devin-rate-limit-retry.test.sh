@@ -13,7 +13,8 @@
 # reused pid's stale log, an undelivered retry, a held send lock, a long reset
 # that must not delay a shorter one, spacing measured from a slow send's end,
 # a superseded retry that leaves nothing behind, a stale log under a non-devin
-# ancestor, and a capped task whose retry state is retired.
+# ancestor, a capped task whose retry state is retired, and a cap detected after
+# its turn was retired.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -318,3 +319,18 @@ wait_for 10 "the capped event" has_event "$H" capped
 assert_equals 1 "$(grep -c '^resolved \[at=[0-9]*\] \[key=devin-rate-limit\]: ' "$H/state/t1.status")" "retiring a capped task must resolve its key"
 assert_absent "$H/state/t1.devin-retry" "retire must still remove the task's retry state"
 pass "retiring a capped task's retry state resolves its blocked line"
+
+# 18. A cap detected after its turn was retired publishes nothing: the
+# sentinel revalidates its turn under the lock Stop and retire take.
+H=$(new_home cap-after-stop)
+: >"$H/state/t1.status"
+LOG=$(FM_DEVIN_RETRY_MAX=0 fake_devin "$H" t1 arm)
+mkdir "$H/state/t1.devin-retry/.lock"
+rate_limit_line "1 second" >>"$LOG"
+sleep 3
+printf 'ended.1\n' >"$H/state/t1.devin-retry/turn"
+rmdir "$H/state/t1.devin-retry/.lock"
+sleep 3
+assert_no_grep 'blocked' "$H/state/t1.status" "a cap for a retired turn must not write a blocked line"
+! has_event "$H" capped || fail "a cap for a retired turn must not be logged as capped"
+pass "a cap detected after its turn was retired publishes nothing"
