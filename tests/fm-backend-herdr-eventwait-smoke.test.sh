@@ -12,6 +12,8 @@
 # `herdr server stop`. Every lifecycle op goes through bin/fm-herdr-lab.sh, which
 # refuses the default session and verifies the fleet-state tripwire.
 set -u
+# shellcheck source=tests/tmproot-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmproot-guard.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

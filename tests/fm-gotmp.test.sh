@@ -10,6 +10,8 @@
 # The isolated fm-spawn subprocess in fm-kimi-harness.test.sh covers temp-root creation,
 # metadata publication, and the pane environment export.
 set -u
+# shellcheck source=tests/tmproot-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmproot-guard.sh"
 
 # This suite does not source tests/lib.sh, so exempt its teardown subprocess from
 # the gate-lifecycle refusal (bin/fm-gate-refuse-lib.sh) the way lib.sh does for
