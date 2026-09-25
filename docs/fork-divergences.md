@@ -114,7 +114,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: explicit `local-only` ships start from local `main` or `master` with no remote, refusing dirty or divergent bases; README "Remote-less local work".
 - Class: intended.
-- Seam: pool-base handling in `bin/fm-spawn.sh` (shared).
+- Seam: pool-base handling in `bin/fm-spawn.sh` and its `local_default_branch` helper in `bin/fm-ff-lib.sh` (shared).
 - Guard: `tests/fm-spawn-pool-base-freshen.test.sh` `test_originless_pool_launches_without_a_freshness_fetch` and `test_originless_dirty_pool_refuses_without_discarding_work`.
 - Upstream: requires a remote to freshen the pool base.
 
@@ -228,7 +228,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: Claude StopFailure recovery, auto-arm timeout, away-digest integrity, and a dropped Enter on spawn; fork PRs 40, 41, 43, and 44.
 - Class: carried.
-- Seam: `bin/fm-claude-stop-autoarm.sh` (shared), and the fork-only live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
+- Seam: `bin/fm-claude-stop-autoarm.sh`, `bin/fm-wake-lib.sh`, `bin/fm-watch-arm.sh`, `bin/fm-supervise-daemon.sh`, `bin/fm-afk-launch.sh`, `bin/fm-afk-start.sh`, `bin/fm-tmux-lib.sh`, `bin/backends/tmux.sh`, `bin/fm-spawn.sh`, and `bin/fm-test-run.sh`, limited to the hunks those PRs added (shared), and the fork-only live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
 - Guard: `tests/fm-claude-stop-autoarm.test.sh`.
 - Upstream: equivalence unknown; check each run.
 
