@@ -75,15 +75,15 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Intent: agy workers default to `--mode accept-edits` rather than a blanket skip, and bypass runs only with `--agy-bypass` under the policed permission hook and judge tier; fork PRs 35 and 39.
 - Class: intended.
 - Seam: fork-only `bin/fm-agy-lib.sh`, `bin/fm-agy-permission-policy.sh`, `bin/fm-command-policy-lib.sh`, and `bin/fm-judge-tier-lib.sh`, plus small spawn hooks in `bin/fm-spawn.sh` (shared).
-- Guard: `tests/fm-agy-permission-policy.test.sh`; `tests/fm-agy-harness.test.sh`.
+- Guard: `tests/fm-agy-permission-policy.test.sh`; `tests/fm-agy-harness.test.sh`; the opt-in live guard `tests/fm-agy-bypass-live-e2e.test.sh`.
 - Upstream: its own agy adapter has no fork permission layer.
 
 ### devin-permission-layer
 
 - Intent: Devin workers run in reviewed mode behind firstmate's permission hook, never in bypass; fork PRs 30, 32, 34, and 46.
 - Class: intended.
-- Seam: fork-only `bin/fm-devin-permission-policy.sh`, `bin/fm-devin-lib.sh`, and the live guard `tests/fm-devin-permission-policy-live-e2e.test.sh`, plus small spawn hooks in `bin/fm-spawn.sh` (shared).
-- Guard: `tests/fm-devin-permission-policy.test.sh`.
+- Seam: fork-only `bin/fm-devin-permission-policy.sh` and `bin/fm-devin-lib.sh`, plus small spawn hooks in `bin/fm-spawn.sh` (shared).
+- Guard: `tests/fm-devin-permission-policy.test.sh`; the opt-in live guard `tests/fm-devin-permission-policy-live-e2e.test.sh`.
 - Upstream: its own Devin adapter launches with `--permission-mode dangerous`.
 
 ### read-only-web-lookups
@@ -146,8 +146,8 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: Devin and agy are routine worker runtimes.
 - Class: intended.
-- Seam: fork-only `bin/fm-devin-lib.sh`, `bin/fm-agy-lib.sh`, `bin/fm-agy-hook.sh`, `.agents/hooks.json` (agy primary hooks), `docs/supervision-protocols/agy.md`, `tests/fm-tmux-submit-busy-agy.test.sh`, and the agy live guards `tests/fm-agy-*-live-e2e.test.sh` with `tests/agy-primary-live-probe.py`, plus the shared adapter hunks in `bin/fm-harness.sh`, `bin/fm-dispatch-resolve.sh` (the agy and Devin effort table), `bin/fm-composer-lib.sh`, `bin/fm-busy-lib.sh`, `bin/fm-control-lib.sh`, `bin/fm-session-lock-lib.sh`, and `bin/fm-supervision-instructions.sh`.
-- Guard: `tests/fm-devin-harness.test.sh`; `tests/fm-agy-harness.test.sh`; `tests/fm-composer-agy.test.sh`; `tests/fm-dispatch-resolve.test.sh`.
+- Seam: fork-only `bin/fm-devin-lib.sh`, `bin/fm-agy-lib.sh`, `bin/fm-agy-hook.sh`, `.agents/hooks.json` (agy primary hooks), `docs/supervision-protocols/agy.md`, `tests/fm-tmux-submit-busy-agy.test.sh`, and `tests/agy-primary-live-probe.py`, plus the shared adapter hunks in `bin/fm-harness.sh`, `bin/fm-dispatch-resolve.sh` (the agy and Devin effort table), `bin/fm-composer-lib.sh`, `bin/fm-busy-lib.sh`, `bin/fm-control-lib.sh`, `bin/fm-session-lock-lib.sh`, and `bin/fm-supervision-instructions.sh`.
+- Guard: `tests/fm-devin-harness.test.sh`; `tests/fm-agy-harness.test.sh`; `tests/fm-composer-agy.test.sh`; `tests/fm-dispatch-resolve.test.sh`; `tests/fm-tmux-submit-busy-agy.test.sh`; the opt-in live guards `tests/fm-agy-primary-live-e2e.test.sh` and `tests/fm-agy-observer-live-e2e.test.sh`.
 - Upstream: ships its own Devin and agy adapters; how much of the fork's mechanics to keep is the open question in the carried entries below.
 
 ## Carried
@@ -228,7 +228,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: Claude StopFailure recovery, auto-arm timeout, away-digest integrity, and a dropped Enter on spawn; fork PRs 40, 41, 43, and 44.
 - Class: carried.
-- Seam: `bin/fm-claude-stop-autoarm.sh`, `bin/fm-wake-lib.sh`, `bin/fm-watch-arm.sh`, `bin/fm-supervise-daemon.sh`, `bin/fm-afk-launch.sh`, `bin/fm-afk-start.sh`, `bin/fm-tmux-lib.sh`, `bin/backends/tmux.sh`, `bin/fm-spawn.sh`, `bin/fm-test-run.sh`, and the `StopFailure` hook registration in `.claude/settings.json`, limited to the hunks those PRs added (shared), and the fork-only live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
+- Seam: `bin/fm-claude-stop-autoarm.sh`, `bin/fm-wake-lib.sh`, `bin/fm-watch-arm.sh`, `bin/fm-supervise-daemon.sh`, `bin/fm-afk-launch.sh`, `bin/fm-afk-start.sh`, `bin/fm-tmux-lib.sh`, `bin/backends/tmux.sh`, `bin/fm-spawn.sh`, `bin/fm-test-run.sh`, and the `StopFailure` hook registration in `.claude/settings.json`, limited to the hunks those PRs added (shared).
 - Guard: `tests/fm-claude-stop-autoarm.test.sh`; `tests/fm-turnend-guard.test.sh`; `tests/fm-watch-arm.test.sh`; `tests/fm-daemon.test.sh`; `tests/fm-afk-launch.test.sh`; `tests/fm-backend-tmux-smoke.test.sh`; `tests/fm-tmux-submit-busy.test.sh`; `tests/fm-control-relaunch.test.sh`; the opt-in live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
 - Upstream: equivalence unknown; check each run.
 
