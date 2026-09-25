@@ -350,7 +350,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --approve-for-me" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --add-dir" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -420,7 +420,7 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --approve-for-me" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --add-dir" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
@@ -436,7 +436,7 @@ test_codex_threads_model_and_max_effort() {
   expect_code 0 "$status" "codex Luna spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --approve-for-me" \
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --add-dir" \
     "codex launch did not thread Luna's max reasoning effort config"
   pass "codex Luna receives --model and model_reasoning_effort max profile flags"
 }
@@ -452,7 +452,7 @@ test_codex_omits_max_effort_for_unsupported_model() {
   expect_code 0 "$status" "codex spawn with an unsupported model max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --approve-for-me" \
+  assert_contains "$launch" "codex --model 'gpt-5' --add-dir" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported model max reasoning effort"
   pass "codex omits max for models without the catalog capability"
@@ -1160,6 +1160,67 @@ test_worker_permission_modes() {
   pass 'Claude and Codex auto/manual modes preserve narrow reporting access and explicit harness overrides'
 }
 
+test_codex_secondmate_permission_modes() {
+  local mode rec id sm out status launch
+  for mode in auto manual; do
+    id="perm-codex-sm-$mode-z1"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+    printf '%s\n' "$mode" > "$HOME_DIR/config/crew-permissions"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --harness codex)
+    status=$?
+    expect_code 0 "$status" "codex secondmate $mode spawn failed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_not_contains "$launch" 'dangerously' 'secondmate must not enable bypass'
+    assert_not_contains "$launch" '__PERMISSIONDIRS__' 'directory placeholder leaked'
+    case "$mode" in
+      auto) assert_contains "$launch" '--approve-for-me' 'Codex review missing' ;;
+      manual) assert_contains "$launch" '--sandbox workspace-write --ask-for-approval on-request' 'Codex manual flags missing' ;;
+    esac
+  done
+  pass 'codex secondmate auto/manual launches carry the fork permission flags and no bypass'
+}
+
+# A drifted upstream codex template (a respaced, renamed, or repeated bypass flag) must
+# refuse the spawn rather than launch with bypass or without permission flags.
+test_codex_template_drift_refuses_launch() {
+  local drift kind mode rec id sm out status copy n=0 real_root=$ROOT tab
+  tab=$(printf '\t')
+  for drift in "s/--dangerously-bypass-approvals-and-sandbox /--dangerously-bypass-approvals-and-sandbox$tab/g" \
+    's/--dangerously-bypass-approvals-and-sandbox /--yolo /g' \
+    's/--dangerously-bypass-approvals-and-sandbox /--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-approvals-and-sandbox /'; do
+    n=$((n + 1))
+    for kind in ship secondmate; do
+      for mode in auto manual; do
+        id="drift-$n-$kind-$mode-z1"
+        rec=$(make_spawn_case "$id" codex "$id")
+        read_case_record "$rec"
+        copy="$CASE_DIR/root"
+        mkdir -p "$copy"
+        cp -R "$real_root/bin" "$real_root/.agents" "$copy/"
+        sed -e "/printf '%s' 'codex __MODELFLAG__/$drift" "$real_root/bin/fm-spawn.sh" > "$copy/bin/fm-spawn.sh"
+        ! cmp -s "$real_root/bin/fm-spawn.sh" "$copy/bin/fm-spawn.sh" || fail "drift $n did not change the template"
+        printf '%s\n' "$mode" > "$HOME_DIR/config/crew-permissions"
+        if [ "$kind" = secondmate ]; then
+          sm="$CASE_DIR/secondmate-home"
+          make_seeded_secondmate_home "$sm" "$id"
+          out=$(ROOT=$copy run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --harness codex)
+        else
+          out=$(ROOT=$copy run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+        fi
+        status=$?
+        [ "$status" -ne 0 ] || fail "drift $n $kind $mode spawn launched: $out"
+        assert_contains "$out" 'codex' 'refusal must name the harness'
+        assert_contains "$out" 'launch template drifted' 'refusal must name the drifted template'
+        [ ! -s "$LAUNCH_LOG" ] || fail "drift $n $kind $mode reached a launch: $(cat "$LAUNCH_LOG")"
+      done
+    done
+  done
+  pass 'a drifted codex template refuses worker and secondmate spawns in auto and manual mode'
+}
+
 test_invalid_worker_permissions_refuse() {
   local harness bad rec id out status count=0
   for harness in claude codex; do
@@ -1247,6 +1308,8 @@ test_worker_permissions_inherited_by_secondmate() {
 
 test_worker_permission_modes
 test_invalid_worker_permissions_refuse
+test_codex_secondmate_permission_modes
+test_codex_template_drift_refuses_launch
 test_worker_permissions_trim_surrounding_whitespace
 test_worker_permissions_resolved_before_any_harness_mutation
 test_worker_permissions_inherited_by_secondmate

@@ -880,8 +880,10 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "codex --approve-for-me" \
-    "explicit-harness-no-tokens: launch did not use codex"
+  assert_contains "$launch" "codex --add-dir" \
+    "explicit-harness-no-tokens: launch did not use codex with grants first"
+  assert_contains "$launch" "--approve-for-me" \
+    "explicit-harness-no-tokens: launch did not use codex auto review"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "model_reasoning_effort" \
     "explicit-harness-no-tokens: launch must not carry a codex effort flag"

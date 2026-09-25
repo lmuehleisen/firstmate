@@ -1923,9 +1923,22 @@ launch_template() {
   esac
   local template
   template=$(launch_command_template "$harness" "$kind" "${permission_flags:-}") || return 1
-  # Claude's flag and grants ride __CLAUDEPERMFLAG__ ahead of --settings, so no
-  # variadic --add-dir can swallow the positional brief.
-  printf '%s' "${template//__CLAUDEPERMFLAG__ /${permission_flags:-} __PERMISSIONDIRS__}"
+  # Claude's flag and grants ride __CLAUDEPERMFLAG__ ahead of --settings, and
+  # codex's grants replace upstream's bypass flag ahead of the permission flags,
+  # so a flag always ends the variadic --add-dir before the positional brief.
+  template=${template//__CLAUDEPERMFLAG__ /${permission_flags:-} __PERMISSIONDIRS__}
+  if [ "$harness" = codex ]; then
+    template=${template//--dangerously-bypass-approvals-and-sandbox /__PERMISSIONDIRS__$permission_flags }
+    # Refuse rather than launch in bypass mode if the upstream template drifted
+    # so the substitution above no longer matched exactly once.
+    local rest=${template#*"__PERMISSIONDIRS__$permission_flags "}
+    if [ "$rest" = "$template" ] || [ "$rest" != "${rest#*__PERMISSIONDIRS__}" ] ||
+      [ "$template" != "${template#*dangerously-bypass-approvals}" ]; then
+      echo "error: codex $kind launch template drifted from upstream's '--dangerously-bypass-approvals-and-sandbox ' flag; refusing to launch without the $CREW_PERMISSION_MODE permission flags" >&2
+      return 1
+    fi
+  fi
+  printf '%s' "$template"
 }
 
 launch_command_template() { # <harness> <kind> <permission-flags>
@@ -1996,9 +2009,9 @@ launch_command_template() { # <harness> <kind> <permission-flags>
   # secondmate launch deliberately keeps hooks on.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__' "$permission_flags" ' __PERMISSIONDIRS__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__' "$permission_flags" ' __PERMISSIONDIRS__--disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" -- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
