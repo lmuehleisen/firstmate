@@ -270,7 +270,7 @@ PROBE
 
   # A slash-terminated symlink must be removed as the link itself: rm given
   # `link/` would otherwise descend into the directory the link points at.
-  local spelling
+  local spelling target
   for spelling in / //; do
     ln -s "$copy" "$harness/link-to-checkout"
     before=$(tree_listing "$copy")
@@ -283,11 +283,28 @@ PROBE
       || fail "the guard did not remove the temp symlink spelled with '$spelling'"
   done
 
+  # The in-checkout live-lab exception removes only its exact shape.
+  mkdir -p "$copy/.demo-live-e2e.123/inner" "$copy/.hidden" "$harness/.stray-live-e2e.9"
+  ln -s "$copy/project" "$copy/.linked-live-e2e.7"
+  out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_rm_checkout_lab "$1/.demo-live-e2e.123"; echo "rc=$?"' _ "$copy" 2>&1)
+  assert_contains "$out" rc=0 "the live-lab helper refused a genuine in-checkout lab"
+  [ ! -e "$copy/.demo-live-e2e.123" ] || fail "the live-lab helper left a genuine in-checkout lab behind"
+  before=$(tree_listing "$harness")
+  for target in "$copy/project" "$copy/.hidden" "$copy/.linked-live-e2e.7" "$copy/.linked-live-e2e.7/" \
+    "$harness/.stray-live-e2e.9" "$copy" ""; do
+    out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_rm_checkout_lab "$1"; echo "rc=$?"' _ "$target" 2>&1)
+    if [ -n "$target" ]; then
+      assert_contains "$out" rc=1 "the live-lab helper accepted $target"
+    fi
+  done
+  after=$(tree_listing "$harness")
+  [ "$before" = "$after" ] || fail "the live-lab helper removed something outside its exact lab shape"
+
   rc=0
   out=$(cd "$copy" && bash -c '. tests/tmproot-guard.sh; fm_test_require_tmproot ""; echo continued' 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm_test_require_tmproot accepted an empty root"
   assert_not_contains "$out" continued "fm_test_require_tmproot let a test continue on an empty root"
-  pass "the cleanup guard refuses empty, root, non-temporary, checkout-containing, and in-checkout paths and never follows a slash-terminated symlink"
+  pass "the cleanup guard refuses empty, root, non-temporary, checkout-containing, and in-checkout paths, never follows a slash-terminated symlink, and limits the in-checkout exception to live-suite labs"
 }
 
 test_fixture_root_gone_after_normal_exit

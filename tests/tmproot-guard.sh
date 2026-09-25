@@ -7,6 +7,7 @@
 #
 #   fm_test_rm_tmproot <path>...      remove each path only when it is a safe temp root
 #   fm_test_require_tmproot <path>    end the test unless <path> is a safe temp root
+#   fm_test_rm_checkout_lab <path>    remove an opt-in live suite's in-checkout lab
 #
 # A path is a safe temp root only when it is non-empty, not `/`, strictly below
 # a temporary base (the TMPDIR in force when this file was sourced, the current
@@ -137,6 +138,27 @@ fm_test_rm_tmproot() {  # <path>...
     rm -rf -- "$canon" || rc=1
   done
   return "$rc"
+}
+
+# A few opt-in live suites keep their lab inside the checkout as
+# `.<name>-live-e2e.<pid>`, outside every temp root, so fm_test_rm_tmproot
+# refuses it by design. This removes only that exact shape: a real directory
+# (not a symlink) that is a direct child of the checkout, named `.` + word
+# characters + `-live-e2e.` + digits. Anything else is refused like above.
+fm_test_rm_checkout_lab() {  # <path>
+  local canon name
+  [ -n "${1-}" ] || return 0
+  [ -e "$1" ] || [ -L "$1" ] || return 0
+  canon=$(fm_test_tmproot_guard_resolve "$1") || canon=
+  name=${canon##*/}
+  if [ -z "$canon" ] || [ "${canon%/*}" != "$FM_TEST_TMPROOT_GUARD_CHECKOUT" ] ||
+    [ -L "$canon" ] || [ ! -d "$canon" ] ||
+    ! printf '%s\n' "$name" | grep -Eqx '\.[A-Za-z0-9_-]+-live-e2e\.[0-9]+'; then
+    printf 'fm_test_rm_checkout_lab: refusing to remove %s: not a live-suite lab directly inside the checkout %s\n' \
+      "$1" "$FM_TEST_TMPROOT_GUARD_CHECKOUT" >&2
+    return 1
+  fi
+  rm -rf -- "$canon"
 }
 
 fm_test_require_tmproot() {  # <path>

@@ -91,7 +91,7 @@ cleanup() {
     kill -TERM "$OMP_PID" 2>/dev/null || true
   fi
   reap_lab
-  fm_test_rm_tmproot "${LAB:-}"
+  fm_test_rm_checkout_lab "${LAB:-}"
 }
 trap cleanup EXIT
 
