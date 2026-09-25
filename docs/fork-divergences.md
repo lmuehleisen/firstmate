@@ -15,7 +15,7 @@ Classes:
 - `carried`: a fork fix or port kept only until upstream ships an equivalent; each integration run checks whether it can be dropped.
 - `incidental`: no reason to differ; realign when convenient.
 
-A `Seam:` claims only the hunks that carry its entry's behavior, not the whole file; a hunk in a file shared with upstream that no entry's scope covers, or a fork-only path no entry's `Seam:` or `Guard:` names, is unclassified, and the integration run reports it.
+A `Seam:` claims only the hunks that carry its entry's behavior, not the whole file; a hunk in a file shared with upstream that no entry's scope covers, or a fork-only path that no entry's `Seam:` or `Guard:` and no incidental item names, is unclassified, and the integration run reports it.
 An entry whose convergence is still under investigation says so in its `Class:` line and is not a decision.
 
 Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam:` naming the files (fork-only or shared), `Guard:` naming the test that fails if the divergence is lost (or `none`, which is itself a finding), and `Upstream:` with what upstream does instead and, for carried entries, what would let the fork drop it.
@@ -122,7 +122,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: upstream arrives through real-merge integration runs and the updater only fast-forwards; README upstream integration paragraph.
 - Class: intended.
-- Seam: fork-only `docs/upstream-integration.md` and `bin/fm-upstream-callsite-scan.sh`, plus the updater skill (shared).
+- Seam: fork-only `docs/upstream-integration.md`, `docs/fork-divergences.md`, and `bin/fm-upstream-callsite-scan.sh`, plus the updater skill (shared).
 - Guard: fork-only `tests/fm-upstream-callsite-scan.test.sh`.
 - Upstream: not applicable.
 
@@ -149,7 +149,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Intent: the fork's own Devin adapter, fork PRs 25 to 28, which predates upstream's; the fork deleted upstream's `bin/fm-devin-config.sh`.
 - Class: carried, open convergence question under investigation; not decided.
 - Seam: fork-only `bin/fm-devin-lib.sh`, and the large fork diff in shared `tests/fm-devin-harness.test.sh`.
-- Guard: `tests/fm-devin-harness.test.sh`.
+- Guard: `tests/fm-devin-harness.test.sh`; fork-only `tests/fm-control-relaunch-bindings.test.sh` (relaunch away from Devin retires only firstmate-owned wiring).
 - Upstream: now ships its own Devin adapter (upstream #5380); converging onto it while keeping `devin-permission-layer` would shrink the largest shared test diff.
 
 ### agy-adapter-mechanics
@@ -165,7 +165,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - Intent: durable Treehouse task leases, fork PRs 8 and 17; the fork dropped upstream's slot-claim files.
 - Class: carried, open convergence question; not decided.
 - Seam: fork-only `bin/fm-worktree-claims-lib.sh`, plus its shared callers.
-- Guard: none.
+- Guard: fork-only `tests/fm-control-relaunch-bindings.test.sh` (a relaunch reuses its own claim and refuses another task's).
 - Upstream: has its own slot-owner claims, with further work in open PRs; which design is better is unresolved.
 
 ### claude-trust-escape
@@ -237,4 +237,4 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 - `codex-animation-port`: the fork's port of upstream #4297 (`tests/fixtures/codex-animation/`), which upstream replaced with #4532; kept for now at a known cost.
 - `ci-shard-timeout`: a small `.github/workflows/ci.yml` difference awaiting CI samples.
 - `muse-fixture-symlink`: fork PR 7, which upstream PR #3539 duplicates.
-- Test adaptations in upstream-owned suites, and fork-only cases moved out of them such as `tests/fm-control-relaunch-bindings.test.sh`, are not entries of their own; they ride under the entry whose behavior they pin, and the classification step flags any that pin nothing.
+- Test adaptations in upstream-owned suites are not entries of their own; they ride under the entry whose behavior they pin, and the classification step flags any that pin nothing.
