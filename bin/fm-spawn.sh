@@ -211,6 +211,14 @@
 #   all and relies on omp auto-discovering the home's tracked .omp/extensions/
 #   (verified, omp 18.1.11: a file named both ways loads twice, and discovery is
 #   cwd-only with no trust dialog).
+#   For agy, fm-spawn resolves the `agy` executable from PATH once and refuses
+#   when it is absent. A selected model is checked against `agy models`, run
+#   with stdin detached under a hard bound of FM_AGY_MODELS_TIMEOUT seconds
+#   (default 15; an empty, non-numeric, or zero value uses the default). A
+#   listed id, or an unlisted base id whose <base>-<level> is listed for the
+#   --effort level the launch will pass, launches; any other model refuses
+#   before an endpoint exists. A failed, empty, or timed-out listing proves
+#   nothing and launches the model unvalidated with a stderr notice.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -621,6 +629,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-agy-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -1901,6 +1911,63 @@ omp_model_validate() { # <omp-bin> <model>
   return 1
 }
 
+# The level agy receives as --effort for <effort> and <model>, or nothing. A
+# model id already carrying a level wins, and xhigh and max cap at high;
+# effort_flag_for_harness's agy arm records why.
+agy_effort_level() {  # <effort> <model>
+  case "$2" in
+  *-low | *-medium | *-high) return 0 ;;
+  esac
+  case "$1" in
+  low | medium) printf '%s\n' "$1" ;;
+  high | xhigh | max) printf '%s\n' high ;;
+  esac
+}
+
+# agy pre-launch model validation. `agy models` prints one model per line as
+# "<id>\t<label>" for the account's catalog only; ids are bare, never
+# provider-prefixed, and most carry an effort suffix (gemini-3.8-flash-high).
+# A requested model absent from a reachable listing is concrete unsupported
+# evidence and refuses the spawn before any pane exists. An unsuffixed base id
+# is not listed, but agy accepts it together with --effort whenever the
+# catalog lists <base>-<level> (verified on agy 1.2.11: `--model
+# gemini-3.8-flash --effort high` runs, while the same base without --effort,
+# or with a level the catalog does not list for it, is refused), so that alias
+# is checked against the level this launch will actually emit. The listing is
+# a remote fetch that needs network and a signed-in account, so the probe runs
+# under the shared hard bound (bin/fm-timeout-lib.sh) with stdin detached: a
+# stalled fetch or a sign-in prompt can never block the spawn. An unreachable
+# listing establishes nothing (harness-adapters model-and-effort.md) and
+# launches unvalidated with a notice.
+agy_model_validate() {  # <agy-bin> <model> <effort>
+  local bin=$1 model=$2 effort=$3 listing ids level levels rc=0 bound=${FM_AGY_MODELS_TIMEOUT:-15}
+  case "$bound" in ''|*[!0-9]*|0*) bound=15 ;; esac
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  listing=$(fm_run_timed "$bound" "$bin" models 2>/dev/null < /dev/null) || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$listing" ]; then
+    if [ "$rc" -eq 124 ]; then
+      echo "notice: 'agy models' did not answer within ${bound}s; launching with --model '$model' unvalidated" >&2
+    else
+      echo "notice: 'agy models' listing is unreachable (exit $rc); launching with --model '$model' unvalidated" >&2
+    fi
+    return 0
+  fi
+  ids=$(printf '%s\n' "$listing" | awk '{print $1}')
+  printf '%s\n' "$ids" | grep -qxF -- "$model" && return 0
+  level=$(agy_effort_level "$effort" "$model")
+  if [ -n "$level" ] && printf '%s\n' "$ids" | grep -qxF -- "$model-$level"; then
+    return 0
+  fi
+  levels=$(printf '%s\n' "$ids" | awk -v m="$model" \
+    '$0 == m "-low" || $0 == m "-medium" || $0 == m "-high" { sub(/.*-/, ""); print }' | paste -sd, -)
+  if [ -n "$levels" ]; then
+    echo "error: agy model '$model' is listed only as effort variants ($levels), and this launch would pass --effort '${level:-none}'; choose a listed level with --effort or a listed id" >&2
+    return 1
+  fi
+  echo "error: agy model '$model' is not listed by 'agy models'; choose a listed id or omit --model" >&2
+  return 1
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -2562,9 +2629,10 @@ effort_flag_for_harness() {
     esac
     ;;
   agy)
-    # agy 1.2.0 --effort accepts only low|medium|high and REFUSES anything
+    # agy 1.2.0 --effort accepted only low|medium|high and REFUSED anything
     # else ("invalid --effort \"xhigh\" (valid: low, medium, high)"), so the
-    # two levels above its ceiling are capped onto high rather than omitted:
+    # two levels above its ceiling are capped onto high rather than omitted
+    # (agy 1.2.11 also accepts max, which this mapping does not yet adopt):
     # references/common/model-and-effort.md asks an adapter that lacks xhigh
     # to cap at its highest supported non-max level instead of silently
     # dropping the intent. The requested level stays recorded in task metadata
@@ -2577,14 +2645,11 @@ effort_flag_for_harness() {
     # gemini-3.8-flash-high conflicts with --effort=low". The unsuffixed base
     # id is accepted and composes with --effort (`--model gemini-3.8-flash
     # --effort high` ran clean), so when the selected model already carries a
-    # level, the model id wins and no effort flag is emitted.
-    case "$model" in
-    *-low | *-medium | *-high) return 0 ;;
-    esac
-    case "$effort" in
-    low | medium) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-    high | xhigh | max) printf -- '--effort %s ' "$(shell_quote high)" ;;
-    esac
+    # level, the model id wins and no effort flag is emitted. agy_effort_level
+    # is the single owner of that mapping, shared with agy_model_validate.
+    local agy_level
+    agy_level=$(agy_effort_level "$effort" "$model")
+    [ -z "$agy_level" ] || printf -- '--effort %s ' "$(shell_quote "$agy_level")"
     ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
     # --config-override, but that flag is single-value (see
@@ -2605,7 +2670,11 @@ effort_flag_for_harness() {
 
 case "$LAUNCH" in
 *__AGYBIN__*)
-  AGY_BIN=$(resolve_agy_binary) || exit 1
+  AGY_BIN=$(resolve_pi_executable agy) || {
+    echo "error: agy executable not found on PATH; install the Antigravity CLI or select a different verified harness" >&2
+    exit 1
+  }
+  agy_model_validate "$AGY_BIN" "$MODEL" "$EFFORT" || exit 1
   ;;
 esac
 

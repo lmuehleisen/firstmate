@@ -412,19 +412,49 @@ Silence is required here: returning `{}` instead caused the same live worker's f
 The vendor's [PreToolUse response schema](https://antigravity.google/docs/hooks#pretooluse) requires a decision when returning JSON.
 `tests/fm-agy-harness.test.sh` covers silent scope and payload rejection, while allowed calls in a primary or marked linked secondmate retain `ask`.
 
-### Model ids and --effort conflict
+### Model ids, catalog, and --effort conflict
+
+Refreshed 2026-09-25 with agy 1.2.11 on macOS 25.6.0, headless in a scratch directory; `~/.gemini/antigravity-cli/settings.json` and `~/.gemini/settings.json` hashed identically before and after.
+The catalog `bin/fm-spawn.sh` checks against, with `Fetching available models...` on stderr:
 
 ```sh
-agy --model gemini-3.8-flash-high --effort low -p 'reply with exactly: OK'
-agy --model gemini-3.8-flash --effort high -p 'reply with exactly: OK'
-agy --effort xhigh -p 'reply with exactly: OK'
+agy models </dev/null
 ```
 
 ```text
-error: invalid model selection (--model "gemini-3.8-flash-high" --effort "low"): --model gemini-3.8-flash-high conflicts with --effort=low
-OK
-error: invalid model selection (--model "" --effort "xhigh"): invalid --effort "xhigh" (valid: low, medium, high)
+gemini-3.8-flash-high	Gemini 3.8 Flash (High)
+gemini-3.8-flash-medium	Gemini 3.8 Flash (Medium)
+gemini-3.8-flash-low	Gemini 3.8 Flash (Low)
+gemini-3.7-flash-high	Gemini 3.7 Flash (High)
+gemini-3.7-flash-medium	Gemini 3.7 Flash (Medium)
+gemini-3.7-flash-low	Gemini 3.7 Flash (Low)
+gemini-3.6-flash-high	Gemini 3.6 Flash (High)
+gemini-3.6-flash-medium	Gemini 3.6 Flash (Medium)
+gemini-3.6-flash-low	Gemini 3.6 Flash (Low)
+gemini-3.1-pro-high	Gemini 3.1 Pro (High)
+gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
+claude-sonnet-4-6	Claude Sonnet 4.6 (Thinking)
+claude-opus-4-6-thinking	Claude Opus 4.6 (Thinking)
+gpt-oss-120b-medium	GPT-OSS 120B (Medium)
 ```
+
+Each launch pair ran as `agy -p 'Reply with exactly the word OK and nothing else. Do not use any tools.' --add-dir <scratch> --print-timeout 100s <pair> </dev/null`:
+
+| Pair | Exit | Output |
+|---|---:|---|
+| `--model gemini-3.8-flash-low` | 0 | `OK` |
+| `--model gemini-3.8-flash-high --effort high` | 0 | `OK` |
+| `--model gemini-3.8-flash --effort low` | 0 | `OK` |
+| `--model gemini-3.8-flash --effort high` | 0 | `OK` |
+| `--model gemini-3.8-flash-high --effort low` | 1 | `error: invalid model selection (--model "gemini-3.8-flash-high" --effort "low"): --model gemini-3.8-flash-high conflicts with --effort=low` |
+| `--model gemini-3.8-flash` | 1 | `error: invalid model selection (--model "gemini-3.8-flash" --effort ""): --model gemini-3.8-flash requires --effort (available: low, medium, high)` |
+| `--model gemini-3.1-pro --effort medium` | 1 | `error: invalid model selection (--model "gemini-3.1-pro" --effort "medium"): gemini-3.1-pro has no "medium" effort (available: low, high)` |
+| `--model gemini-3.8-flash --effort xhigh` | 1 | `error: invalid model selection (--model "gemini-3.8-flash" --effort "xhigh"): invalid --effort "xhigh" (valid: low, medium, high, max)` |
+| `--model gemini-3.9-nonexistent` | 1 | ends with the catalog's labels, e.g. `GPT-OSS 120B (Medium)` |
+
+A listed id or a base whose `<base>-<level>` is listed for the passed level therefore launches, and every refused shape above is one `bin/fm-spawn.sh` refuses before an endpoint exists.
+agy 1.2.11 also accepts `--effort max`; the adapter still caps xhigh and max at high.
+`tests/fm-agy-harness.test.sh` pins the acceptance rule and the unreachable, hung, and invalid-bound listing behavior against a fake catalog of the same shape.
 
 ### End-to-end supervised task
 
