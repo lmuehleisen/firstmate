@@ -404,6 +404,7 @@ agy_endpoint_close_confirmed() {
   return 1
 }
 
+# shellcheck disable=SC2153 # STATE is bin/fm-spawn.sh's state directory global.
 agy_spawn_fail() { # <detail>
   if agy_endpoint_close_confirmed; then
     printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
@@ -423,6 +424,7 @@ agy_spawn_fail() { # <detail>
   # The agy process may still be running. Keep the task record, busy
   # generation, and hooks so teardown and supervision still own it: skip the
   # fresh-spawn rollback the EXIT trap would otherwise run.
+  # shellcheck disable=SC2034 # Output global, read by bin/fm-spawn.sh's EXIT trap.
   SPAWN_FRESH_COMMIT_PENDING=0
   printf '%s\n' "$(status_stamp_line "failed: $1; its endpoint $T could not be confirmed closed, so the task record was kept")" >>"$STATE/$ID.status"
   echo "error: $1, and closing endpoint $T could not be confirmed; the agy worker may still be running." >&2
