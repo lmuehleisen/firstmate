@@ -26,7 +26,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: GitHub operations use plain `gh`; README "No required `gh-axi`".
 - Class: intended.
-- Seam: `bin/fm-pr-merge.sh` and the bootstrap tool list (shared); upstream's optional, inert `gh-axi` fallback in `fm_pr_github_read_record` is deliberately kept.
+- Seam: `bin/fm-pr-merge.sh`, `bin/fm-bootstrap.sh`, and the `gh-axi` wording in `bin/fm-brief.sh`, `bin/fm-dod-lib.sh`, `bin/fm-project-mode.sh`, `bin/fm-teardown.sh`, and the bearings, bootstrap-diagnostics, project-management, and secondmate-provisioning skills (shared); upstream's optional, inert `gh-axi` fallback in `fm_pr_github_read_record` is deliberately kept.
 - Guard: `tests/fm-bootstrap.test.sh` `test_dropped_tools_are_not_required`.
 - Upstream: requires `gh-axi`.
 
@@ -34,7 +34,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: browser work uses harness browser tools or Playwright; README "No required `chrome-devtools-axi`".
 - Class: intended.
-- Seam: bootstrap tool list (shared).
+- Seam: `bin/fm-bootstrap.sh`, the browser line in `bin/fm-brief.sh`, and the bootstrap-diagnostics skill (shared).
 - Guard: `tests/fm-bootstrap.test.sh` `test_dropped_tools_are_not_required`.
 - Upstream: requires `chrome-devtools-axi`.
 
@@ -42,7 +42,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: decisions and reports use chat, and `/bearings lavish` is a read-only snapshot; README "No required `lavish-axi`".
 - Class: intended.
-- Seam: `bin/fm-bearings-board.sh`, `.agents/skills/bearings/assets/board-template.html`, and the scout-brief Lavish line (shared); upstream's `tests/fm-bearings-board-lavish-live-e2e.test.sh` is deleted.
+- Seam: `bin/fm-bearings-board.sh`, `.agents/skills/bearings/assets/board-template.html`, the scout-brief Lavish line in `bin/fm-brief.sh`, `bin/fm-bootstrap.sh`, `bin/fm-config-inherit-lib.sh`, `bin/fm-procevent-lavish.sh`, `bin/fm-test-run.sh`, and the Lavish wording in the bearings, bootstrap-diagnostics, captain-hold-lifecycle, and process-event-sources skills (shared); upstream's `tests/fm-bearings-board-lavish-live-e2e.test.sh` is deleted.
 - Guard: `tests/fm-bearings-board.test.sh` `test_build_does_not_invoke_lavish`; `tests/fm-brief.test.sh` `test_scout_and_secondmate_scaffold`; `tests/fm-bootstrap.test.sh` `test_dropped_tools_are_not_required`.
 - Upstream: requires `lavish-axi` and drives an interactive board.
 
@@ -50,7 +50,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: no required pipeline; `no-mistakes` delivery tokens ship as `direct-PR` unless `config/no-mistakes` opts in; README "No required `no-mistakes`".
 - Class: intended.
-- Seam: `bin/fm-dod-lib.sh`, `bin/fm-brief.sh`, `bin/fm-promote.sh`, `bin/fm-spawn.sh`, the `CONTRIBUTING.md` required-checks line, and the `VISION.md` Scope line (shared); upstream's `.github/workflows/no-mistakes-required.yml` is deleted.
+- Seam: `bin/fm-dod-lib.sh`, `bin/fm-brief.sh`, `bin/fm-promote.sh`, `bin/fm-spawn.sh`, `bin/fm-project-mode.sh` (the registry and default remap to `direct-PR`), `bin/fm-home-seed.sh` (no pipeline initialization), `bin/fm-bootstrap.sh`, `bin/fm-pr-check.sh`, `bin/fm-remote-home-provision.sh`, `bin/fm-teardown.sh`, `bin/fm-test-run.sh`, the no-mistakes wording in shared skills under `.agents/skills/` and their harness references, the `CONTRIBUTING.md` required-checks line, and the `VISION.md` Scope line (shared); upstream's `.github/workflows/no-mistakes-required.yml` is deleted.
 - Guard: `tests/fm-brief.test.sh` `test_no_mistakes_*`; `tests/fm-task-delivery.test.sh` `test_no_mistakes_*`; `tests/fm-bootstrap.test.sh` `test_no_mistakes_opt_in_reports_unavailable_cli`.
 - Upstream: requires the no-mistakes pipeline for every ship.
 
