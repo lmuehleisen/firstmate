@@ -171,9 +171,10 @@ sentinel_stop() {
 sentinel_alarm() {  # <summary>
   (
     had_exec=${FM_WEDGE_ALARM_EXEC+set}
+    exec_value=${FM_WEDGE_ALARM_EXEC-}
     # shellcheck source=bin/fm-supervise-daemon.sh
     . "$SENTINEL_DIR/fm-supervise-daemon.sh"
-    [ -n "$had_exec" ] || unset FM_WEDGE_ALARM_EXEC
+    if [ -n "$had_exec" ]; then FM_WEDGE_ALARM_EXEC=$exec_value; else unset FM_WEDGE_ALARM_EXEC; fi
     LOG=$SENTINEL_LOG
     wedge_alarm_notify "$1" "$MARKER"
   ) >/dev/null 2>&1
