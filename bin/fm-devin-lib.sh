@@ -224,11 +224,13 @@ remove_devin_managed_wiring() {  # <meta> <worktree>
 # The per-task policy file, plus the permission-policy escalation markers and
 # verdict cache (bin/fm-devin-permission-policy.sh), and the rate-limit retry
 # state, whose removal also ends a running sentinel
-# (bin/fm-devin-rate-limit-retry.sh). A retry state that cannot be removed does
-# not stop teardown, whose endpoint is already gone, so a surviving sentinel's
-# send finds no task.
+# (bin/fm-devin-rate-limit-retry.sh). A retry state that cannot be retired
+# stops teardown before the task record goes, as the agy retire does, so its
+# open blocker is never orphaned and a re-run retries it.
 fm_devin_teardown_remove_state() {  # <state-dir> <id>
   rm -f "$1/$2.devin-permission.json"
   rm -rf "$1/$2.devin-permission-pending" "$1/$2.devin-permission-cache"
-  "$SCRIPT_DIR/fm-devin-rate-limit-retry.sh" retire "$1" "$2" - </dev/null || true
+  "$SCRIPT_DIR/fm-devin-rate-limit-retry.sh" retire "$1" "$2" - </dev/null && return 0
+  echo "error: $2's Devin rate-limit retry state under $1 could not be retired (see $1/devin-rate-limit-log.jsonl); fix it and re-run teardown" >&2
+  return 1
 }

@@ -345,8 +345,28 @@ cmd_end() {
   set_turn "ended.$(date +%s)" || true
 }
 
+# Brings back retry state an earlier retire left under its retiring name when
+# it could neither resolve nor restore it; a name whose retire is still
+# running is left alone.
+recover_retiring() {
+  local r pid
+  for r in "$DIR".retiring.*; do
+    [ -d "$r" ] || continue
+    pid=${r##*.}
+    case "$pid" in '' | *[!0-9]*) continue ;; esac
+    ! kill -0 "$pid" 2>/dev/null || continue
+    if [ ! -e "$DIR" ]; then
+      mv -- "$r" "$DIR" 2>/dev/null || return 1
+    else
+      [ ! -e "$r/capped" ] || : >"$DIR/capped" 2>/dev/null || return 1
+      rm -rf -- "$r" 2>/dev/null || true
+    fi
+  done
+}
+
 cmd_retire() {
   local capped retiring="$DIR.retiring.$$"
+  recover_retiring || return 1
   [ -d "$DIR" ] || return 0
   task_lock || true
   capped=

@@ -17,7 +17,8 @@
 # its turn was retired, a task lock a dead holder left behind, a retire that
 # cannot move the state aside, a retire whose state dir is gone, a cap on a
 # task with no status file yet, a status line that cannot be written, and a
-# retire whose resolved line cannot be written.
+# retire whose resolved line cannot be written, and state an earlier retire left
+# under its retiring name.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -456,3 +457,15 @@ else
   assert_absent "$H/state/t1.devin-retry" "the next retire must remove the state"
   pass "a retire whose resolved line cannot be written keeps the blocker for the next retire"
 fi
+
+# 25. State an earlier retire left under its retiring name, by a process that
+# is gone, is brought back and resolved by the next retire.
+H=$(new_home retiring-left)
+: >"$H/state/t1.status"
+mkdir -p "$H/state/t1.devin-retry.retiring.999999"
+: >"$H/state/t1.devin-retry.retiring.999999/capped"
+"$RETRY" retire "$H/state" t1 - </dev/null || fail "a retire that recovers left-behind state must succeed"
+assert_equals 1 "$(grep -c '^resolved ' "$H/state/t1.status")" "left-behind capped state must be resolved"
+assert_absent "$H/state/t1.devin-retry.retiring.999999" "left-behind state must be removed"
+assert_absent "$H/state/t1.devin-retry" "the recovered state must be retired"
+pass "state left under a retiring name is recovered and resolved by the next retire"
