@@ -183,7 +183,7 @@ reset_seconds() {  # <error-line>
 # When the lock stays held by a live claimant, it prints <epoch> unstaggered
 # and leaves the slot and the lock alone.
 claim_slot() {  # <epoch>
-  local want=$1 last lock="$SLOT.lock" held acquired= _
+  local want=$1 last lock="$SLOT.lock" held acquired='' _
   for _ in $(seq 1 50); do
     mkdir "$lock" 2>/dev/null && {
       acquired=1
