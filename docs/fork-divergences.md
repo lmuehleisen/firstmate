@@ -106,8 +106,8 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: while the away-posture record exists, a merge proceeds only for a `yolo` task or one granted with `--grant` at `/afk`, and the away words never grant a merge; `AGENTS.md` section 7.
 - Class: intended.
-- Seam: the merge-grant list in `bin/fm-afk-contract.sh`, and the away-mode gate in `bin/fm-merge-authority-lib.sh` and `bin/fm-pr-merge.sh` (shared).
-- Guard: `tests/fm-afk-contract.test.sh` `test_merge_grants_come_only_from_the_grant_flag`; `tests/fm-pr-merge.test.sh` `test_away_grant_and_yolo_and_hold_for_return`.
+- Seam: the merge-grant list in `bin/fm-afk-contract.sh`, the away-mode gate in `bin/fm-merge-authority-lib.sh` and `bin/fm-pr-merge.sh`, the `yolo` and `away-grant` authority values in `bin/fm-merge-outcome-lib.sh` and `bin/fm-contributions.jq`, and the away merge rule in `bin/fm-branch-prompt.sh` (shared).
+- Guard: `tests/fm-afk-contract.test.sh` `test_merge_grants_come_only_from_the_grant_flag`; `tests/fm-pr-merge.test.sh` `test_away_grant_and_yolo_and_hold_for_return`; `tests/fm-contributions.test.sh`.
 - Upstream: keeps no per-task merge-grant list and lets the away session merge green work under its reading of the away words.
 
 ### remote-less-local-only
@@ -146,8 +146,8 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: Devin and agy are routine worker runtimes.
 - Class: intended.
-- Seam: fork-only `bin/fm-devin-lib.sh`, `bin/fm-agy-lib.sh`, `bin/fm-agy-hook.sh`, `.agents/hooks.json` (agy primary hooks), `docs/supervision-protocols/agy.md`, `tests/fm-tmux-submit-busy-agy.test.sh`, and the agy live guards `tests/fm-agy-*-live-e2e.test.sh` with `tests/agy-primary-live-probe.py`, plus the shared adapter hunks in `bin/fm-harness.sh`, `bin/fm-composer-lib.sh`, `bin/fm-busy-lib.sh`, `bin/fm-control-lib.sh`, `bin/fm-session-lock-lib.sh`, and `bin/fm-supervision-instructions.sh`.
-- Guard: `tests/fm-devin-harness.test.sh`; `tests/fm-agy-harness.test.sh`; `tests/fm-composer-agy.test.sh`.
+- Seam: fork-only `bin/fm-devin-lib.sh`, `bin/fm-agy-lib.sh`, `bin/fm-agy-hook.sh`, `.agents/hooks.json` (agy primary hooks), `docs/supervision-protocols/agy.md`, `tests/fm-tmux-submit-busy-agy.test.sh`, and the agy live guards `tests/fm-agy-*-live-e2e.test.sh` with `tests/agy-primary-live-probe.py`, plus the shared adapter hunks in `bin/fm-harness.sh`, `bin/fm-dispatch-resolve.sh` (the agy and Devin effort table), `bin/fm-composer-lib.sh`, `bin/fm-busy-lib.sh`, `bin/fm-control-lib.sh`, `bin/fm-session-lock-lib.sh`, and `bin/fm-supervision-instructions.sh`.
+- Guard: `tests/fm-devin-harness.test.sh`; `tests/fm-agy-harness.test.sh`; `tests/fm-composer-agy.test.sh`; `tests/fm-dispatch-resolve.test.sh`.
 - Upstream: ships its own Devin and agy adapters; how much of the fork's mechanics to keep is the open question in the carried entries below.
 
 ## Carried
@@ -228,7 +228,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: Claude StopFailure recovery, auto-arm timeout, away-digest integrity, and a dropped Enter on spawn; fork PRs 40, 41, 43, and 44.
 - Class: carried.
-- Seam: `bin/fm-claude-stop-autoarm.sh`, `bin/fm-wake-lib.sh`, `bin/fm-watch-arm.sh`, `bin/fm-supervise-daemon.sh`, `bin/fm-afk-launch.sh`, `bin/fm-afk-start.sh`, `bin/fm-tmux-lib.sh`, `bin/backends/tmux.sh`, `bin/fm-spawn.sh`, and `bin/fm-test-run.sh`, limited to the hunks those PRs added (shared), and the fork-only live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
+- Seam: `bin/fm-claude-stop-autoarm.sh`, `bin/fm-wake-lib.sh`, `bin/fm-watch-arm.sh`, `bin/fm-supervise-daemon.sh`, `bin/fm-afk-launch.sh`, `bin/fm-afk-start.sh`, `bin/fm-tmux-lib.sh`, `bin/backends/tmux.sh`, `bin/fm-spawn.sh`, `bin/fm-test-run.sh`, and the `StopFailure` hook registration in `.claude/settings.json`, limited to the hunks those PRs added (shared), and the fork-only live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
 - Guard: `tests/fm-claude-stop-autoarm.test.sh`; `tests/fm-turnend-guard.test.sh`; `tests/fm-watch-arm.test.sh`; `tests/fm-daemon.test.sh`; `tests/fm-afk-launch.test.sh`; `tests/fm-backend-tmux-smoke.test.sh`; `tests/fm-tmux-submit-busy.test.sh`; `tests/fm-control-relaunch.test.sh`; the opt-in live guards `tests/fm-claude-stopfailure-live-e2e.test.sh` and `tests/fm-afk-claude-long-digest-live-e2e.test.sh`.
 - Upstream: equivalence unknown; check each run.
 
@@ -236,7 +236,7 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 - Intent: port of upstream #5149; fork PR 42.
 - Class: carried.
-- Seam: `bin/fm-operational-input.sh` and its Calm consumers `.claude/mods/firstmate-calm/lib/fm-operational-input.ts` and `.pi/extensions/lib/fm-calm-operational-user-layout.ts` (shared).
+- Seam: `bin/fm-operational-input.sh` and its Calm consumers `.claude/mods/firstmate-calm/lib/fm-operational-input.ts` and `.pi/extensions/lib/fm-calm-operational-user-layout.ts`, with its cases in `.claude/mods/firstmate-calm/tests/calm.test.ts` (shared).
 - Guard: `tests/fm-operational-input.test.sh`; `tests/fm-calm-claude-mod.test.sh`; `tests/fm-calm-pi-extension.test.sh`.
 - Upstream: merged; the remaining fork diff is small, so verify it against upstream's version and drop this entry once it is zero.
 
