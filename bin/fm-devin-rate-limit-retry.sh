@@ -71,7 +71,10 @@
 #   FM_DEVIN_RETRY_JITTER   upper bound of the random extra delay (10)
 #   FM_DEVIN_RETRY_SPACING  minimum gap between two retries in one home (30)
 #   FM_DEVIN_RETRY_POLL     log and token poll interval (5)
-#   FM_DEVIN_RETRY_LIFETIME longest a sentinel follows one turn (21600)
+#   FM_DEVIN_RETRY_LIFETIME longest a sentinel watches the log for the error
+#                           (21600); a retry it then schedules still waits out
+#                           the stated reset and spacing, however long, unless
+#                           the turn changes first
 #   FM_DEVIN_RETRY_LOG_DIR  Devin's log directory
 #                           (~/.local/share/devin/cli/logs)
 set -u
