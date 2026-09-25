@@ -291,6 +291,11 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# The fork-only Devin and agy worker retires.
+# shellcheck source=bin/fm-devin-lib.sh
+. "$SCRIPT_DIR/fm-devin-lib.sh"
+# shellcheck source=bin/fm-agy-lib.sh
+. "$SCRIPT_DIR/fm-agy-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -1329,22 +1334,6 @@ remove_kimi_turnend_auth() {
   path=$(fm_control_harness_turnend_auth_path kimi "$token") || return 1
   [ -n "$path" ] || return 0
   rm -f -- "$path"
-}
-
-# Retire fm-spawn's two managed .devin wiring files - config.local.json and
-# rules/firstmate-attribution.md - only where they are provably firstmate's;
-# bin/fm-control-lib.sh's fm_control_devin_wiring_owned owns that proof (a path
-# git tracks is the project's own and never goes, whatever the recorded
-# harness). The directories the files emptied still leave only while empty.
-remove_devin_managed_wiring() {  # <meta> <worktree>
-  local meta=$1 wt=$2 harness rel
-  harness=$(meta_value "$meta" harness)
-  for rel in .devin/config.local.json .devin/rules/firstmate-attribution.md; do
-    if fm_control_devin_wiring_owned "$harness" "$wt" "$rel"; then
-      rm -f -- "$wt/$rel"
-    fi
-  done
-  rmdir "$wt/.devin/rules" "$wt/.devin" 2>/dev/null || true
 }
 
 retire_busy_state() {
@@ -3714,14 +3703,7 @@ if [ -n "$LAUNCH_HOME_TOKEN" ]; then
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-if [ -e "$STATE/$ID.agy-permission.json" ] || [ -d "$STATE/$ID.agy-permission-pending" ]; then
-  # The bypass adapter's retire closes every pending escalation as not-run
-  # while the policy file still names the status file.
-  "$SCRIPT_DIR/fm-agy-permission-policy.sh" retire "$STATE/$ID.agy-permission.json" </dev/null || exit 1
-fi
-if [ -e "$STATE/$ID.agy-hooks" ] || [ -L "$STATE/$ID.agy-hooks" ]; then
-  "$SCRIPT_DIR/fm-agy-hook.sh" retire-worker "$STATE" "$ID" || exit 1
-fi
+fm_agy_teardown_retire "$STATE" "$ID" || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
@@ -3734,12 +3716,9 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" "$STATE/$ID.treehouse-lease"
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/$ID.devin-permission.json" "$STATE/$ID.agy-permission.json" \
   "$STATE/.$ID.branch-outcome-index"
-# Devin permission-policy escalation markers and per-task verdict cache
-# (bin/fm-devin-permission-policy.sh); the same for the agy bypass layer.
-rm -rf "$STATE/$ID.devin-permission-pending" "$STATE/$ID.devin-permission-cache" \
-  "$STATE/$ID.agy-permission-pending" "$STATE/$ID.agy-permission-cache"
+fm_devin_teardown_remove_state "$STATE" "$ID"
+fm_agy_teardown_remove_state "$STATE" "$ID"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
