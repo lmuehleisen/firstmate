@@ -2,7 +2,7 @@
 
 Google's Antigravity CLI, verified end to end on 2026-09-10 with agy 1.2.0 on macOS.
 Verified for interactive primary, secondmate, crewmate, and scout work.
-`../../../../../bin/fm-spawn.sh` owns the concrete launch and grant mechanics.
+`../../../../../bin/fm-spawn.sh` owns the concrete launch and grant mechanics, through the fork-only `../../../../../bin/fm-agy-lib.sh` it sources.
 agy self-updates aggressively and without asking - it moved 1.1.25 -> 1.1.28 -> 1.2.0 during the session that verified it - so treat every version-scoped fact here as refreshable rather than settled, and re-run the live guard after an upgrade.
 
 ## Operating facts

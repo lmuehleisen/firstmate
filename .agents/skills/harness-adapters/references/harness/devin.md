@@ -2,7 +2,7 @@
 
 Cognition's Devin CLI, verified on 2026-09-14 with devin-cli 3000.10.21 on macOS.
 Verified for crewmate and scout work only, never a secondmate or primary.
-`../../../../../bin/fm-spawn.sh` owns the concrete launch and hook mechanics.
+`../../../../../bin/fm-spawn.sh` owns the concrete launch and hook mechanics, through the fork-only `../../../../../bin/fm-devin-lib.sh` it sources.
 
 ## Operating facts
 
