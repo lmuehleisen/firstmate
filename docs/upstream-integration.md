@@ -35,8 +35,9 @@ This page is the maintainer checklist for one integration run; the fork's invari
    Report each file no entry claims in the pull request body as an incidental candidate and propose its realignment.
    For each `carried` entry, check whether this upstream range ships an equivalent, and if so propose dropping the fork copy.
    Also look for fork-tuned values inside upstream-owned files that an upstream test now pins.
-6. Run every guard the ledger names on the merged tree, before the broader suite; `grep -o 'tests/[a-z0-9-]*\.test\.sh' docs/fork-divergences.md | sort -u` lists them.
-   A failing guard means an upstream change reached an intended divergence: adapt the upstream change, never the guard, and name the entry in the pull request body.
+6. Run every guard the ledger names on the merged tree, before the broader suite; `grep '^- Guard:' docs/fork-divergences.md | grep -o 'tests/[a-z0-9-]*\.test\.sh' | sort -u` lists them.
+   A failing guard on an `intended` entry means an upstream change reached that divergence: adapt the upstream change, never the guard, and name the entry in the pull request body.
+   A failing guard on a `carried` entry may mean upstream now ships an equivalent: evaluate dropping the fork copy and its entry before defending it, and name the outcome in the pull request body.
    List every entry with `Guard: none` in the pull request body as unprotected.
 7. Run `bin/fm-test-run.sh --changed` and `bin/fm-test-run.sh --check-coverage`, then each portable lane from `bin/fm-test-run.sh --list-lanes`, and `bin/fm-lint.sh`.
    When `--changed` refuses an unmapped path, run every suite the conflicts, the scan's findings, and the fork's divergent areas touch instead of skipping to the next step.
