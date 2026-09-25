@@ -82,7 +82,7 @@ Devin CLI reads configuration and hooks from three layers:
 Under captain decision D2, Firstmate writes its per-task configuration and lifecycle hooks to `$WT/.devin/config.local.json`.
 Writing to `.devin/config.local.json` avoids overwriting a project's committed `.devin/hooks.v1.json` and avoids using `--config`, which would override and drop the captain's user config.
 `bin/fm-spawn.sh` refuses to launch if `.devin/config.local.json` or `.devin/rules/firstmate-attribution.md` already exists or is tracked by git.
-Both files are added to `.git/info/exclude` so git status remains clean, and they are removed during teardown together with the permission policy file and its pending-escalation markers under `state/`.
+Both files are added to `.git/info/exclude` so git status remains clean, and they are removed during teardown together with the permission policy file, its pending-escalation markers, and the rate-limit retry state under `state/`.
 The configuration pins `"attribution": false`; because the vendor documents that key as user-scope only, Firstmate also installs `.devin/rules/firstmate-attribution.md`, an always-on rule instructing the worker never to add `Generated with Devin`, `Co-Authored-By: Devin`, or other tool attribution to commit messages or pull request bodies.
 The allowed and denied `Exec(...)` sets are owned by Approvals and permissions above.
 The installed hooks in `$WT/.devin/config.local.json` cover:
@@ -90,10 +90,13 @@ The installed hooks in `$WT/.devin/config.local.json` cover:
 - `Stop`: fires when the turn ends, touching `$TURNEND` and applying `idle` with event `stop`.
 - `SessionEnd`: fires when the session terminates, applying `idle` with event `session-end`.
 - The permission policy hooks owned by Approvals and permissions above.
+- The rate-limit retry hooks: `UserPromptSubmit` arms a per-turn sentinel on Devin's session log, and `Stop` and `SessionEnd` retire it; `../../../../../bin/fm-devin-rate-limit-retry.sh`'s header owns the retry, its cap, and its stagger.
 
 `SessionStart` is intentionally omitted because it fires on `resume` with an empty composer, which would strand a false `busy` state.
 Each busy-state hook command appends `>/dev/null 2>&1 || true` so a refused event cannot break Devin CLI's lifecycle.
 Double-Escape interruption emits no `Stop` hook, so the control plane invalidates the busy state to `unknown` after delivering it; a manual keyboard cancellation outside the control plane leaves the last busy record until the next normal completion or session exit.
+A turn that ends on an error - the model rate limit (`Reached free model rate limit ... Your limit will reset in <N> <unit>`) or a lost connection - fires no hook at all: Devin renders `Something went wrong ... Send a message to retry`, idles on an empty composer, and leaves the last busy record in place.
+The only structural record of that error is the `devin acp` process's session log, `~/.local/share/devin/cli/logs/devin_<date>_<pid>.log`, whose failed turn ends with one `Sending error response ... method=session/prompt error=` line carrying the message and reset.
 
 ## Claude hook import
 
@@ -158,3 +161,8 @@ The environment was authenticated with a Devin subscription (`Logged in (via Dev
    In a live worker session, sending `/exit` through `fm-control.sh exit` opened Devin's `/revert <step>` fuzzy slash-command search menu instead of exiting, and the control path's verified exit then timed out waiting for the process to end.
    Devin's own docs (`essential-commands.mdx`, `reference/commands.mdx`) document plain `exit` (no `/` prefix) as an equivalent, unambiguous alias that does not open the slash-command search.
    Firstmate's `fm_control_exit_command` now returns plain `exit` for devin (`bin/fm-control-lib.sh`); every other verified harness keeps its documented exit command unchanged.
+
+7. Turn-ending errors fire no hook (live-observed 2026-09-25, devin 3000.11.3):
+   A probe session whose `.devin/config.local.json` recorded every `UserPromptSubmit`, `Stop`, and `SessionEnd` payload saw a normal turn fire `UserPromptSubmit` then `Stop`, while a turn whose network was then cut fired `UserPromptSubmit` only.
+   That turn ended on `Something went wrong` with the session log line `Sending error response ... method=session/prompt error=Error { ... message: "Connection error, send a message to continue retrying" ... }`, and no hook payload followed.
+   The 2026-09-24 fleet session logs show the rate-limit stop on the same error response path, 13 times across 6 worker sessions, each reset stated in seconds or minutes (`Your limit will reset in 40 seconds.`, `... in 3 minutes.`).

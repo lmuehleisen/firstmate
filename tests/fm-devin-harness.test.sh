@@ -521,6 +521,28 @@ EOF
     || fail "PostToolUse must close the escalation"
   sh -c "$cmd_policy_stop" </dev/null || fail "generated policy Stop hook failed"
 
+  # Rate-limit retry hooks: UserPromptSubmit arms a sentinel on the session
+  # log of the process running the hook, and Stop retires it.
+  local cmd_retry_arm cmd_retry_stop retry_logs="$case_dir/devin-logs"
+  cmd_retry_arm=$(jq -r '.hooks.UserPromptSubmit[0].hooks[2].command' "$hook_file")
+  cmd_retry_stop=$(jq -r '.hooks.Stop[0].hooks[2].command' "$hook_file")
+  case "$(jq -r '.hooks.SessionEnd[0].hooks[2].command' "$hook_file")" in
+    *fm-devin-rate-limit-retry.sh*' end '*) ;;
+    *) fail "SessionEnd must retire the rate-limit retry sentinel" ;;
+  esac
+  mkdir -p "$retry_logs"
+  printf '{"session_id":"s1"}' | FM_DEVIN_RETRY_LOG_DIR="$retry_logs" FM_DEVIN_RETRY_POLL=1 \
+    bash -c ': >"$1/devin_test_$$.log"; exec sh -c "$2"' _ "$retry_logs" "$cmd_retry_arm" \
+    || fail "generated rate-limit arm hook failed"
+  [ -s "$home/state/$id.devin-retry/turn" ] || fail "the arm hook must open a retry turn for the task"
+  ! grep -q '"event":"unarmed"' "$home/state/devin-rate-limit-log.jsonl" 2>/dev/null \
+    || fail "the arm hook must find the session log of the process running it"
+  printf '{}' | sh -c "$cmd_retry_stop" || fail "generated rate-limit stop hook failed"
+  case "$(cat "$home/state/$id.devin-retry/turn")" in
+    ended.*) ;;
+    *) fail "the Stop hook must retire the retry turn" ;;
+  esac
+
   # Verify git exclude
   exclude_file=$(git -C "$wt" rev-parse --git-path info/exclude)
   grep -qxF '.devin/config.local.json' "$exclude_file" \
