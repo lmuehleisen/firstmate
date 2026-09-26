@@ -66,12 +66,14 @@ make_case() {  # <name> -> case_dir|proj|wt|fakebin
 
 # A backend CLI stub that fails every call, printing <body> when given.
 fake_cli() {  # <fakebin> <tool> [body]
-  {
-    printf '#!/usr/bin/env bash\n'
-    printf 'printf "%%s\\n" "$*" >> "$(dirname "$0")/%s-calls"\n' "$2"
-    [ -z "${3:-}" ] || printf 'printf "%%s\\n" %q\n' "$3"
-    printf 'exit 1\n'
-  } > "$1/$2"
+  printf '%s' "${3:-}" > "$1/$2-body"
+  cat > "$1/$2" <<'SH'
+#!/usr/bin/env bash
+tool=$(basename "$0")
+printf '%s\n' "$*" >> "$(dirname "$0")/$tool-calls"
+[ ! -s "$(dirname "$0")/$tool-body" ] || { cat "$(dirname "$0")/$tool-body"; printf '\n'; }
+exit 1
+SH
   chmod +x "$1/$2"
 }
 
