@@ -8,7 +8,8 @@
 #
 # Composer shapes and verdicts are owned by bin/fm-composer-lib.sh.
 # This file owns only tmux's styled capture, cursor and Pi identity primitives,
-# delivery busy read, agent-submit conversions, and shell-command submission.
+# delivery busy read, agent-submit conversions, and owned-input recovery for
+# shell commands and agent composers.
 # Styled captures remain internal; fm-peek and every human-facing capture stay
 # plain.
 #
@@ -317,36 +318,84 @@ fm_tmux_shell_line_pending() { # <target> <text>
   [ -n "$text" ] && [[ "$line" == *"$text" ]]
 }
 
-# <target> <already-typed-text> <postcondition-function> [postcondition-args...]
+# The agent-composer counterpart of fm_tmux_shell_line_pending, with the same
+# return codes. Owned means the cursor-anchored verdict proves an agent
+# composer holding input and that input is exactly <text>
+# (fm_composer_holds_owned_text); `residue` also accepts what a partial Ctrl+U
+# cleanup leaves of it. An empty composer holds nothing of ours; an unknown
+# one is unreadable, because the strict posture cannot place the cursor in a
+# composer there, and a key sent to an unplaced cursor could answer a dialog.
+fm_tmux_composer_owned_input() { # <target> <text> [residue]
+  local target=$1 text=$2 mode=${3:-} content
+  case "$(fm_tmux_composer_state "$target")" in
+    empty) return 1 ;;
+    pending|pending-unproven) ;;
+    *) return 2 ;;
+  esac
+  content=$(fm_composer_extract_selected_content \
+    "$(printf 'styled=1\ncursor=0\nidentity=0\nrows=0')" \
+    "$(fm_tmux_composer_capture "$target")") || return 2
+  fm_composer_holds_owned_text "$text" "$content" "$mode"
+}
+
+# <target> <text> <owned-fn> <clear-presses>
+# Clear input the caller has just proven it owns with at most <clear-presses>
+# Ctrl+U presses, stopping as soon as <owned-fn> finds nothing of it left.
+# Returns 0 when the cleanup is confirmed and 1 when it is not.
+fm_tmux_clear_owned_input() {
+  local target=$1 text=$2 owned=$3 presses=$4 press=0 pending_status=0
+  while [ "$pending_status" = 0 ] && [ "$press" -lt "$presses" ]; do
+    tmux send-keys -t "$target" C-u 2>/dev/null || true
+    press=$((press + 1))
+    sleep 0.3
+    pending_status=0
+    "$owned" "$target" "$text" residue || pending_status=$?
+  done
+  [ "$pending_status" = 1 ]
+}
+
+# <target> <already-typed-text> <owned-fn> <clear-presses> <label>
+#   <postcondition-function> [postcondition-args...]
+# The one recovery owner for input a sender typed and must submit or remove.
+# <owned-fn> <target> <text> [residue] answers ownership with
+# fm_tmux_shell_line_pending's return codes.
 # At most three Enter attempts over 20 half-second polls. The first Enter is
-# unconditional; subsequent keys require exact ownership above. A failed send
-# can still have executed, so always inspect the postcondition. On exhaustion,
-# clear only proven owned input and report whether cleanup could be confirmed.
-# Callers must stop on failure, never append another command to uncertain input.
-fm_tmux_shell_submit_enter() {
-  local target=$1 text=$2 verify=$3 poll attempt=1 pending_status
-  shift 3
+# unconditional, so a caller resuming earlier input proves ownership first;
+# subsequent keys require exact ownership. A failed send can still have
+# executed, so always inspect the postcondition. On exhaustion, clear only
+# proven owned input (fm_tmux_clear_owned_input) and report whether cleanup
+# could be confirmed. Returns 0 when the postcondition held, 1 when owned input
+# was cleared, 2 when owned cleanup could not be confirmed, and 3 when
+# ownership was unproven so no cleanup keys were sent.
+# Callers must stop on failure, never append more input to uncertain input.
+fm_tmux_owned_submit_enter() {
+  local target=$1 text=$2 owned=$3 presses=$4 label=$5 verify=$6 poll attempt=1
+  shift 6
   tmux send-keys -t "$target" Enter 2>/dev/null || true
   for ((poll=0; poll<20; poll++)); do
     sleep 0.5
     "$verify" "$@" && return 0
-    if [ "$attempt" -lt 3 ] && fm_tmux_shell_line_pending "$target" "$text"; then
+    if [ "$attempt" -lt 3 ] && "$owned" "$target" "$text"; then
       tmux send-keys -t "$target" Enter 2>/dev/null || true
       attempt=$((attempt + 1))
     fi
   done
-  if fm_tmux_shell_line_pending "$target" "$text"; then
-    tmux send-keys -t "$target" C-u 2>/dev/null || true
-    sleep 0.3
-    pending_status=0
-    fm_tmux_shell_line_pending "$target" "$text" || pending_status=$?
-    if [ "$pending_status" = 1 ]; then
-      echo "error: shell command did not run in $target after $attempt Enter attempts; cleared owned input" >&2
-    else
-      echo "error: shell command did not run in $target after $attempt Enter attempts; owned input cleanup could not be confirmed" >&2
-    fi
-  else
-    echo "error: shell command execution unconfirmed in $target; input ownership is unproven, so no cleanup keys were sent" >&2
+  if ! "$owned" "$target" "$text"; then
+    echo "error: $label execution unconfirmed in $target; input ownership is unproven, so no cleanup keys were sent" >&2
+    return 3
   fi
-  return 1
+  if fm_tmux_clear_owned_input "$target" "$text" "$owned" "$presses"; then
+    echo "error: $label did not run in $target after $attempt Enter attempts; cleared owned input" >&2
+    return 1
+  fi
+  echo "error: $label did not run in $target after $attempt Enter attempts; owned input cleanup could not be confirmed" >&2
+  return 2
+}
+
+# <target> <already-typed-text> <postcondition-function> [postcondition-args...]
+# A shell line clears with one Ctrl+U, so a second press is never needed.
+fm_tmux_shell_submit_enter() {
+  local target=$1 text=$2
+  shift 2
+  fm_tmux_owned_submit_enter "$target" "$text" fm_tmux_shell_line_pending 1 'shell command' "$@"
 }

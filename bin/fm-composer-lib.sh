@@ -243,6 +243,34 @@ fm_composer_normalize_trim_var() {  # <varname>
   printf -v "$__fmnt_name" '%s' "$__fmnt_text"
 }
 
+# fm_composer_owned_text_key_var: the ONE key that compares text a sender typed
+# with the text a composer shows back. Every whitespace character is removed,
+# because a composer wraps typed text across rows, and so is U+2063, the
+# operational mark that Claude Code removes from its composer and that carries
+# no instruction text. In place through the named variable.
+fm_composer_owned_text_key_var() {  # <varname>
+  local __fmok_name=$1 __fmok_text
+  fm_composer_normalize_spaces_var "$__fmok_name"
+  __fmok_text=${!__fmok_name}
+  __fmok_text=${__fmok_text//[$' \t\r\n\v\f']/}
+  __fmok_text=${__fmok_text//$'\xE2\x81\xA3'/}
+  printf -v "$__fmok_name" '%s' "$__fmok_text"
+}
+
+# fm_composer_holds_owned_text: 0 when composer <content> is exactly the
+# sender's <text> under the key above. With `residue`, a non-empty leading part
+# of <text> also matches: Ctrl+U deletes one wrapped row per press from the end
+# of a Claude draft, so a cleanup in progress leaves a prefix of the typed text.
+# Anything else, including added text, is not the sender's to touch.
+fm_composer_holds_owned_text() {  # <text> <content> [residue]
+  local text=$1 content=$2
+  fm_composer_owned_text_key_var text
+  fm_composer_owned_text_key_var content
+  [ -n "$text" ] && [ -n "$content" ] || return 1
+  [ "$content" = "$text" ] && return 0
+  [ "${3:-}" = residue ] && [ "${text#"$content"}" != "$text" ]
+}
+
 # fm_composer_strip_ghost [codex-animation]: the ONE fleet-wide ANSI-aware
 # extractor of "real typed content" from a styled capture. With no argument it
 # reads styled rows on stdin (from `tmux capture-pane -e`, `herdr pane read
