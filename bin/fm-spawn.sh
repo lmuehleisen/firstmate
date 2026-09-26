@@ -167,10 +167,12 @@
 #   pre-launch abort, which the EXIT trap rolls back: it closes the endpoint
 #   this spawn created, retires the busy-state and state-side harness wiring it
 #   armed, and returns the slot it leased with `treehouse return --force` and
-#   removes the receipt - but only once the endpoint is confirmed gone, the slot
-#   holds nothing beyond the worktree wiring this spawn writes, and the project
-#   lock is held. Nothing of a worker exists in the slot yet, so the reset
-#   discards no work. An unconfirmed close, any other content in the slot, an
+#   removes the receipt - but only once the endpoint is confirmed gone, any
+#   provisional task record is rolled back, the slot holds nothing beyond the
+#   worktree wiring this spawn wrote after leasing it, and the project lock is
+#   held. Nothing of a worker exists in the slot yet, so the reset discards no
+#   work. An unconfirmed close, a failed record rollback, any other content in
+#   the slot (including a wiring path already present when it was leased), an
 #   unavailable lock, or a failed return retains the lease and receipt for
 #   inspection. This script never edits Treehouse's own state directly.
 #   The exact returned path is checked for isolation and competing local-home
@@ -1245,6 +1247,9 @@ SPAWN_TREEHOUSE_RECEIPT=
 SPAWN_PRELAUNCH_ENDPOINT=0
 SPAWN_PRELAUNCH_LEASE=0
 SPAWN_PRELAUNCH_WIRING=0
+SPAWN_PRELAUNCH_ENDPOINT_GONE=1
+SPAWN_SLOT_LEASED_STATUS=
+SPAWN_SLOT_LEASED_STATUS_OK=0
 SPAWN_SLOT_UNEXPECTED=
 HERDR_RECLAIM_WT=
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -1345,20 +1350,31 @@ spawn_prelaunch_retire_wiring() {
   fi
 }
 
+# Every path the slot reports as changed, untracked, or ignored.
+spawn_slot_status() {
+  git -C "$WT" status --porcelain=v1 --ignored=matching --untracked-files=all 2>/dev/null
+}
+
 # The return resets the slot, so it qualifies only when it holds nothing
-# beyond the worktree wiring this spawn writes: an untracked leftover, an
-# ignored file, or a modification an earlier tenant left is kept.
+# beyond the worktree wiring this spawn wrote after leasing it: an untracked
+# leftover, an ignored file, or a modification an earlier tenant left is kept,
+# even at a wiring path, because the slot's state at lease time shows it.
 spawn_slot_holds_only_spawn_wiring() {
   local harness status_out entry allowed
+  [ "$SPAWN_SLOT_LEASED_STATUS_OK" = 1 ] || {
+    SPAWN_SLOT_UNEXPECTED='its state when leased is unknown'
+    return 1
+  }
   harness=$(fm_control_harness_family "$HARNESS") || harness=
   allowed=$(fm_control_harness_wiring_paths "$harness" "$WT" "$STATE_REAL" "$ID" 2>/dev/null || true)
-  status_out=$(git -C "$WT" status --porcelain=v1 --ignored=matching --untracked-files=all 2>/dev/null) || return 1
+  status_out=$(spawn_slot_status) || return 1
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
-    printf '%s\n' "$allowed" | grep -qxF -- "$WT/${entry:3}" || {
+    if printf '%s\n' "$SPAWN_SLOT_LEASED_STATUS" | cut -c4- | grep -qxF -- "${entry:3}" ||
+      ! printf '%s\n' "$allowed" | grep -qxF -- "$WT/${entry:3}"; then
       SPAWN_SLOT_UNEXPECTED=${entry:3}
       return 1
-    }
+    fi
   done <<<"$status_out"
   return 0
 }
@@ -1367,14 +1383,13 @@ spawn_slot_holds_only_spawn_wiring() {
 # The endpoint closes first: its pane shell sits in the leased slot, so the
 # slot is returned only once that shell is proven gone.
 spawn_prelaunch_abort_cleanup() {
-  local endpoint_gone=1 lock_taken=0 out
   if [ "$SPAWN_PRELAUNCH_ENDPOINT" = 1 ]; then
     SPAWN_PRELAUNCH_ENDPOINT=0
     if [ -n "${T:-}" ] && ! spawn_endpoint_close_confirmed; then
-      endpoint_gone=0
+      SPAWN_PRELAUNCH_ENDPOINT_GONE=0
       echo "warning: aborted spawn of $ID could not confirm its endpoint ${T:-} closed; close it by hand" >&2
     elif [ -n "${T:-}" ] && ! spawn_endpoint_proven_absent; then
-      endpoint_gone=0
+      SPAWN_PRELAUNCH_ENDPOINT_GONE=0
       echo "warning: aborted spawn of $ID closed its endpoint ${T:-}, but $BACKEND cannot prove the pane is gone; check it by hand" >&2
     fi
   fi
@@ -1382,9 +1397,20 @@ spawn_prelaunch_abort_cleanup() {
     SPAWN_PRELAUNCH_WIRING=0
     spawn_prelaunch_retire_wiring
   fi
+}
+
+# Return the slot an aborted fresh spawn leased. This runs after the
+# provisional task record's rollback, so a record that could not be removed
+# never names a slot Treehouse may hand to another task.
+spawn_prelaunch_return_lease() {
+  local lock_taken=0 out
   if [ "$SPAWN_PRELAUNCH_LEASE" = 1 ]; then
     SPAWN_PRELAUNCH_LEASE=0
-    if [ "$endpoint_gone" != 1 ]; then
+    if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+      echo "warning: lease on $WT retained with receipt $SPAWN_TREEHOUSE_RECEIPT because the task record $STATE/$ID.meta could not be rolled back" >&2
+      return 0
+    fi
+    if [ "$SPAWN_PRELAUNCH_ENDPOINT_GONE" != 1 ]; then
       echo "warning: lease on $WT retained with receipt $SPAWN_TREEHOUSE_RECEIPT because its endpoint may still be open" >&2
       return 0
     fi
@@ -1522,6 +1548,7 @@ spawn_abort_cleanup() {
       status=1
     fi
   fi
+  spawn_prelaunch_return_lease
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
@@ -4424,8 +4451,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "REFUSED: leased slot $WT is already claimed by ${FM_WORKTREE_CLAIMS[*]}; allocation violated the claim invariant. Lease retained, no reset or return attempted; inspect $SPAWN_TREEHOUSE_RECEIPT." >&2
     exit 1
   fi
-  # The slot is now proven this spawn's own, isolated, and unclaimed.
-  [ -z "$SPAWN_TREEHOUSE_RECEIPT" ] || SPAWN_PRELAUNCH_LEASE=1
+  # The slot is now proven this spawn's own, isolated, and unclaimed. Its
+  # state now is what an abort must find again, plus only its own wiring.
+  if [ -n "$SPAWN_TREEHOUSE_RECEIPT" ]; then
+    SPAWN_SLOT_LEASED_STATUS=$(spawn_slot_status) && SPAWN_SLOT_LEASED_STATUS_OK=1
+    SPAWN_PRELAUNCH_LEASE=1
+  fi
   acquired_wt_real=$(real_path_or_raw "$WT")
   # Preserve the interactive provider's child-shell boundary: the pane's
   # outer shell stays in the project while the worker shell owns the slot.

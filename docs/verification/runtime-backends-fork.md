@@ -80,16 +80,20 @@ ok - fm-spawn.sh: a refused spawn keeps the lease on a slot holding content it d
 ok - fm-spawn.sh: a raw agy launch command spawns without resolving the agy executable
 ```
 
-The same day, `tests/fm-spawn-prelaunch-endpoint-proof.test.sh` passed on the same host with fake Herdr, Zellij, and cmux CLIs in front of the real adapters and no backend server.
-It runs that abort cleanup on the other backends and checks that the slot is returned only on a positive absence read: a Herdr pane read answering an unknown error or failing silently keeps the lease and receipt, a structured `pane_not_found` returns the slot, and a failed Zellij or cmux read keeps the lease.
+The same day, `tests/fm-spawn-prelaunch-lease-return.test.sh` passed on the same host with fake Herdr, Zellij, and cmux CLIs in front of the real adapters and no backend server.
+It runs that abort cleanup in the exit handler's order and checks when the slot may be returned.
+A Herdr pane read answering an unknown error or failing silently keeps the lease and receipt, a structured `pane_not_found` returns the slot, and a failed Zellij or cmux read keeps the lease.
+A wiring path already in the slot when it was leased keeps the lease and the file, and a provisional task record that could not be rolled back keeps the lease.
 
 ```
-$ bash tests/fm-spawn-prelaunch-endpoint-proof.test.sh
+$ bash tests/fm-spawn-prelaunch-lease-return.test.sh
 ok - fm-spawn.sh: a Herdr pane whose presence reads as unknown keeps the leased slot
 ok - fm-spawn.sh: a Herdr pane read that fails without a structured answer keeps the leased slot
-ok - fm-spawn.sh: a Herdr pane proven gone by pane_not_found returns the leased slot
+ok - fm-spawn.sh: a Herdr pane proven gone returns a slot holding only the wiring written after leasing
 ok - fm-spawn.sh: a zellij endpoint whose existence read fails keeps the leased slot
 ok - fm-spawn.sh: a cmux endpoint whose existence read fails keeps the leased slot
+ok - fm-spawn.sh: a wiring path already in the slot when leased keeps the lease
+ok - fm-spawn.sh: a task record that could not be rolled back keeps the lease
 ```
 
 `bin/fm-spawn.sh` owns acquisition, receipt, and pre-launch rollback mechanics; `bin/fm-worktree-claims-lib.sh` owns the shared local-home claim inventory.
