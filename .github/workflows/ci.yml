@@ -52,11 +52,14 @@ jobs:
       # and GitHub workflow lint). Do not re-spell the checks here; keep CI
       # and the pre-push gate on this script so a self-broken ci.yml still
       # fails locally before merge.
+      # One worker per runner: a single full-analysis ShellCheck process can
+      # peak above 12 GB on one file, so two concurrent workers can exhaust a
+      # 16 GB hosted runner whichever roots the byte-weighted split pairs.
       - name: Lint canonical partition
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-lint"
-          bin/fm-lint.sh --partition "${{ matrix.partition }}of${{ strategy.job-total }}" \
+          bin/fm-lint.sh --jobs 1 --partition "${{ matrix.partition }}of${{ strategy.job-total }}" \
             --telemetry "$RUNNER_TEMP/fm-lint/partition-${{ matrix.partition }}.tsv"
       - name: Upload lint telemetry
         if: always()
