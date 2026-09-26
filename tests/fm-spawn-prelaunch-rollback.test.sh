@@ -154,6 +154,35 @@ EOF
   pass "fm-spawn.sh: a refusal after the record was published but before launch rolls everything back"
 }
 
+# The return resets the slot, so a slot holding content this spawn did not
+# write keeps its lease and receipt, while the window still closes.
+test_foreign_slot_content_keeps_the_lease() {
+  local id="rb-foreign-$$" fields case_dir home proj wt fakebin out status token
+  fields=$(make_case foreign "$id")
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$fields
+EOF
+  : "$case_dir"
+  printf 'left by an earlier tenant\n' > "$wt/leftover.txt"
+  token=$(printf '%s' "$(cd "$home" && pwd -P)" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}')
+  LAUNCH_BLOCKER="/tmp/fm-$id+$token"
+  ln -s /nonexistent "$LAUNCH_BLOCKER"
+  out=$(run_spawn "$home" "$proj" "$wt" "$fakebin" "$id" agy --scout)
+  status=$?
+  rm -f "$LAUNCH_BLOCKER"
+  [ "$status" -ne 0 ] || fail "foreign: the spawn must refuse: $out"
+  ! window_present "fm-$id" || fail "foreign: the refused spawn left its window open"
+  ! grep -q '^return ' "$fakebin/treehouse-calls" ||
+    fail "foreign: a slot holding foreign content was returned and reset"
+  [ -e "$home/state/$id.treehouse-lease" ] || fail "foreign: the retained lease lost its receipt"
+  [ -f "$wt/leftover.txt" ] || fail "foreign: the foreign file was removed"
+  case "$out" in
+    *'holds content this spawn did not write'*) ;;
+    *) fail "foreign: the retention must be reported, got: $out" ;;
+  esac
+  pass "fm-spawn.sh: a refused spawn keeps the lease on a slot holding content it did not write"
+}
+
 # Incident (1): a raw agy launch command never resolves AGY_BIN, so the
 # placeholder substitution must not abort the spawn under set -u.
 test_raw_agy_launch_does_not_abort() {
@@ -176,4 +205,5 @@ EOF
 
 test_bypass_hooks_refusal_rolls_back
 test_post_publication_prelaunch_refusal_rolls_back
+test_foreign_slot_content_keeps_the_lease
 test_raw_agy_launch_does_not_abort

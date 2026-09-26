@@ -165,11 +165,13 @@
 #   is unresolved, not proof no lease exists. Inspect it before recovery.
 #   A fresh spawn refused after that point but before launch delivery is a
 #   pre-launch abort, which the EXIT trap rolls back: it closes the endpoint
-#   this spawn created, retires the busy-state and harness wiring it armed, and,
-#   only once the endpoint is confirmed gone and under the project lock, returns
-#   the slot it leased with `treehouse return --force` and removes the receipt.
-#   Nothing of a worker exists in the slot yet, so the reset discards no work.
-#   An unconfirmed close or a failed return retains the lease and receipt for
+#   this spawn created, retires the busy-state and state-side harness wiring it
+#   armed, and returns the slot it leased with `treehouse return --force` and
+#   removes the receipt - but only once the endpoint is confirmed gone, the slot
+#   holds nothing beyond the worktree wiring this spawn writes, and the project
+#   lock is held. Nothing of a worker exists in the slot yet, so the reset
+#   discards no work. An unconfirmed close, any other content in the slot, an
+#   unavailable lock, or a failed return retains the lease and receipt for
 #   inspection. This script never edits Treehouse's own state directly.
 #   The exact returned path is checked for isolation and competing local-home
 #   claims before a child shell enters it with its own TREEHOUSE_DIR, replacing
@@ -1243,6 +1245,7 @@ SPAWN_TREEHOUSE_RECEIPT=
 SPAWN_PRELAUNCH_ENDPOINT=0
 SPAWN_PRELAUNCH_LEASE=0
 SPAWN_PRELAUNCH_WIRING=0
+SPAWN_SLOT_UNEXPECTED=
 HERDR_RECLAIM_WT=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
@@ -1290,6 +1293,52 @@ spawn_endpoint_close_confirmed() {  # [polls] [interval]
   return 1
 }
 
+# Retire the state-side wiring a fresh spawn armed: per-task files under the
+# state directory, the global turn-end registry entry, the agy and devin
+# policy layers, and the busy generation. Nothing inside the worktree is
+# touched here; the slot's reset on return removes what spawn wrote there,
+# and a slot that is not returned keeps its contents for inspection.
+spawn_prelaunch_retire_wiring() {
+  local harness path token_path token auth_path
+  harness=$(fm_control_harness_family "$HARNESS") || harness=
+  if token_path=$(fm_control_harness_turnend_token_path "$harness" "$STATE_REAL" "$ID") &&
+    [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    token=
+    IFS= read -r token <"$token_path" || true
+    auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || auth_path=
+    [ -z "$auth_path" ] || rm -f -- "$auth_path"
+  fi
+  fm_devin_relaunch_retire_policy "$harness" "$STATE_REAL" "$ID" || true
+  fm_agy_relaunch_retire_policy "$harness" "$STATE_REAL" "$ID" || true
+  while IFS= read -r path; do
+    case "$path" in "$STATE_REAL"/*) rm -f -- "$path" ;; esac
+  done < <(fm_control_harness_wiring_paths "$harness" "$WT" "$STATE_REAL" "$ID")
+  fm_agy_relaunch_retire_hooks "$harness" "$STATE_REAL" "$ID" || true
+  [ "$harness" != agy ] || fm_agy_teardown_remove_state "$STATE_REAL" "$ID" || true
+  # A published provisional record's rollback retires the generation itself.
+  if [ -n "${BUSY_GEN:-}" ] && [ "$SPAWN_FRESH_COMMIT_PENDING" != 1 ]; then
+    "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" --gen "$BUSY_GEN" >/dev/null 2>&1 ||
+      echo "warning: could not retire the busy generation after aborted spawn of $ID" >&2
+  fi
+}
+
+# The return resets the slot, so it qualifies only when it holds nothing
+# beyond the worktree wiring this spawn writes: an untracked leftover, an
+# ignored file, or a modification an earlier tenant left is kept.
+spawn_slot_holds_only_spawn_wiring() {
+  local harness status_out entry allowed
+  harness=$(fm_control_harness_family "$HARNESS") || harness=
+  allowed=$(fm_control_harness_wiring_paths "$harness" "$WT" "$STATE_REAL" "$ID" 2>/dev/null || true)
+  status_out=$(git -C "$WT" status --porcelain=v1 --ignored=matching --untracked-files=all 2>/dev/null) || return 1
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    printf '%s\n' "$allowed" | grep -qxF -- "$WT/${entry:3}" || {
+      SPAWN_SLOT_UNEXPECTED=${entry:3}
+      return 1
+    }
+  done <<<"$status_out"
+}
+
 # Roll back what a fresh spawn acquired when it refuses before launch delivery.
 # The endpoint closes first: its pane shell sits in the leased slot, so the
 # slot is returned only once that shell is proven gone.
@@ -1304,19 +1353,17 @@ spawn_prelaunch_abort_cleanup() {
   fi
   if [ "$SPAWN_PRELAUNCH_WIRING" = 1 ]; then
     SPAWN_PRELAUNCH_WIRING=0
-    clear_relaunch_harness_wiring "$HARNESS" "$WT" "$STATE_REAL" "$ID" >/dev/null 2>&1 ||
-      echo "warning: could not remove $HARNESS wiring after aborted spawn of $ID" >&2
-    [ "$HARNESS" != agy ] || fm_agy_teardown_remove_state "$STATE_REAL" "$ID" || true
-    # A published provisional record's rollback retires the generation itself.
-    if [ -n "${BUSY_GEN:-}" ] && [ "$SPAWN_FRESH_COMMIT_PENDING" != 1 ]; then
-      "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" --gen "$BUSY_GEN" >/dev/null 2>&1 ||
-        echo "warning: could not retire the busy generation after aborted spawn of $ID" >&2
-    fi
+    spawn_prelaunch_retire_wiring
   fi
   if [ "$SPAWN_PRELAUNCH_LEASE" = 1 ]; then
     SPAWN_PRELAUNCH_LEASE=0
     if [ "$endpoint_gone" != 1 ]; then
       echo "warning: lease on $WT retained with receipt $SPAWN_TREEHOUSE_RECEIPT because its endpoint may still be open" >&2
+      return 0
+    fi
+    SPAWN_SLOT_UNEXPECTED=
+    if ! spawn_slot_holds_only_spawn_wiring; then
+      echo "warning: lease on $WT retained with receipt $SPAWN_TREEHOUSE_RECEIPT because the slot holds content this spawn did not write${SPAWN_SLOT_UNEXPECTED:+ ($SPAWN_SLOT_UNEXPECTED)}; inspect it before returning the slot" >&2
       return 0
     fi
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" != 1 ]; then

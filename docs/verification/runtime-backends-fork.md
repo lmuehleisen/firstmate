@@ -69,12 +69,14 @@ It also refuses a recorded pool slot whose project identity cannot be establishe
 The generated lease command is also exercised in a real private tmux pane: the child enters the worktree, and exiting it leaves the outer project shell alive for guarded backend cleanup.
 On 2026-09-26, `tests/fm-spawn-prelaunch-rollback.test.sh` passed on Darwin 25.6.0 with tmux 3.7c on a private `-S` socket and the fixture treehouse from `tests/lib.sh`.
 It drives the real spawn entry point into two refusals after the slot was leased and before launch delivery - an `--agy-bypass` scout over a tracked `.agents/hooks.json`, and a non-private staged-launch directory after the task record was published - and checks that each closes its window, returns the slot with `treehouse return --force`, and leaves no lease receipt, busy-state, task record, or agy wiring behind.
+A third refusal over a slot holding a file the spawn did not write closes the window but keeps the lease, its receipt, and the file.
 The same suite spawns a raw agy launch command, which no longer aborts on an unresolved agy executable.
 
 ```
 $ bash tests/fm-spawn-prelaunch-rollback.test.sh
 ok - fm-spawn.sh: an agy bypass refusal after leasing returns the slot and closes its window
 ok - fm-spawn.sh: a refusal after the record was published but before launch rolls everything back
+ok - fm-spawn.sh: a refused spawn keeps the lease on a slot holding content it did not write
 ok - fm-spawn.sh: a raw agy launch command spawns without resolving the agy executable
 ```
 
