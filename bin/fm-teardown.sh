@@ -3179,7 +3179,7 @@ retire_worker_tmux_dir() {
   if { [ "$dir" != "/tmp/fmwt-$(printf '%s\n%s' "$(cd "$home" && pwd -P)" "$id" |
     { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)" ] ||
     ! fm_private_tmux_retire "$dir"; } && { [ -e "$dir" ] || [ -L "$dir" ]; }; then
-    echo "warning: recorded worker tmux directory $dir is not task $id's private directory; leaving it and any server in it untouched" >&2
+    echo "warning: recorded worker tmux directory $dir is not task $id's private directory, or a tmux server in it could not be inspected or stopped; leaving it in place" >&2
   fi
 }
 

@@ -237,7 +237,35 @@ test_retire_ignores_planted_foreign_sockets() {
   pass "retire stops only servers socketed inside the directory, despite hardlinked, renamed, or newline-named sockets"
 }
 
+# A worker can make its own live socket unreachable, for example with chmod.
+# Removing the directory then would strand that server with no reachable socket,
+# so retire must keep it and report failure, while a socket a stopped server
+# left behind must not block the removal.
+test_retire_keeps_the_directory_when_a_server_cannot_be_stopped() {
+  local dir="$FLEET_DIR/q" pid
+  (umask 077 && mkdir "$dir") || fail "could not create the private directory"
+  ltmux -S "$dir/stopped" new-session -d "$REAL_SLEEP 600" || fail "could not start the stopped server"
+  ltmux -S "$dir/stopped" kill-server || fail "could not stop the stopped server"
+  [ -S "$dir/stopped" ] || fail "a stopped server should leave its socket behind"
+  ltmux -S "$dir/own" new-session -d "$REAL_SLEEP 600" || fail "could not start the worker's own -S server"
+  pid=$(ltmux -S "$dir/own" display-message -p '#{pid}')
+  chmod 000 "$dir/own"
+
+  if fm_private_tmux_retire "$dir"; then
+    fail "retire must report failure when a server cannot be inspected"
+  fi
+  [ -S "$dir/own" ] || fail "retire must keep the directory holding an unreachable live server"
+  kill -0 "$pid" 2>/dev/null || fail "the unreachable server should still be running"
+
+  chmod 600 "$dir/own"
+  fm_private_tmux_retire "$dir" || fail "retire should succeed once the server is reachable"
+  ! kill -0 "$pid" 2>/dev/null || fail "retire must stop the reachable server"
+  [ ! -e "$dir" ] || fail "retire must remove the directory despite the stopped server's socket"
+  pass "retire keeps the directory while a live server in it cannot be stopped, but not for a stopped server's socket"
+}
+
 test_ship_worker_cannot_reach_the_fleet
 test_control_inherited_tmux_reaches_the_fleet
 test_teardown_retires_the_private_directory
 test_retire_ignores_planted_foreign_sockets
+test_retire_keeps_the_directory_when_a_server_cannot_be_stopped
