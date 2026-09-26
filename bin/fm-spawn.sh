@@ -1247,7 +1247,9 @@ spawn_fresh_commit_rollback() {
     "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
     SPAWN_FRESH_COMMIT_PENDING=0
     # With the record gone, the worker's private tmux servers and directory go too.
-    fm_private_tmux_retire "${WORKER_TMUX_DIR:-}" || true
+    if ! fm_private_tmux_retire "${WORKER_TMUX_DIR:-}" && [ -e "${WORKER_TMUX_DIR:-}" ]; then
+      echo "warning: task $ID's private tmux directory $WORKER_TMUX_DIR could not be retired and a tmux server in it may still run; stop it by its exact -S socket and remove the directory before retrying" >&2
+    fi
     return 0
   fi
   echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
