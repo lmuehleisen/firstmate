@@ -106,7 +106,8 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 
 ## Lint partitions and end-to-end latency
 
-`bin/fm-lint.sh` owns two canonical CI partitions, each running the same full source-aware ShellCheck analysis with two bounded workers, pinned versions, workflow validation, and backend-purity checks.
+`bin/fm-lint.sh` owns two canonical CI partitions, each running the same full source-aware ShellCheck analysis, pinned versions, workflow validation, and backend-purity checks.
+The workflow runs each partition with `--jobs 1` because one ShellCheck process can peak above 12 GB on a single root, so two concurrent workers can exhaust a 16 GB hosted runner.
 Its `--list-files` interface exposes partition membership; `tests/fm-lint.test.sh` verifies complete/disjoint executed roots and unchanged analysis flags.
 The workflow uploads each partition's quiet telemetry to distinguish analysis cost, memory use, and host contention.
 No fast mode, path skips, reduced checks, or paid runner provisioning is part of this layout.
