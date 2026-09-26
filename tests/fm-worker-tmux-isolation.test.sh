@@ -7,7 +7,8 @@
 # executed in a synthetic pane whose TMUX and TMUX_PANE name that stand-in, the
 # way a worker pane inherits them, with the harness replaced by a probe that
 # records its environment and runs the bare kill-server. Nothing reads
-# bin/fm-spawn.sh's source.
+# bin/fm-spawn.sh's source. A teardown case then checks that the private
+# directory's servers are stopped and the directory removed.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -19,6 +20,7 @@ if [ -z "$REAL_TMUX" ]; then
   exit 0
 fi
 REAL_SLEEP=$(command -v sleep)
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-worker-tmux)
 # Short, because a socket path is capped (103 bytes on macOS).
@@ -133,5 +135,63 @@ test_control_inherited_tmux_reaches_the_fleet() {
   pass "control: without the launch boundary an inherited TMUX outranks TMUX_TMPDIR"
 }
 
+# Teardown stops every server the worker left in its private directory, including
+# one it named with -S there, removes the directory, and leaves the fleet running.
+test_teardown_retires_the_private_directory() {
+  local case_dir home id=leak-t1 dir sock own_pid fakebin out status
+  case_dir="$TMP_ROOT/teardown"
+  home="$case_dir/home"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$home/state" "$home/config" "$home/data" "$fakebin"
+  touch "$home/state/.last-watcher-beat"
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/seed" 2>/dev/null
+  git -C "$case_dir/seed" commit -q --allow-empty -m baseline
+  git -C "$case_dir/seed" push -q origin main
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b "fm/$id" "$case_dir/wt" main
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/treehouse"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/gh"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/gh-axi"
+  # The endpoint is fake; only an exact-socket call reaches the real tmux.
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = -S ] || exit 0
+exec '$REAL_TMUX' "\$@"
+SH
+  chmod +x "$fakebin"/*
+  dir="/tmp/fmwt-$(printf '%s\n%s' "$(cd "$home" && pwd -P)" "$id" |
+    { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)"
+  PRIVATE_DIRS+=("$dir")
+  (umask 077 && mkdir "$dir") || fail "could not create the private tmux directory $dir"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$case_dir/wt" \
+    "project=$case_dir/project" "kind=ship" "mode=local-only" "spawn_gen=worker-tmux-$id" \
+    "worker_tmux_dir=$dir"
+
+  env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" "$REAL_TMUX" new-session -d -s leaked "$REAL_SLEEP 600" ||
+    fail "could not start the leaked private server"
+  sock=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$dir" "$REAL_TMUX" display-message -p '#{socket_path}')
+  ltmux -S "$dir/own" new-session -d -s own "$REAL_SLEEP 600" || fail "could not start the worker's own -S server"
+  own_pid=$(ltmux -S "$dir/own" display-message -p '#{pid}')
+  [ -n "$own_pid" ] || fail "could not read the worker's own -S server pid"
+  start_fleet || fail "could not start the stand-in fleet"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    TMUX="$FLEET_TMUX" TMUX_PANE="$FLEET_PANE" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "teardown of a landed task should succeed: $out"
+  ! ltmux -S "$sock" has-session >/dev/null 2>&1 || fail "teardown must stop the worker's private tmux server"
+  ! kill -0 "$own_pid" 2>/dev/null || fail "teardown must stop a server the worker started with -S in its directory"
+  [ ! -e "$dir" ] || fail "teardown must remove the private tmux directory"
+  assert_equals "captain fm-worker " "$(fleet_windows)" "teardown must leave the stand-in fleet running"
+  pass "teardown stops the worker's private tmux servers, removes their directory, and leaves the fleet running"
+}
+
 test_ship_worker_cannot_reach_the_fleet
 test_control_inherited_tmux_reaches_the_fleet
+test_teardown_retires_the_private_directory

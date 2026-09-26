@@ -1064,6 +1064,7 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+WORKER_TMUX_DIR=$(fm_meta_get "$META" worker_tmux_dir)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -3680,6 +3681,22 @@ remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Stop a ship or scout worker's private tmux servers, each by its exact socket,
+# and remove their directory (docs/tmux-backend.md). Only this task's own
+# expected directory is touched, and only while it is still private to this user.
+if [ -n "$WORKER_TMUX_DIR" ]; then
+  if [ "$WORKER_TMUX_DIR" = "/tmp/fmwt-$(printf '%s\n%s' "$(cd "$FM_HOME" && pwd -P)" "$ID" |
+    { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)" ] &&
+    [ ! -L "$WORKER_TMUX_DIR" ] && [ -d "$WORKER_TMUX_DIR" ] && [ -O "$WORKER_TMUX_DIR" ] &&
+    [ -z "$(find "$WORKER_TMUX_DIR" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ]; then
+    while IFS= read -r WORKER_TMUX_SOCK; do
+      env -u TMUX -u TMUX_PANE tmux -S "$WORKER_TMUX_SOCK" kill-server >/dev/null 2>&1 || true
+    done < <(find "$WORKER_TMUX_DIR" -type s -print 2>/dev/null)
+    rm -rf "$WORKER_TMUX_DIR"
+  elif [ -e "$WORKER_TMUX_DIR" ] || [ -L "$WORKER_TMUX_DIR" ]; then
+    echo "warning: recorded worker tmux directory $WORKER_TMUX_DIR is not this task's private directory; leaving it and any server in it untouched" >&2
+  fi
+fi
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {
