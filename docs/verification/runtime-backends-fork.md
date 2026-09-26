@@ -339,8 +339,9 @@ The portable suite `tests/fm-agy-harness.test.sh` pins the record schema, the fi
 
 ### Bypass permission layer (opt-in)
 
-Verified on 2026-09-20 with agy 1.2.7 on macOS 25.6.0 in scratch workspaces under the task temp root, on `gemini-3.6-flash-low` headless runs.
-The same six checks passed on 1.2.6 on 2026-09-18, and the earlier hook-contract facts were verified on 1.2.4 and 1.2.5, so the layer's live-verified set is `1.2.4 1.2.5 1.2.6 1.2.7`.
+Verified on 2026-09-25 with agy 1.2.11 on macOS 25.6.0 in scratch workspaces under the task temp root, on `gemini-3.6-flash-low` headless runs.
+The same six checks passed on 1.2.7 on 2026-09-20 and on 1.2.6 on 2026-09-18, and the earlier hook-contract facts were verified on 1.2.4 and 1.2.5, so the layer's live-verified set is `1.2.4 1.2.5 1.2.6 1.2.7 1.2.11`.
+Versions 1.2.8 through 1.2.10 were never installed on the verifying machine and stay outside the set.
 The set stays an explicit allowlist rather than a minimum version, because each entry is individually proven against the version-sensitive hook contract.
 
 ```sh
@@ -348,17 +349,30 @@ FM_AGY_BYPASS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-bypass-live-e2e.test.sh
 ```
 
 ```text
-ok - agy 1.2.7: a policy deny blocks a bypassed call and the reason reaches the model
-ok - agy 1.2.7: an abstained task-local file op runs unchanged and the armed heartbeat logged
-ok - agy 1.2.7: a timed-out judge denies, holds the call for firstmate, and never abstains
-ok - agy 1.2.7: install-worker refuses a malformed merged hooks.json before any launch
-ok - agy 1.2.7: a force_ask decision under bypass did not block the call - no prompt exists to force
-ok - agy 1.2.7: a bypass session whose hook never logs leaves no armed line for the canary to trust
-# agy bypass permission layer live checks passed (agy 1.2.7)
+ok - agy 1.2.11: a policy deny blocks a bypassed call and the reason reaches the model
+ok - agy 1.2.11: an abstained task-local file op runs unchanged and the armed heartbeat logged
+ok - agy 1.2.11: a timed-out judge denies, holds the call for firstmate, and never abstains
+ok - agy 1.2.11: install-worker refuses a malformed merged hooks.json before any launch
+ok - agy 1.2.11: a force_ask decision under bypass did not block the call - no prompt exists to force
+ok - agy 1.2.11: a bypass session whose hook never logs leaves no armed line for the canary to trust
+# agy bypass permission layer live checks passed (agy 1.2.11)
 ```
 
 What this proves: `{"decision":"deny","reason":...}` holds under `--dangerously-skip-permissions` and the model echoes the reason; abstention runs the call (the layer's only approval surface); a dead judge still denies; a malformed merge is caught before launch; and a session that never loads the adapter produces no armed line for `fm-spawn`'s canary to trust.
 What it also shows: `force_ask` is inert under bypass - there is no prompt left to force - so deny plus abstain are the only effective decisions the layer can emit, and every "ask the human" path must go through the pending-marker escalation instead.
+
+Admission checks beyond the guard, run by hand on 2026-09-25 against agy 1.2.11 with the production `install-worker` wiring and policy file shape, headless `-p` runs plus interactive `-i` sessions on a private `tmux -S` socket:
+
+- Hook firing per tool class: `run_command`, `view_file`, `write_to_file`, `replace_file_content`, `read_url_content`, `invoke_subagent`, and `send_message` each emitted `PreToolUse`, and the first four also emitted `PostToolUse` when their call ran.
+  A subagent started through `invoke_subagent` ran its own `run_command` through the same hooks under its own `conversationId`, so delegated calls are policed rather than escaping the layer.
+  The 1.2.11 print-mode toolset offered to `gemini-3.6-flash-low` did not include `list_dir`, `grep_search`, or `search_web`; the model listed its callable tools without them and fell back to `run_command` for directory listing and search, so those three tool names had no live call to observe.
+  The payload shape was unchanged: `run_command` args still carry `CommandLine`, `Cwd`, `WaitMsBeforeAsync`, `toolAction`, and `toolSummary`.
+- Held calls in one interactive conversation, judge timeout 1s: the first `python3 -c` write was denied with a pending marker `agy-permission-<conversationId>-s2` and a `needs-decision` line; after `approve` the model's retry at step 6 ran with decider `cache` and no new escalation, and after `decline` the retry at step 6 was refused by policy with no new marker or `needs-decision` line.
+  Retries from separate headless conversations do not share a cache key, because the model writes a fresh `toolAction`, `toolSummary`, and `WaitMsBeforeAsync` per conversation; the worker retry path is the same-conversation one above.
+- Physical-path write guards: a `write_to_file` through an in-worktree symlink to a directory outside every write root was refused (`write_to_file outside the task write roots (...) is refused by firstmate policy`) and nothing landed, and a `write_to_file` into the worktree's `.agents/` was refused as agent or git configuration.
+  A symlink target under `$TMPDIR` is inside the scratch write roots by design, so the probe target must sit outside `/tmp` and `$TMPDIR`.
+- Startup canary in the worker shape: an interactive `-i` bypass launch wrote the adapter's armed line stamped with that launch's busy generation, which is the exact record `agy_wait_for_armed` polls.
+- Default judge tier: `judge-probe` on a residue `run_command` printed `tier=agy model=gemini-3.6-flash-low static=residue verdict=approve reason=...` and left every file in the case state directory byte-identical.
 
 `--sandbox` composition probe, 2026-09-19, agy 1.2.7: `agy -p --model gemini-3.6-flash-low --dangerously-skip-permissions --sandbox` parses and runs in headless mode, and the model completed file-tool and `run_command` writes to the workspace, to a sibling state directory, and to `$HOME` - no file-write surface the probes reached was restricted.
 The launch therefore stays on `--dangerously-skip-permissions` alone: `--sandbox` is not omitted because it fails to compose but because no containment was observable in this mode, and its interactive-session behaviour under a spawned pane is unverified.
