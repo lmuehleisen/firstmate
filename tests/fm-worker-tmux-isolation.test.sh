@@ -33,6 +33,17 @@ PRIVATE_DIRS=()
 
 ltmux() { env -u TMUX -u TMUX_PANE "$REAL_TMUX" "$@"; }
 
+# pid_gone <pid>: true once <pid> has exited, allowing a stopped tmux server up
+# to five seconds, since kill-server returns before the server process exits.
+pid_gone() {
+  local i
+  for i in $(seq 1 50); do
+    kill -0 "$1" 2>/dev/null || return 0
+    "$REAL_SLEEP" 0.1
+  done
+  return 1
+}
+
 cleanup_worker_tmux() {
   local d sock
   for d in "${PRIVATE_DIRS[@]+"${PRIVATE_DIRS[@]}"}"; do
@@ -202,7 +213,7 @@ SH
   status=$?
   expect_code 0 "$status" "teardown of a landed task should succeed once its servers are reachable: $out"
   ! ltmux -S "$sock" has-session >/dev/null 2>&1 || fail "teardown must stop the worker's private tmux server"
-  ! kill -0 "$own_pid" 2>/dev/null || fail "teardown must stop a server the worker started with -S in its directory"
+  pid_gone "$own_pid" || fail "teardown must stop a server the worker started with -S in its directory"
   [ ! -e "$dir" ] || fail "teardown must remove the private tmux directory"
   assert_equals "captain fm-worker " "$(fleet_windows)" "teardown must leave the stand-in fleet running"
   [ ! -e "$home/state/$id.meta" ] || fail "a completed teardown must remove the task record"
@@ -249,8 +260,8 @@ test_retire_ignores_planted_foreign_sockets() {
   ltmux -S "$dir/moved" has-session 2>/dev/null ||
     fail "retire must neither stop nor unlink a server's only socket renamed into the directory"
   ltmux -S "$split" has-session 2>/dev/null || fail "retire must not stop a server named after a newline"
-  ! kill -0 "$nl_pid" 2>/dev/null || fail "retire must stop the worker's newline-named server"
-  ! kill -0 "$own_pid" 2>/dev/null || fail "retire must stop the worker's own -S server"
+  pid_gone "$nl_pid" || fail "retire must stop the worker's newline-named server"
+  pid_gone "$own_pid" || fail "retire must stop the worker's own -S server"
   pass "retire stops only servers socketed inside the directory and keeps it while a hardlinked, renamed, or newline-named socket answers for another server"
 }
 
@@ -276,7 +287,7 @@ test_retire_keeps_the_directory_when_a_server_cannot_be_stopped() {
 
   chmod 600 "$dir/own"
   fm_private_tmux_retire "$dir" || fail "retire should succeed once the server is reachable"
-  ! kill -0 "$pid" 2>/dev/null || fail "retire must stop the reachable server"
+  pid_gone "$pid" || fail "retire must stop the reachable server"
   [ ! -e "$dir" ] || fail "retire must remove the directory despite the stopped server's socket"
   pass "retire keeps the directory while a live server in it cannot be stopped, but not for a stopped server's socket"
 }
