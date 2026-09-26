@@ -1279,6 +1279,26 @@ spawn_endpoint_absent() {
   return 0
 }
 
+# Returning a slot needs more than the cheap read above, which on Herdr,
+# Zellij, and cmux takes any failed call for a missing pane. Only a
+# structured not-found proves the pane shell has left the slot, the rule
+# teardown uses: tmux reports it as missing and Herdr as pane_not_found.
+# Zellij and cmux have no such read, so their endpoint is never proven gone
+# and unknown keeps the lease.
+spawn_endpoint_proven_absent() {
+  case "$BACKEND" in
+    tmux)
+      fm_backend_source tmux || return 1
+      [ "$(fm_backend_tmux_target_presence "$T")" = missing ] && return 0
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      fm_backend_herdr_endpoint_confirmed_gone "$T" && return 0
+      ;;
+  esac
+  return 1
+}
+
 # Close the endpoint this spawn created and prove it is gone.
 spawn_endpoint_close_confirmed() {  # [polls] [interval]
   local tab_id='' i=0 max=${1:-10} interval=${2:-0.5}
@@ -1353,6 +1373,9 @@ spawn_prelaunch_abort_cleanup() {
     if [ -n "${T:-}" ] && ! spawn_endpoint_close_confirmed; then
       endpoint_gone=0
       echo "warning: aborted spawn of $ID could not confirm its endpoint ${T:-} closed; close it by hand" >&2
+    elif [ -n "${T:-}" ] && ! spawn_endpoint_proven_absent; then
+      endpoint_gone=0
+      echo "warning: aborted spawn of $ID closed its endpoint ${T:-}, but $BACKEND cannot prove the pane is gone; check it by hand" >&2
     fi
   fi
   if [ "$SPAWN_PRELAUNCH_WIRING" = 1 ]; then
