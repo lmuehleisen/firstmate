@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Daemon snippets expand inside the daemon() subshell, which sources the daemon library.
 # tests/fm-afk-owned-digest-recovery.test.sh - the away daemon resolves a digest
 # that an unconfirmed submit left in the primary's composer.
 #
@@ -122,8 +123,8 @@ FIX
 chmod +x "$FIXTURE"
 
 FX="$TMP/fx"
-STATE="$TMP/state"
-mkdir -p "$FX" "$STATE"
+OWNED_STATE="$TMP/state"
+mkdir -p "$FX" "$OWNED_STATE"
 tmux new-session -d -s owned -x 100 -y 30 "env LC_ALL=$UTF8 bash '$FIXTURE' '$FX'" \
   || fail "could not start the private tmux server"
 PANE=$(tmux display-message -p -t owned '#{pane_id}') || fail "could not read the fixture pane"
@@ -132,10 +133,10 @@ PANE=$(tmux display-message -p -t owned '#{pane_id}') || fail "could not read th
 # the fixture pane, as the housekeeping tick calls escalate_flush.
 daemon() {  # <shell snippet>
   (
-    export FM_STATE_OVERRIDE="$STATE" FM_HOME="$TMP" FM_SUPERVISOR_TARGET="$PANE" \
+    export FM_STATE_OVERRIDE="$OWNED_STATE" FM_HOME="$TMP" FM_SUPERVISOR_TARGET="$PANE" \
       FM_SUPERVISOR_BACKEND=tmux FM_INJECT_CONFIRM_SLEEP=0.3 FM_INJECT_CONFIRM_RETRIES=3 \
       LC_ALL="$UTF8"
-    LOG="$STATE/.supervise-daemon.log"
+    LOG="$OWNED_STATE/.supervise-daemon.log"
     # shellcheck source=bin/fm-supervise-daemon.sh
     . "$ROOT/bin/fm-supervise-daemon.sh"
     eval "$1"
@@ -155,9 +156,9 @@ wait_composer() {  # <state>
 }
 
 reset() {
-  rm -f "$FX"/* "$STATE"/.subsuper-* 2>/dev/null
-  rm -rf "$STATE/.subsuper-submit-failures"
-  : > "$STATE/.supervise-daemon.log"
+  rm -f "$FX"/* "$OWNED_STATE"/.subsuper-* 2>/dev/null
+  rm -rf "$OWNED_STATE/.subsuper-submit-failures"
+  : > "$OWNED_STATE/.supervise-daemon.log"
   : > "$FX/submitted.log"
   : > "$FX/keys.log"
   tmux send-keys -t "$PANE" C-u C-u C-u C-u C-u C-u C-u C-u
@@ -173,7 +174,7 @@ buffer() {  # <event>...
 }
 
 flush() { daemon 'escalate_flush "$FM_STATE_OVERRIDE"'; }
-captures() { find "$STATE/.subsuper-submit-failures" -type f -name '*.txt' 2>/dev/null | wc -l | tr -d ' '; }
+captures() { find "$OWNED_STATE/.subsuper-submit-failures" -type f -name '*.txt' 2>/dev/null | wc -l | tr -d ' '; }
 count() { grep -c -- "$1" "$2" 2>/dev/null || true; }
 
 daemon 'afk_enter "$FM_STATE_OVERRIDE"'
@@ -188,10 +189,10 @@ if flush; then
 fi
 [ -e "$FX/banner" ] || fail "the fixture did not eat the marked Enter"
 [ "$(composer)" = unknown ] || fail "the review banner did not leave the composer unidentified: $(composer)"
-grep -q 'inject failed: submit unconfirmed .*verdict=unknown.*pane capture: ' "$STATE/.supervise-daemon.log" \
+grep -q 'inject failed: submit unconfirmed .*verdict=unknown.*pane capture: ' "$OWNED_STATE/.supervise-daemon.log" \
   || fail "the failed submit did not log its verdict and pane capture"
-[ -s "$STATE/.subsuper-inject-owned" ] || fail "the failed submit left no owned-digest record"
-first_capture=$(find "$STATE/.subsuper-submit-failures" -type f -name '*.txt' | head -1)
+[ -s "$OWNED_STATE/.subsuper-inject-owned" ] || fail "the failed submit left no owned-digest record"
+first_capture=$(find "$OWNED_STATE/.subsuper-submit-failures" -type f -name '*.txt' | head -1)
 tr -d '\n' < "$first_capture" | grep -q EVENT-ALPHA || fail "the pane capture does not show the stuck digest: $first_capture"
 pass "an eaten Enter logs an unknown verdict, records the owned digest, and saves a pane capture"
 
@@ -202,7 +203,7 @@ flush && fail "a second flush typed while the owned digest sat in an unidentifie
 [ "$(wc -l < "$FX/keys.log")" -eq "$keys_before" ] \
   || fail "the daemon sent keys into an unidentified composer"
 [ ! -s "$FX/submitted.log" ] || fail "something was submitted during the deferrals: $(cat "$FX/submitted.log")"
-[ "$(count 'inject recovery waiting' "$STATE/.supervise-daemon.log")" -eq 1 ] \
+[ "$(count 'inject recovery waiting' "$OWNED_STATE/.supervise-daemon.log")" -eq 1 ] \
   || fail "the unidentified composer was not noted exactly once"
 [ "$(captures)" -eq 2 ] || fail "expected one capture for the failure and one for the wait, got $(captures)"
 pass "while the composer is unidentified the daemon defers without sending a key, noting it once"
@@ -224,9 +225,9 @@ case "$fresh" in
   *) fail "the event buffered during the wedge did not follow: $fresh" ;;
 esac
 case "$fresh" in *EVENT-ALPHA*|*EVENT-BRAVO*) fail "the recovered events were delivered twice: $fresh" ;; esac
-[ ! -e "$STATE/.subsuper-inject-owned" ] || fail "the owned-digest record survived a recovered submit"
-[ ! -s "$STATE/.subsuper-escalations" ] || fail "delivered events stayed buffered"
-grep -q 'inject recovered: submitted the owned digest left in the composer (2 event(s))' "$STATE/.supervise-daemon.log" \
+[ ! -e "$OWNED_STATE/.subsuper-inject-owned" ] || fail "the owned-digest record survived a recovered submit"
+[ ! -s "$OWNED_STATE/.subsuper-escalations" ] || fail "delivered events stayed buffered"
+grep -q 'inject recovered: submitted the owned digest left in the composer (2 event(s))' "$OWNED_STATE/.supervise-daemon.log" \
   || fail "the recovery was not logged"
 pass "once the composer reads pending the owned digest is submitted once, then only the later event follows"
 
@@ -236,17 +237,17 @@ touch "$FX/swallow-enter"
 buffer 'lab-d.status: blocked: EVENT-DELTA the rollout needs a window pick before the next deploy train leaves' \
   'lab-e.status: failed: EVENT-ECHO validation failed on the migration check and the retry budget is spent'
 flush && fail "a swallowed submit reported delivery"
-grep -q 'verdict=pending' "$STATE/.supervise-daemon.log" || fail "the swallowed submit did not log pending"
+grep -q 'verdict=pending' "$OWNED_STATE/.supervise-daemon.log" || fail "the swallowed submit did not log pending"
 [ "$(composer)" = pending ] || fail "the swallowed digest is not pending in the composer"
 flush && fail "a give-up flush reported delivery"
 [ "$(composer)" = empty ] || fail "the give-up left the composer $(composer)"
 [ ! -s "$FX/submitted.log" ] || fail "the give-up submitted something: $(cat "$FX/submitted.log")"
 [ "$(count C-u "$FX/keys.log")" -ge 2 ] || fail "the wrapped digest was not cleared row by row"
-[ ! -e "$STATE/.subsuper-inject-owned" ] || fail "the owned-digest record survived a confirmed cleanup"
+[ ! -e "$OWNED_STATE/.subsuper-inject-owned" ] || fail "the owned-digest record survived a confirmed cleanup"
 grep -q 'inject recovery gave up: away-mode digest did not run .*cleared owned input; its events stay buffered' \
-  "$STATE/.supervise-daemon.log" || fail "the give-up was not logged"
+  "$OWNED_STATE/.supervise-daemon.log" || fail "the give-up was not logged"
 [ "$(captures)" -eq 2 ] || fail "expected a capture for the failure and one for the give-up, got $(captures)"
-[ "$(wc -l < "$STATE/.subsuper-escalations" | tr -d ' ')" -eq 2 ] || fail "the give-up dropped buffered events"
+[ "$(wc -l < "$OWNED_STATE/.subsuper-escalations" | tr -d ' ')" -eq 2 ] || fail "the give-up dropped buffered events"
 rm -f "$FX/swallow-enter"
 flush || fail "the flush after a give-up did not deliver a fresh digest"
 [ "$(count EVENT-DELTA "$FX/submitted.log")" -eq 1 ] || fail "the fresh digest after a give-up is missing or doubled"
@@ -265,7 +266,7 @@ flush && fail "a second flush acted on a composer holding added text"
 [ "$(wc -l < "$FX/keys.log")" -eq "$keys_before" ] || fail "the daemon sent keys into a composer holding added text"
 tmux capture-pane -p -J -t "$PANE" | tr -d '\n' | grep -q 'the captain kept typing' \
   || fail "the added text is gone"
-grep -q 'the composer holds text the daemon cannot prove it typed' "$STATE/.supervise-daemon.log" \
+grep -q 'the composer holds text the daemon cannot prove it typed' "$OWNED_STATE/.supervise-daemon.log" \
   || fail "the unowned composer was not noted"
 pass "the owned digest with text added to it is never submitted or cleared"
 
@@ -294,10 +295,10 @@ buffer 'lab-h.status: blocked: EVENT-HOTEL needs a pick'
 flush && fail "a swallowed submit reported delivery"
 rm -f "$FX/swallow-enter"
 # A return and a new away window reset the buffer; a new event arrives.
-: > "$STATE/.subsuper-escalations"
+: > "$OWNED_STATE/.subsuper-escalations"
 buffer 'lab-i.status: blocked: EVENT-INDIA needs a pick'
 flush || fail "the flush after clearing a stale owned digest did not deliver"
 [ "$(count EVENT-HOTEL "$FX/submitted.log")" -eq 0 ] || fail "the stale owned digest was submitted"
 [ "$(count EVENT-INDIA "$FX/submitted.log")" -eq 1 ] || fail "the new event was not delivered once"
-grep -q 'cleared a stale owned digest' "$STATE/.supervise-daemon.log" || fail "the stale cleanup was not logged"
+grep -q 'cleared a stale owned digest' "$OWNED_STATE/.supervise-daemon.log" || fail "the stale cleanup was not logged"
 pass "a stale owned digest whose events are no longer buffered is cleared, never submitted"
