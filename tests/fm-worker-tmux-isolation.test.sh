@@ -181,17 +181,32 @@ SH
   [ -n "$own_pid" ] || fail "could not read the worker's own -S server pid"
   start_fleet || fail "could not start the stand-in fleet"
 
+  # A server teardown cannot reach keeps the record that names its directory.
+  chmod 000 "$dir/own"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
     TMUX="$FLEET_TMUX" TMUX_PANE="$FLEET_PANE" PATH="$fakebin:$PATH" \
     "$TEARDOWN" "$id" 2>&1)
   status=$?
-  expect_code 0 "$status" "teardown of a landed task should succeed: $out"
+  chmod 600 "$dir/own"
+  [ "$status" -ne 0 ] || fail "teardown must refuse while a server in the private directory cannot be stopped"
+  assert_contains "$out" "private tmux directory $dir could not be retired" \
+    "teardown did not name the private tmux directory it could not retire"
+  [ -f "$home/state/$id.meta" ] || fail "teardown must keep the record while its private tmux directory survives"
+  kill -0 "$own_pid" 2>/dev/null || fail "the unreachable server should still be running"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    TMUX="$FLEET_TMUX" TMUX_PANE="$FLEET_PANE" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "teardown of a landed task should succeed once its servers are reachable: $out"
   ! ltmux -S "$sock" has-session >/dev/null 2>&1 || fail "teardown must stop the worker's private tmux server"
   ! kill -0 "$own_pid" 2>/dev/null || fail "teardown must stop a server the worker started with -S in its directory"
   [ ! -e "$dir" ] || fail "teardown must remove the private tmux directory"
   assert_equals "captain fm-worker " "$(fleet_windows)" "teardown must leave the stand-in fleet running"
-  pass "teardown stops the worker's private tmux servers, removes their directory, and leaves the fleet running"
+  [ ! -e "$home/state/$id.meta" ] || fail "a completed teardown must remove the task record"
+  pass "teardown refuses while a private tmux server is unreachable, then stops the servers, removes the directory, and leaves the fleet running"
 }
 
 # A worker can leave sockets in its private directory that name another server:
