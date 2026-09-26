@@ -1357,7 +1357,7 @@ SH
         empty) expected=$(printf '%s\n' unset unset unset unset) ;;
       esac
       # The pane's TMUX stays in the floor, but a ship worker starts on its
-      # private tmux server with TMUX unset (bin/fm-worker-tmux-lib.sh).
+      # private tmux server with TMUX unset (docs/tmux-backend.md).
       expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n'"$pane_path"$'\nxterm\n\n/synthetic/gotmp'
       [ "$result" = "$expected" ] || fail "allowlist=$setting worker environment mismatch: $result"
     done

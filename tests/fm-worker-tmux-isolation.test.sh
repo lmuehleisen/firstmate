@@ -8,11 +8,14 @@
 # way a worker pane inherits them, with the harness replaced by a probe that
 # records its environment and runs the bare kill-server. Nothing reads
 # bin/fm-spawn.sh's source. A teardown case then checks that the private
-# directory's servers are stopped and the directory removed.
+# directory's servers are stopped and the directory removed, and a retire case
+# checks that planted sockets cannot turn that cleanup against another server.
 set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=bin/fm-private-tmux-lib.sh
+. "$ROOT/bin/fm-private-tmux-lib.sh"
 
 REAL_TMUX=$(command -v tmux 2>/dev/null || true)
 if [ -z "$REAL_TMUX" ]; then
@@ -33,13 +36,12 @@ ltmux() { env -u TMUX -u TMUX_PANE "$REAL_TMUX" "$@"; }
 cleanup_worker_tmux() {
   local d sock
   for d in "${PRIVATE_DIRS[@]+"${PRIVATE_DIRS[@]}"}"; do
-    case "$d" in /tmp/fmwt-*) ;; *) continue ;; esac
-    while IFS= read -r sock; do
-      ltmux -S "$sock" kill-server >/dev/null 2>&1 || true
-    done < <(find "$d" -type s -print 2>/dev/null)
-    rm -rf "$d"
+    case "$d" in /tmp/fmwt-*) fm_private_tmux_retire "$d" || true ;; esac
   done
-  ltmux -S "$FLEET_SOCK" kill-server >/dev/null 2>&1 || true
+  # Every socket under FLEET_DIR is a stand-in this suite created.
+  while IFS= read -r -d '' sock; do
+    ltmux -S "$sock" kill-server >/dev/null 2>&1 || true
+  done < <(find "$FLEET_DIR" -type s -print0 2>/dev/null)
   rm -rf "$FLEET_DIR"
   fm_test_cleanup
 }
@@ -192,6 +194,50 @@ SH
   pass "teardown stops the worker's private tmux servers, removes their directory, and leaves the fleet running"
 }
 
+# A worker can leave sockets in its private directory that name another server:
+# a hardlink or a rename of a live foreign socket, or a socket whose path
+# contains a newline followed by a foreign socket's path. The shared retire used
+# by teardown, spawn rollback, and the test runner must stop only servers whose
+# own socket is inside the directory. Every server here is a stand-in on a -S
+# socket under FLEET_DIR.
+test_retire_ignores_planted_foreign_sockets() {
+  local dir="$FLEET_DIR/p" linked="$FLEET_DIR/a" moved="$FLEET_DIR/b" handle="$FLEET_DIR/bh"
+  local split="$FLEET_DIR/c" nl own_pid nl_pid
+  (umask 077 && mkdir "$dir") || fail "could not create the private directory"
+  ltmux -S "$linked" new-session -d "$REAL_SLEEP 600" || fail "could not start the hardlinked stand-in"
+  ltmux -S "$moved" new-session -d "$REAL_SLEEP 600" || fail "could not start the renamed stand-in"
+  ltmux -S "$split" new-session -d "$REAL_SLEEP 600" || fail "could not start the newline stand-in"
+  ln "$linked" "$dir/linked" || fail "could not hardlink a live socket into the private directory"
+  if ! ln "$moved" "$handle" || ! mv "$moved" "$dir/moved"; then
+    fail "could not rename a live socket into the private directory"
+  fi
+  nl="$dir/n"$'\n'"$split"
+  mkdir -p "$(dirname "$nl")"
+  ltmux -S "$nl" new-session -d "$REAL_SLEEP 600" || fail "could not start the worker's newline-named server"
+  nl_pid=$(ltmux -S "$nl" display-message -p '#{pid}')
+  ltmux -S "$dir/own" new-session -d "$REAL_SLEEP 600" || fail "could not start the worker's own -S server"
+  own_pid=$(ltmux -S "$dir/own" display-message -p '#{pid}')
+
+  # The planted sockets really do reach the foreign servers, and a line-split
+  # scan really does yield a foreign path, so the case cannot pass vacuously.
+  assert_equals "$(ltmux -S "$linked" display-message -p '#{pid}')" \
+    "$(ltmux -S "$dir/linked" display-message -p '#{pid}')" "the hardlink must reach the stand-in"
+  assert_equals "$(ltmux -S "$handle" display-message -p '#{pid}')" \
+    "$(ltmux -S "$dir/moved" display-message -p '#{pid}')" "the renamed socket must reach the stand-in"
+  find "$dir" -type s -print | grep -qxF "$split" ||
+    fail "a newline-split scan should yield the outside socket path"
+
+  fm_private_tmux_retire "$dir" || fail "retire should accept a private directory"
+  ltmux -S "$linked" has-session 2>/dev/null || fail "retire must not stop a server hardlinked into the directory"
+  ltmux -S "$handle" has-session 2>/dev/null || fail "retire must not stop a server renamed into the directory"
+  ltmux -S "$split" has-session 2>/dev/null || fail "retire must not stop a server named after a newline"
+  ! kill -0 "$nl_pid" 2>/dev/null || fail "retire must stop the worker's newline-named server"
+  ! kill -0 "$own_pid" 2>/dev/null || fail "retire must stop the worker's own -S server"
+  [ ! -e "$dir" ] || fail "retire must remove the private directory"
+  pass "retire stops only servers socketed inside the directory, despite hardlinked, renamed, or newline-named sockets"
+}
+
 test_ship_worker_cannot_reach_the_fleet
 test_control_inherited_tmux_reaches_the_fleet
 test_teardown_retires_the_private_directory
+test_retire_ignores_planted_foreign_sockets

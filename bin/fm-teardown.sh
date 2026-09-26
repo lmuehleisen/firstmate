@@ -298,6 +298,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-agy-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-private-tmux-lib.sh
+. "$SCRIPT_DIR/fm-private-tmux-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -3168,21 +3170,15 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 # retire_worker_tmux_dir <home> <id> <dir>: stop a ship or scout worker's private
-# tmux servers, each by its exact socket, and remove their directory
+# tmux servers and remove their directory through fm_private_tmux_retire
 # (docs/tmux-backend.md). Only the task's own expected directory is touched, and
 # only while it is still private to this user.
 retire_worker_tmux_dir() {
-  local home=$1 id=$2 dir=$3 sock
+  local home=$1 id=$2 dir=$3
   [ -n "$dir" ] || return 0
-  if [ "$dir" = "/tmp/fmwt-$(printf '%s\n%s' "$(cd "$home" && pwd -P)" "$id" |
-    { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)" ] &&
-    [ ! -L "$dir" ] && [ -d "$dir" ] && [ -O "$dir" ] &&
-    [ -z "$(find "$dir" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ]; then
-    while IFS= read -r sock; do
-      env -u TMUX -u TMUX_PANE tmux -S "$sock" kill-server >/dev/null 2>&1 || true
-    done < <(find "$dir" -type s -print 2>/dev/null)
-    rm -rf "$dir"
-  elif [ -e "$dir" ] || [ -L "$dir" ]; then
+  if { [ "$dir" != "/tmp/fmwt-$(printf '%s\n%s' "$(cd "$home" && pwd -P)" "$id" |
+    { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)" ] ||
+    ! fm_private_tmux_retire "$dir"; } && { [ -e "$dir" ] || [ -L "$dir" ]; }; then
     echo "warning: recorded worker tmux directory $dir is not task $id's private directory; leaving it and any server in it untouched" >&2
   fi
 }

@@ -2342,6 +2342,8 @@ if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
   . "$ROOT/bin/fm-timeout-lib.sh"
 fi
 
+# shellcheck source=bin/fm-private-tmux-lib.sh
+. "$ROOT/bin/fm-private-tmux-lib.sh"
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RUN_TMUX_TMPDIR=
 RECORDS="$RUN_TMP/records.tsv"
@@ -2354,13 +2356,7 @@ declare -a WORKER_SCRIPTS=()
 # Invoked indirectly by the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup_run() {
-  local sock
-  if [ -n "$RUN_TMUX_TMPDIR" ]; then
-    while IFS= read -r sock; do
-      env -u TMUX -u TMUX_PANE tmux -S "$sock" kill-server >/dev/null 2>&1 || true
-    done < <(find "$RUN_TMUX_TMPDIR" -type s -print 2>/dev/null)
-    rm -rf "$RUN_TMUX_TMPDIR"
-  fi
+  fm_private_tmux_retire "$RUN_TMUX_TMPDIR" || true
   rm -rf "$RUN_TMP"
 }
 

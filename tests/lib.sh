@@ -548,7 +548,7 @@ fm_git_worktree() {
 
 # fm_test_worker_tmux_prefix <meta>: the launch statements that start a ship or
 # scout worker on the private tmux directory its task record names
-# (bin/fm-worker-tmux-lib.sh), for suites that pin exact launch text.
+# (docs/tmux-backend.md), for suites that pin exact launch text.
 fm_test_worker_tmux_prefix() {
   local dir
   dir=$(sed -n 's/^worker_tmux_dir=//p' "$1")
