@@ -357,23 +357,10 @@ agy_wait_for_armed() {
   return 1
 }
 
-# Close the launched agy endpoint and prove it is gone. A kill command's own
-# status is not proof (tmux's adapter reports success either way), so closure
-# counts only once the backend no longer finds the target.
+# Close the launched agy endpoint and prove it is gone, through fm-spawn.sh's
+# single owner of endpoint closure.
 agy_endpoint_close_confirmed() {
-  local tab_id='' i=0 max=${FM_AGY_CLOSE_POLLS:-10} interval=${FM_AGY_POLL_INTERVAL:-0.5}
-  [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
-  if [ "$BACKEND" = orca ]; then
-    fm_backend_kill orca "$T" 2>/dev/null || return 1
-  else
-    fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || return 1
-  fi
-  while [ "$i" -lt "$max" ]; do
-    fm_backend_target_exists "$BACKEND" "$T" "$W" || return 0
-    i=$((i + 1))
-    [ "$i" -ge "$max" ] || sleep "$interval"
-  done
-  return 1
+  spawn_endpoint_close_confirmed "${FM_AGY_CLOSE_POLLS:-10}" "${FM_AGY_POLL_INTERVAL:-0.5}"
 }
 
 # shellcheck disable=SC2153 # STATE is bin/fm-spawn.sh's state directory global.

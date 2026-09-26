@@ -67,7 +67,18 @@ In an isolated local pool, a process-free leased slot kept its clean detached un
 The same suite drives the real spawn entry point with fake providers and endpoints to verify refusal before acquisition for an unleased recorded claim, cross-home project-lock contention, and preservation of a colliding lease without automatic return.
 It also refuses a recorded pool slot whose project identity cannot be established; `tests/fm-secondmate-harness.test.sh` checks that an unrelated non-Git secondmate home does not block an ordinary crew spawn.
 The generated lease command is also exercised in a real private tmux pane: the child enters the worktree, and exiting it leaves the outer project shell alive for guarded backend cleanup.
-`bin/fm-spawn.sh` owns acquisition and receipt mechanics; `bin/fm-worktree-claims-lib.sh` owns the shared local-home claim inventory.
+On 2026-09-26, `tests/fm-spawn-prelaunch-rollback.test.sh` passed on Darwin 25.6.0 with tmux 3.7c on a private `-S` socket and the fixture treehouse from `tests/lib.sh`.
+It drives the real spawn entry point into two refusals after the slot was leased and before launch delivery - an `--agy-bypass` scout over a tracked `.agents/hooks.json`, and a non-private staged-launch directory after the task record was published - and checks that each closes its window, returns the slot with `treehouse return --force`, and leaves no lease receipt, busy-state, task record, or agy wiring behind.
+The same suite spawns a raw agy launch command, which no longer aborts on an unresolved agy executable.
+
+```
+$ bash tests/fm-spawn-prelaunch-rollback.test.sh
+ok - fm-spawn.sh: an agy bypass refusal after leasing returns the slot and closes its window
+ok - fm-spawn.sh: a refusal after the record was published but before launch rolls everything back
+ok - fm-spawn.sh: a raw agy launch command spawns without resolving the agy executable
+```
+
+`bin/fm-spawn.sh` owns acquisition, receipt, and pre-launch rollback mechanics; `bin/fm-worktree-claims-lib.sh` owns the shared local-home claim inventory.
 
 `tests/fm-teardown-endpoint-safety.test.sh` verifies record-only recovery without reset, return, branch deletion, or endpoint termination, followed by ordinary cleanup of the remaining owner.
 It refuses live or locked claimants, uncommitted work, unlanded work on either named branch, detached ownership, and a force combination.
@@ -114,7 +125,7 @@ ok - real /bin/zsh accepted Enter waits on a blank cursor without retrying
 ok - real /bin/zsh exhausted submit clears its owned input
 ```
 
-`tests/fm-control-relaunch.test.sh` and `tests/fm-spawn-worktree-settle.test.sh` exercise both complete sender paths with dropped-Enter endpoints, including bounded failure, no retyping, input cleanup, and retained work or lease receipts.
+`tests/fm-control-relaunch.test.sh` and `tests/fm-spawn-worktree-settle.test.sh` exercise both complete sender paths with dropped-Enter endpoints, including bounded failure, no retyping, input cleanup, retained relaunch work, and a spawn whose cd never landed returning its leased slot.
 `tests/fm-tmux-submit-busy.test.sh` verifies that transcript-only matches and unreadable input receive no retry or cleanup keys.
 The real-shell test uses a `sleep` process as its launch postcondition; it does not establish authenticated agent startup or reproduce the original concurrent-load trigger.
 Relaunch reuses the existing agent-liveness classifier and its live-harness evidence in [runtime-backends.md](runtime-backends.md#agent-liveness-name-sources).
