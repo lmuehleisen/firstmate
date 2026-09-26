@@ -86,8 +86,11 @@ pass "$VERSION ($MODE): a piped download escalates and PostToolUse closes it onc
 wait_idle
 # Normal mode draws no mode label, so the running process's own arguments
 # prove the mode; smart mode must also render its label.
-ps -Ao args= | grep -F -- "--config $H/state/$ID.devin-config.json" | grep -v grep \
-  | grep -qF -- "--permission-mode $PERMISSION " || fail "the running worker is not in $PERMISSION mode: $(ps -Ao args= | grep -F "$ID.devin-config.json" | grep -v grep)"
+worker_args=$(ps -o args= -p "$(pgrep -f -- "--config $H/state/$ID.devin-config.json" | head -1)" 2>/dev/null)
+case "$worker_args" in
+  *"--permission-mode $PERMISSION "*) ;;
+  *) fail "the running worker is not in $PERMISSION mode: $worker_args" ;;
+esac
 [ "$PERMISSION" != smart ] || screen_text | grep -q 'smart mode on' || fail "smart mode is not rendered: $(screen_text | tail -4)"
 jq -e -s 'map(select(.event == "permission-request" and .decision == "approve" and .input == "git config --get core.bare")) | length == 1' "$LOG" >/dev/null \
   || fail "PermissionRequest did not approve git config --get core.bare: $(cat "$LOG")"

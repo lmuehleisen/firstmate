@@ -23,6 +23,8 @@
 # socket and `devin-lab` session, never the default server.
 unset TMUX TMUX_PANE
 
+# ROOT comes from tests/lib.sh, which the guard sources through fixtures.sh.
+# shellcheck disable=SC2153
 # shellcheck source=bin/fm-busy-lib.sh
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=bin/fm-composer-lib.sh

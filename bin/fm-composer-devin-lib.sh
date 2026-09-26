@@ -76,6 +76,7 @@ _fm_composer_select_devin() {  # <plain-screen>
     *) return 1 ;;
   esac
 
+  # shellcheck disable=SC2034 # read by bin/fm-composer-lib.sh, which sources this file
   FM_COMPOSER_SELECTED_KIND=devin
   FM_COMPOSER_SELECTED_FIRST=$first
   FM_COMPOSER_SELECTED_LAST=$last
