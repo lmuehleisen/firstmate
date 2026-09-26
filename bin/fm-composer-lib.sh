@@ -243,32 +243,35 @@ fm_composer_normalize_trim_var() {  # <varname>
   printf -v "$__fmnt_name" '%s' "$__fmnt_text"
 }
 
-# fm_composer_owned_text_key_var: the ONE key that compares text a sender typed
-# with the text a composer shows back. Every whitespace character is removed,
-# because a composer wraps typed text across rows, and so is U+2063, the
-# operational mark that Claude Code removes from its composer and that carries
-# no instruction text. In place through the named variable.
-fm_composer_owned_text_key_var() {  # <varname>
-  local __fmok_name=$1 __fmok_text
-  fm_composer_normalize_spaces_var "$__fmok_name"
-  __fmok_text=${!__fmok_name}
-  __fmok_text=${__fmok_text//[$' \t\r\n\v\f']/}
-  __fmok_text=${__fmok_text//$'\xE2\x81\xA3'/}
-  printf -v "$__fmok_name" '%s' "$__fmok_text"
-}
-
-# fm_composer_holds_owned_text: 0 when composer <content> is exactly the
-# sender's <text> under the key above. With `residue`, a non-empty leading part
-# of <text> also matches: Ctrl+U deletes one wrapped row per press from the end
-# of a Claude draft, so a cleanup in progress leaves a prefix of the typed text.
-# Anything else, including added text, is not the sender's to touch.
-fm_composer_holds_owned_text() {  # <text> <content> [residue]
-  local text=$1 content=$2
-  fm_composer_owned_text_key_var text
-  fm_composer_owned_text_key_var content
-  [ -n "$text" ] && [ -n "$content" ] || return 1
-  [ "$content" = "$text" ] && return 0
-  [ "${3:-}" = residue ] && [ "${text#"$content"}" != "$text" ]
+# fm_composer_holds_owned_text: 0 when a composer's <rows>, as
+# fm_composer_extract_selected_content prints them with a U+001F separator,
+# show exactly the sender's <text>. Each row must continue the text where the
+# previous row stopped, and only the whitespace a row break swallowed may be
+# skipped between rows, so a draft whose words or spacing changed inside a row
+# is not the sender's. U+2063, the operational mark Claude Code removes from
+# its composer, is ignored. With `residue`, rows that show a non-empty leading
+# part of <text> also match: Ctrl+U deletes one wrapped row per press from the
+# end of a Claude draft, so a cleanup in progress leaves a prefix.
+fm_composer_holds_owned_text() {  # <text> <rows> [residue]
+  local text=$1 rows=$2 row rest matched=0
+  local -a parts=()
+  text=${text//$'\xE2\x81\xA3'/}
+  rows=${rows//$'\xE2\x81\xA3'/}
+  fm_composer_normalize_spaces_var text
+  rest="${text#"${text%%[![:space:]]*}"}"
+  [ -n "$rows" ] || return 1
+  IFS=$'\x1f' read -r -a parts <<< "$rows" || true
+  for row in "${parts[@]}"; do
+    [ -n "$row" ] || continue
+    case "$rest" in
+      "$row"*) rest=${rest#"$row"} ;;
+      *) return 1 ;;
+    esac
+    matched=1
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+  done
+  [ "$matched" = 1 ] || return 1
+  [ -z "$rest" ] || [ "${3:-}" = residue ]
 }
 
 # fm_composer_strip_ghost [codex-animation]: the ONE fleet-wide ANSI-aware
@@ -1750,8 +1753,8 @@ _fm_composer_normalize_codex_animation_screen_var() {  # <varname> <styled> [cur
   FM_COMPOSER_CODEX_ANIMATION_NORMALIZED=1
 }
 
-fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
+fm_composer_extract_selected_content() {  # <caps> <screen> [row-separator]
+  local caps=$1 screen=$2 separator=${3:-} styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
@@ -1825,9 +1828,19 @@ EOF
       row=$((row + 1))
       continue
     fi
-    joined="${joined}${joined:+ }$content"
+    if [ -n "$separator" ]; then
+      joined="${joined}${joined:+$separator}$content"
+    else
+      joined="${joined}${joined:+ }$content"
+    fi
     row=$((row + 1))
   done
+  # A row separator keeps each row exactly as shown, for callers that compare
+  # rows; otherwise whitespace runs collapse into the one joined line.
+  if [ -n "$separator" ]; then
+    printf '%s' "$joined"
+    return 0
+  fi
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 

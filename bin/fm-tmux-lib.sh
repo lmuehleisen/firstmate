@@ -334,7 +334,7 @@ fm_tmux_composer_owned_input() { # <target> <text> [residue]
   esac
   content=$(fm_composer_extract_selected_content \
     "$(printf 'styled=1\ncursor=0\nidentity=0\nrows=0')" \
-    "$(fm_tmux_composer_capture "$target")") || return 2
+    "$(fm_tmux_composer_capture "$target")" $'\x1f') || return 2
   fm_composer_holds_owned_text "$text" "$content" "$mode"
 }
 

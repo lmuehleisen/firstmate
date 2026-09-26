@@ -998,6 +998,37 @@ test_queued_enter_verdict_does_not_convert_other_states() {
   pass "fm_composer_queued_enter_verdict: only proven pending is converted"
 }
 
+test_holds_owned_text_ignores_only_row_wrapping() {
+  local text rows us=$'\x1f' mark=$'\xE2\x81\xA3'
+  text="${mark}FIRSTMATE_OP: v1 away-supervisor: the review needs a pick  (two spaces)"
+  rows="FIRSTMATE_OP: v1 away-supervisor: the review${us}needs a pick  (two spaces)"
+  fm_composer_holds_owned_text "$text" "$rows" \
+    || fail "a word-boundary wrap without the U+2063 mark must still be the sender's text"
+  rows="FIRSTMATE_OP: v1 away-supervisor: the rev${us}iew needs a pick  (two spaces)"
+  fm_composer_holds_owned_text "$text" "$rows" \
+    || fail "a mid-word wrap must still be the sender's text"
+  for rows in \
+    "FIRSTMATE_OP: v1 away-supervisor: the review${us}needs a pick (two spaces)" \
+    "FIRSTMATE_OP: v1 away-supervisor: the  review${us}needs a pick  (two spaces)" \
+    "FIRSTMATE_OP: v1 away-supervisor: thereview${us}needs a pick  (two spaces)" \
+    "FIRSTMATE_OP: v1 away-supervisor: the review${us}needs a pick  (two spaces) ok" \
+    "FIRSTMATE_OP: v1 away-supervisor: the review"; do
+    if fm_composer_holds_owned_text "$text" "$rows"; then
+      fail "a changed composer must not be the sender's text: $rows"
+    fi
+  done
+  fm_composer_holds_owned_text "$text" "FIRSTMATE_OP: v1 away-supervisor: the review" residue \
+    || fail "complete leading rows are a cleanup residue"
+  if fm_composer_holds_owned_text "$text" "FIRSTMATE_OP: v1 away-supervisor: the  review" residue; then
+    fail "a respaced leading row is not a cleanup residue"
+  fi
+  if fm_composer_holds_owned_text "$text" "" residue; then
+    fail "an empty composer holds nothing of the sender's"
+  fi
+  pass "fm_composer_holds_owned_text: only row wrapping and the U+2063 mark are ignored"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+test_holds_owned_text_ignores_only_row_wrapping

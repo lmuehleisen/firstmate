@@ -278,6 +278,15 @@ flush && fail "a flush acted on a draft the daemon did not type"
 [ ! -s "$FX/keys.log" ] || fail "the daemon sent keys into a draft it did not type"
 pass "a draft that only resembles the owned digest is never touched"
 
+reset
+buffer 'lab-g.status: blocked: EVENT-GOLF needs a pick'
+tmux send-keys -t "$PANE" -l 'the owned  digest after the captain added a space'
+sleep 0.3
+daemon '_owned_record_write "$FM_STATE_OVERRIDE" "$FM_SUPERVISOR_TARGET" tmux "the owned digest after the captain added a space" 1 x'
+flush && fail "a flush acted on a respaced owned digest"
+[ ! -s "$FX/keys.log" ] || fail "the daemon sent keys into an owned digest whose spacing changed"
+pass "an owned digest whose spacing the captain changed is never touched"
+
 # --- 4. a stale owned digest is cleared, never submitted --------------------
 reset
 touch "$FX/swallow-enter"
