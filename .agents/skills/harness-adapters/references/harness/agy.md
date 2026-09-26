@@ -20,8 +20,8 @@ agy self-updates aggressively and without asking - it moved 1.1.25 -> 1.1.28 -> 
 | Exit | `/exit` (alias `quit`), one Enter; prints `Resume with -c (or command below): agy --conversation=<uuid>`. |
 | Interrupt | Single `Escape`, which prints `Interrupted · What should Antigravity CLI do instead?` and leaves the composer EMPTY, so no clear key is needed. |
 | Resume | `agy -c` / `--continue` for the most recent conversation, or `agy --conversation=<uuid>` from the id printed at exit. |
-| Models | `--model <model>`; `agy models` lists the account's ids. Effort is also encoded as a model-id suffix - see "Model and effort". |
-| Effort | `--effort low|medium|high` ONLY; anything above is refused. See "Model and effort". |
+| Models | `--model <model>`, checked against `agy models` before launch; effort is also encoded as a model-id suffix - see "Model and effort". |
+| Effort | Firstmate emits `--effort low|medium|high` only; `xhigh` is refused and agy 1.2.11 also accepts `max`. See "Model and effort". |
 | Marker | `JETSKI_APP_DATA_DIR=antigravity-cli` on tool subprocesses, alongside `ANTIGRAVITY_LS_VERSION=cli-<version>`, `ANTIGRAVITY_PROJECT_ID`, `ANTIGRAVITY_TRAJECTORY_ID`, `ANTIGRAVITY_LS_ADDRESS`, and `ANTIGRAVITY_SOURCE_METADATA`. agy does NOT set `GEMINI_CLI`. |
 | Composer | `>` between solid rules and the native footer; `../../../../../bin/fm-composer-lib.sh` owns shape and placeholder classification. |
 | Skill | `/<skill>`; typing `/` opens a filtered command menu and ONE Enter selects and submits. |
@@ -111,6 +111,7 @@ That matters for how the write guards below are read: on a read-only scout they 
 None of them reads the task kind - every write target is resolved physically against the policy file's own worktree and scratch roots - so the widening changed who they protect rather than what they check.
 
 Under bypass the hook decision surface collapses to two effective outcomes, verified live on agy 1.2.6: `deny` still blocks with its reason, and abstention runs the call - `allow`, `ask`, and even `force_ask` have no prompt left to act on, so they cannot surface a question.
+The layer was re-verified on agy 1.2.11 on 2026-09-25, where a subagent's own tool calls also reach the same `PreToolUse` hooks under the subagent's conversation id; `../../../../../docs/verification/runtime-backends-fork.md` owns the evidence.
 The adapter therefore emits only `deny` or silence; every "ask the human" case denies with `held for firstmate`, writes a pending marker under `<policy>-pending/` keyed `agy-permission-<conversationId>-s<stepIdx>`, and appends a `needs-decision` status line.
 A held call is binding: a retry is matched against the open marker and the declined record before any cache lookup or judge run, so the same call can never run on a re-judged verdict or a shifted step index - only a firstmate `approve` opens it, and `decline` leaves a durable record that stops the retry from re-escalating.
 An approval lands in the per-task verdict cache for ordinary calls; for a never-approve class it is a one-shot token that the authorized retry consumes.
@@ -120,7 +121,7 @@ File-tool writes are checked against the resolved physical path, so a symlink ca
 Under bypass a statically visible exec write or removal outside the task write roots is refused rather than judged - there is no native prompt behind the judge to correct a bad verdict - while credential reads are refused rather than escalated.
 The remaining surface is inherent to a lexical policy: a refused command reached through an interpreter, encoded pipe, alias, or expansion is not statically visible, so it still reaches the judge, and no lexical layer can close that reach.
 
-Defences that gate the launch: `jq` present, the agy version inside the adapter's live-verified set (`verified-versions`, currently `1.2.4 1.2.5 1.2.6 1.2.7`), no project-supplied `.agents/hooks.json` in the worktree or ancestors up to the git root (one malformed entry silently disables every hook in that file, firstmate's denies included), and a startup canary that closes the endpoint when the adapter's armed line for this launch's busy generation never reaches the observer log.
+Defences that gate the launch: `jq` present, the agy version inside the adapter's live-verified set (`verified-versions`, currently `1.2.4 1.2.5 1.2.6 1.2.7 1.2.11`), no project-supplied `.agents/hooks.json` in the worktree or ancestors up to the git root (one malformed entry silently disables every hook in that file, firstmate's denies included), and a startup canary that closes the endpoint when the adapter's armed line for this launch's busy generation never reaches the observer log.
 The judge is selected per task from the tiers `../../../../../bin/fm-judge-tier-lib.sh` owns, and agy judges agy by default: without `--agy-judge` the tier calls `agy -p` under its own sandbox on `gemini-3.6-flash-low`, with a 100-second budget pinned beside the Devin adapter's, and its prompt rides on the process argument list, so a call under review is visible in `ps` while the judge runs.
 `--agy-judge <tier>[:<model>]` selects another tier - a Devin SWE-2 judge for an agy worker, for instance - and refuses the launch when the tier is unknown or its executable is not installed, rather than falling back onto the default.
 The resolved tier is printed before the launch, repeated on the spawned line, recorded as `agy_judge=` in the task's metadata, and named in every judge-decided log record, so which judge adjudicated a call stays readable after teardown removes the per-task policy file.
@@ -168,10 +169,14 @@ Effort is published TWICE and the two forms conflict:
 - `--effort low|medium|high` is a separate flag.
 
 Passing both refuses the launch: `--model gemini-3.8-flash-high --effort low` exits with `--model gemini-3.8-flash-high conflicts with --effort=low`.
-The unsuffixed base id is accepted even though the listing does not show it, and composes with the flag.
+The unsuffixed base id is not listed, but agy accepts it with `--effort` when the listing carries that base at that level; without `--effort`, or with a level the listing lacks for it, agy refuses.
 The adapter therefore emits at most one: a model id already carrying a level wins and no effort flag is sent.
 
-Firstmate's `xhigh` and `max` are above agy's ceiling - `--effort xhigh` is refused with `invalid --effort "xhigh" (valid: low, medium, high)` - so both cap onto `high` rather than being dropped, per `../common/model-and-effort.md`.
+Before any endpoint exists, spawn checks the selected model against a bounded `agy models` listing: a listed id or a supported base-plus-level alias launches, anything else refuses with the concrete reason, and a listing that fails, is empty, or times out launches the model unvalidated with a notice.
+`../../../../../bin/fm-spawn.sh`'s header owns the bound and the exact acceptance rule.
+
+Firstmate's `xhigh` is above agy's ceiling - `--effort xhigh` is refused with `invalid --effort "xhigh" (valid: low, medium, high, max)` on agy 1.2.11 - so it caps onto `high` rather than being dropped, per `../common/model-and-effort.md`.
+Firstmate's `max` caps onto `high` too; agy 1.2.11's own `max` level is not yet adopted.
 The requested level stays recorded in task metadata.
 
 ## Interruptions Firstmate cannot suppress

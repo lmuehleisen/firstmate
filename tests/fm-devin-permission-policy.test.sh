@@ -943,6 +943,71 @@ EOF
   pass "fm-devin-permission-policy: review replies, @codex review, and thread resolution are approved only on the task's own PR"
 }
 
+# Output filters, read-only graphql queries, and && chains of qualifying
+# review-round calls are approved; everything around them keeps escalating.
+test_own_pr_review_round_shapes() {
+  local policy dir wt
+  unset GH_HOST
+  policy=$(own_pr_case own-pr-shapes)
+  dir=$(case_dir "$policy")
+  wt=$(jq -r .worktree "$policy")
+  printf 'window=x\nkind=ship\npr=https://github.com/Owner/Name/pull/41\n' > "$dir/state/t1.meta"
+  mkdir -p "$wt/q"
+  # shellcheck disable=SC2016 # $owner, $name, and $number are GraphQL variables
+  printf 'query($owner: String!, $name: String!, $number: Int!) {\n  repository(owner: $owner, name: $name) {\n    pullRequest(number: $number) { reviewThreads(first: 50) { nodes { id isResolved } } }\n  }\n}\n' > "$wt/q/threads.graphql"
+  printf 'query { viewer { login } }\nmutation { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }\n' > "$wt/q/hidden.graphql"
+  printf '# harmless\nquery { viewer { login } }\n' > "$wt/q/commented.graphql"
+  printf 'query { viewer { login } }\n' > "$dir/outside.graphql"
+  ln -s "$wt/q/hidden.graphql" "$wt/q/link.graphql"
+
+  expect_own_pr_approved "$policy" "a review-round shape" <<'EOF'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -f body='Fixed in abc1234.' --jq '.id'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -f body='Fixed in abc1234.' --jq '.id' --silent
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -f body='Fixed.' -q '.html_url'
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }' --jq '.data.resolveReviewThread.thread.isResolved'
+gh api graphql -f query='query { repository(owner: "Owner", name: "Name") { pullRequest(number: 41) { reviewThreads(first: 50) { nodes { id isResolved } } } } }'
+gh api graphql -f query='{ viewer { login } }' --jq .data.viewer.login
+gh api graphql -F query=@q/threads.graphql -F owner=Owner -F name=Name -F number=41 --paginate --jq '.data.repository.pullRequest.reviewThreads.nodes[]'
+gh api graphql -f query='query { repository(owner: "someone", name: "else") { pullRequest(number: 9) { title } } }'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' && gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Also fixed.' --jq '.id'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' && gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }' && gh api repos/owner/name/issues/41/comments -f body='@codex review'
+EOF
+  [ ! -e "$dir/state/t1.status" ] || fail "an approved review-round shape must not wake firstmate: $(cat "$dir/state/t1.status")"
+
+  expect_own_pr_escalated "$policy" "a review-round near miss" <<'EOF'
+gh pr merge 41 --repo owner/name --jq '.id'
+gh api repos/owner/name/pulls/41/merge -X PUT --jq '.sha'
+gh api repos/owner/name/pulls/42/comments -F in_reply_to=3141592 -f body='Fixed.' --jq '.id'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=3141592 -f body='Fixed.' --jq
+gh api graphql -F query=@q/hidden.graphql
+gh api graphql -F query=@q/link.graphql
+gh api graphql -F query=@q/commented.graphql
+gh api graphql -F query=@q/missing.graphql
+gh api graphql -F query=@-
+gh api graphql -F query=@../outside.graphql
+gh api graphql -f query='query { viewer { login } } mutation { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
+gh api graphql -f query='query { viewer { login } }' -F query='mutation { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
+gh api graphql -f query='query { viewer { login } }' -F notes=@q/threads.graphql
+gh api graphql -f query='subscription { x }'
+gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_own"}) { thread { isResolved } } }' --paginate
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' && gh pr merge 41 --repo owner/name
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' && gh api repos/owner/name/pulls/42/comments -F in_reply_to=2 -f body='Fixed.'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' ; gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Fixed.'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' || gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Fixed.'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' | gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Fixed.'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' && && gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Fixed.'
+gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.' &&
+EOF
+  multiline=$(printf '%s &&\n\n%s' "gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.'" "gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Also fixed.'")
+  own_pr_hook "$policy" "$multiline"
+  [ "$RC" = 0 ] && [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" = approve ] \
+    || fail "a && chain continued on the next line must approve, got rc=$RC out=$OUT"
+  own_pr_hook "$policy" "$(printf '%s\n%s' "gh api repos/owner/name/pulls/41/comments -F in_reply_to=1 -f body='Fixed.'" "gh api repos/owner/name/pulls/41/comments -F in_reply_to=2 -f body='Fixed.'")"
+  [ "$(printf '%s' "$OUT" | jq -r .decision 2>/dev/null)" != approve ] \
+    || fail "a newline without && must not join review calls into an approved chain"
+  pass "fm-devin-permission-policy: output filters, read-only graphql queries, and && chains of review-round calls are approved; near misses escalate"
+}
+
 # A read-only web lookup is routine work on ANY host: a GET-shaped curl or
 # wget whose output lands on stdout, a pipe that is not a shell or
 # interpreter, or a file inside the task's write roots. These approve
@@ -1523,6 +1588,7 @@ test_judge_retries_a_missing_verdict_once
 test_verdict_cache_reuses_approvals_only
 test_outward_actions_always_escalate
 test_own_pr_review_writes
+test_own_pr_review_round_shapes
 test_read_only_lookups_are_approved_statically
 test_downloads_that_do_something_always_escalate
 test_the_brief_is_not_writable_by_the_worker

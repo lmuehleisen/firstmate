@@ -47,6 +47,7 @@ SOCKET="fm-inbox-live-$$"
 SESSION="inboxlive"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-inbox-live.XXXXXX")
 LAB=$(cd "$LAB" && pwd)
+fm_test_require_tmproot "$LAB"
 TIMEOUT=${FM_SEND_INBOX_LIVE_TIMEOUT:-240}
 CHECKED=0
 RECOVERY_CHECKED=0
@@ -57,7 +58,7 @@ note() { printf '# %s\n' "$1"; }
 
 cleanup() {
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
-  rm -rf "$LAB"
+  fm_test_rm_tmproot "${LAB:-}"
 }
 trap cleanup EXIT
 

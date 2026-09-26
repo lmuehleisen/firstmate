@@ -237,6 +237,8 @@ lint = jobs.fetch("lint").fetch("strategy")
 raise "lint failures must not cancel another partition" unless lint.fetch("fail-fast") == false
 matrix = lint.fetch("matrix")
 raise "unexpected lint dimensions" unless matrix.keys == ["partition"]
+lint_run = jobs.fetch("lint").fetch("steps").map { |step| step["run"].to_s }.find { |run| run.include?("--partition") }
+raise "CI lint must run one ShellCheck worker per runner to bound memory" unless lint_run.to_s.split.each_cons(2).include?(["--jobs", "1"])
 parts = matrix.fetch("partition")
 roots = parts.flat_map do |p|
   output, result = Open3.capture2(File.join(root, "bin/fm-lint.sh"), "--partition", "#{p}of#{parts.length}", "--list-files")

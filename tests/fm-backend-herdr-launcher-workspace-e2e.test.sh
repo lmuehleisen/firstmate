@@ -23,6 +23,8 @@
 # operation goes through bin/fm-herdr-lab.sh, which appends the named session
 # flag and verifies the default fleet session is unchanged after teardown.
 set -u
+# shellcheck source=tests/tmproot-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmproot-guard.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -69,7 +71,7 @@ cleanup_all() {
   done
   WORKTREES=()
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?
-  rm -rf "$TMP_ROOT"
+  fm_test_rm_tmproot "${TMP_ROOT:-}"
   return "$status"
 }
 trap cleanup_all EXIT

@@ -24,7 +24,7 @@ cleanup() {
   if [ "$rc" -ne 0 ] && [ -n "$LAB" ]; then
     printf 'agy observer failure evidence retained: %s\n' "$LAB" >&2
   else
-    [ -z "$LAB" ] || rm -rf -- "$LAB"
+    fm_test_rm_tmproot "${LAB:-}"
   fi
 }
 trap cleanup EXIT
@@ -48,6 +48,7 @@ AGY_VERSION=$("$AGY_BIN" --version 2>/dev/null | tr -d '\n')
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-observer.XXXXXX")
 # Resolved deliberately, exactly as bin/fm-spawn.sh resolves each agy grant.
 LAB=$(cd "$LAB" && pwd -P)
+fm_test_require_tmproot "$LAB"
 WORKSPACE="$LAB/workspace" STATE="$LAB/state" ID=agy-observer
 mkdir -p "$WORKSPACE" "$STATE"
 # A git workspace is the shape every real worker runs in.

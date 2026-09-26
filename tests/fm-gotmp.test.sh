@@ -10,6 +10,8 @@
 # The isolated fm-spawn subprocess in fm-kimi-harness.test.sh covers temp-root creation,
 # metadata publication, and the pane environment export.
 set -u
+# shellcheck source=tests/tmproot-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmproot-guard.sh"
 
 # This suite does not source tests/lib.sh, so exempt its teardown subprocess from
 # the gate-lifecycle refusal (bin/fm-gate-refuse-lib.sh) the way lib.sh does for
@@ -33,7 +35,7 @@ TMP_ROOT=
 
 cleanup() {
   if [ -n "${TMP_ROOT:-}" ]; then
-    rm -rf "$TMP_ROOT"
+    fm_test_rm_tmproot "${TMP_ROOT:-}"
   fi
 }
 trap cleanup EXIT
@@ -59,6 +61,7 @@ SH
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
+  ln -s "$ROOT/bin/fm-composer-devin-lib.sh" "$fake/bin/fm-composer-devin-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
@@ -168,6 +171,7 @@ SH
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
+  ln -s "$ROOT/bin/fm-composer-devin-lib.sh" "$fake/bin/fm-composer-devin-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   ln -s "$ROOT/bin/fm-private-tmux-lib.sh" "$fake/bin/fm-private-tmux-lib.sh"

@@ -13,13 +13,11 @@
 # here rather than improvised per harness in agent prose.
 #
 # This file owns three capability tables plus their pure artifact-path tables,
-# and TWO named exceptions to that purity: fm_control_endpoint_absence_verdict,
+# and ONE named exception to that purity - fm_control_endpoint_absence_verdict,
 # the single owner of the per-backend endpoint-absence proof, which does run
-# backend reads; and fm_control_devin_wiring_owned, which reads the worktree's
-# git index and info/exclude because only the repo itself can prove a managed
-# file is firstmate's. Everything else has no side effects, runs no backend
-# command, and reads no state, so sourcing this file is still free and the
-# tables can be read by a test as a pure contract:
+# backend reads. Everything else has no side effects, runs no backend command,
+# and reads no state, so sourcing this file is still free and the tables can be
+# read by a test as a pure contract:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
 #      point on the control plane; a caller either names an allowlisted verb or
@@ -384,53 +382,8 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.agy-hooks/.agents/hooks.json"
       printf '%s\n' "$state/$id.agy-permission.json"
       ;;
-    # The sibling $id.devin-permission-pending/ escalation markers are retired
-    # through fm-devin-permission-policy.sh retire before these files go, so
-    # each open decision is closed as not-run while the policy file still
-    # names the status file.
-    devin)
-      printf '%s\n' "$wt/.devin/config.local.json"
-      printf '%s\n' "$wt/.devin/rules/firstmate-attribution.md"
-      printf '%s\n' "$state/$id.devin-permission.json"
-      ;;
+    devin) printf '%s\n' "$state/$id.devin-config.json" ;;
   esac
-}
-
-# The directories a retired harness incarnation's worktree wiring lived in.
-# A relaunch removes each with rmdir after the wiring files above are gone, so
-# a directory leaves only while empty: a project's own content under the same
-# path is never firstmate wiring and must survive a harness switch. Prints zero
-# or more absolute paths, one per line, deepest first so each parent is
-# attempted only after its managed child is gone.
-fm_control_harness_wiring_dirs() {  # <harness> <worktree>
-  local harness=${1-} wt=${2-}
-  [ -n "$wt" ] || return 1
-  case "$harness" in
-    devin)
-      printf '%s\n' "$wt/.devin/rules"
-      printf '%s\n' "$wt/.devin"
-      ;;
-  esac
-}
-
-# Whether the devin managed file at <worktree>/<relpath> is provably
-# firstmate-owned wiring, safe to retire. A path git tracks is the project's
-# own and never qualifies - removing it would strand a dirty worktree missing
-# a tracked file if the worktree return then fails, and bin/fm-spawn.sh's
-# launch refusal means a devin incarnation's own copies were never tracked to
-# begin with. An untracked path qualifies when the task's recorded harness
-# resolves to devin, or when the path still sits in the git info/exclude list
-# fm-spawn writes for exactly its two managed files: the shape a pooled
-# worktree keeps after an older teardown left the files behind under a later
-# non-devin task.
-fm_control_devin_wiring_owned() {  # <recorded-harness> <worktree> <relpath>
-  local harness=${1-} wt=${2-} rel=${3-} excl
-  [ -n "$wt" ] && [ -n "$rel" ] || return 1
-  ! git -C "$wt" ls-files --error-unmatch "$rel" >/dev/null 2>&1 || return 1
-  [ "$(fm_control_harness_family "$harness" 2>/dev/null || true)" = devin ] && return 0
-  excl=$(git -C "$wt" rev-parse --path-format=absolute --git-path info/exclude 2>/dev/null) \
-    && [ -n "$excl" ] || return 1
-  grep -qxF "$rel" "$excl" 2>/dev/null
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

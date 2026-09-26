@@ -21,6 +21,7 @@ command -v mkfifo >/dev/null 2>&1 || { echo "skip: mkfifo not found (holder proc
 TMP_ROOT=$(fm_test_tmproot fm-remote-herdr-guard)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
+fm_test_require_tmproot "$TMP_ROOT"
 HOLDER_PIDS=()
 HOLDER_FD=5
 trap 'if [ "${#HOLDER_PIDS[@]}" -gt 0 ]; then kill "${HOLDER_PIDS[@]}" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT

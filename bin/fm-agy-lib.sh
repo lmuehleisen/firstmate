@@ -54,8 +54,6 @@
 #   so a relaunch re-judges on the same tier and a later reader of the decision
 #   log can tell which judge adjudicated this task's calls.
 #
-#   resolve_agy_binary
-#       prints the absolute agy executable, or refuses when none is on PATH
 #   fm_agy_permission_flags <crew-permission-mode>
 #       prints the launch permission flags for auto or manual
 #   fm_agy_relaunch_inherit
@@ -96,32 +94,6 @@
 # AGY_JUDGE_MODEL; fm_agy_spawn_wire sets AGY_JUDGE_BIN. The validate, wire,
 # and ready-gate functions exit the spawn on a refusal, exactly as the inline
 # code did.
-
-# agy ships as a single self-updating binary. It is resolved to an absolute
-# path once here so the pane launches the same executable this spawn checked,
-# and a missing install refuses BEFORE any endpoint or worktree exists rather
-# than leaving a pane at a "command not found" shell.
-resolve_agy_binary() {
-  local candidate dir
-  candidate=$(command -v agy 2>/dev/null || true)
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    case "$candidate" in
-    /*)
-      printf '%s\n' "$candidate"
-      return 0
-      ;;
-    *)
-      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-      if [ -n "$dir" ]; then
-        printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-        return 0
-      fi
-      ;;
-    esac
-  fi
-  echo "error: agy executable not found on PATH; install the Antigravity CLI or select a different verified harness" >&2
-  return 1
-}
 
 # agy has no reviewed-auto mode. Its only blanket option is
 # --dangerously-skip-permissions, which auto stays deliberately clear

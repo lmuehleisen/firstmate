@@ -339,8 +339,9 @@ The portable suite `tests/fm-agy-harness.test.sh` pins the record schema, the fi
 
 ### Bypass permission layer (opt-in)
 
-Verified on 2026-09-20 with agy 1.2.7 on macOS 25.6.0 in scratch workspaces under the task temp root, on `gemini-3.6-flash-low` headless runs.
-The same six checks passed on 1.2.6 on 2026-09-18, and the earlier hook-contract facts were verified on 1.2.4 and 1.2.5, so the layer's live-verified set is `1.2.4 1.2.5 1.2.6 1.2.7`.
+Verified on 2026-09-25 with agy 1.2.11 on macOS 25.6.0 in scratch workspaces under the task temp root, on `gemini-3.6-flash-low` headless runs.
+The same six checks passed on 1.2.7 on 2026-09-20 and on 1.2.6 on 2026-09-18, and the earlier hook-contract facts were verified on 1.2.4 and 1.2.5, so the layer's live-verified set is `1.2.4 1.2.5 1.2.6 1.2.7 1.2.11`.
+Versions 1.2.8 through 1.2.10 were never installed on the verifying machine and stay outside the set.
 The set stays an explicit allowlist rather than a minimum version, because each entry is individually proven against the version-sensitive hook contract.
 
 ```sh
@@ -348,17 +349,30 @@ FM_AGY_BYPASS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-bypass-live-e2e.test.sh
 ```
 
 ```text
-ok - agy 1.2.7: a policy deny blocks a bypassed call and the reason reaches the model
-ok - agy 1.2.7: an abstained task-local file op runs unchanged and the armed heartbeat logged
-ok - agy 1.2.7: a timed-out judge denies, holds the call for firstmate, and never abstains
-ok - agy 1.2.7: install-worker refuses a malformed merged hooks.json before any launch
-ok - agy 1.2.7: a force_ask decision under bypass did not block the call - no prompt exists to force
-ok - agy 1.2.7: a bypass session whose hook never logs leaves no armed line for the canary to trust
-# agy bypass permission layer live checks passed (agy 1.2.7)
+ok - agy 1.2.11: a policy deny blocks a bypassed call and the reason reaches the model
+ok - agy 1.2.11: an abstained task-local file op runs unchanged and the armed heartbeat logged
+ok - agy 1.2.11: a timed-out judge denies, holds the call for firstmate, and never abstains
+ok - agy 1.2.11: install-worker refuses a malformed merged hooks.json before any launch
+ok - agy 1.2.11: a force_ask decision under bypass did not block the call - no prompt exists to force
+ok - agy 1.2.11: a bypass session whose hook never logs leaves no armed line for the canary to trust
+# agy bypass permission layer live checks passed (agy 1.2.11)
 ```
 
 What this proves: `{"decision":"deny","reason":...}` holds under `--dangerously-skip-permissions` and the model echoes the reason; abstention runs the call (the layer's only approval surface); a dead judge still denies; a malformed merge is caught before launch; and a session that never loads the adapter produces no armed line for `fm-spawn`'s canary to trust.
 What it also shows: `force_ask` is inert under bypass - there is no prompt left to force - so deny plus abstain are the only effective decisions the layer can emit, and every "ask the human" path must go through the pending-marker escalation instead.
+
+Admission checks beyond the guard, run by hand on 2026-09-25 against agy 1.2.11 with the production `install-worker` wiring and policy file shape, headless `-p` runs plus interactive `-i` sessions on a private `tmux -S` socket:
+
+- Hook firing per tool class: `run_command`, `view_file`, `write_to_file`, `replace_file_content`, `read_url_content`, `invoke_subagent`, and `send_message` each emitted `PreToolUse`, and the first four also emitted `PostToolUse` when their call ran.
+  A subagent started through `invoke_subagent` ran its own `run_command` through the same hooks under its own `conversationId`, so delegated calls are policed rather than escaping the layer.
+  The 1.2.11 print-mode toolset offered to `gemini-3.6-flash-low` did not include `list_dir`, `grep_search`, or `search_web`; the model listed its callable tools without them and fell back to `run_command` for directory listing and search, so those three tool names had no live call to observe.
+  The payload shape was unchanged: `run_command` args still carry `CommandLine`, `Cwd`, `WaitMsBeforeAsync`, `toolAction`, and `toolSummary`.
+- Held calls in one interactive conversation, judge timeout 1s: the first `python3 -c` write was denied with a pending marker `agy-permission-<conversationId>-s2` and a `needs-decision` line; after `approve` the model's retry at step 6 ran with decider `cache` and no new escalation, and after `decline` the retry at step 6 was refused by policy with no new marker or `needs-decision` line.
+  Retries from separate headless conversations do not share a cache key, because the model writes a fresh `toolAction`, `toolSummary`, and `WaitMsBeforeAsync` per conversation; the worker retry path is the same-conversation one above.
+- Physical-path write guards: a `write_to_file` through an in-worktree symlink to a directory outside every write root was refused (`write_to_file outside the task write roots (...) is refused by firstmate policy`) and nothing landed, and a `write_to_file` into the worktree's `.agents/` was refused as agent or git configuration.
+  A symlink target under `$TMPDIR` is inside the scratch write roots by design, so the probe target must sit outside `/tmp` and `$TMPDIR`.
+- Startup canary in the worker shape: an interactive `-i` bypass launch wrote the adapter's armed line stamped with that launch's busy generation, which is the exact record `agy_wait_for_armed` polls.
+- Default judge tier: `judge-probe` on a residue `run_command` printed `tier=agy model=gemini-3.6-flash-low static=residue verdict=approve reason=...` and left every file in the case state directory byte-identical.
 
 `--sandbox` composition probe, 2026-09-19, agy 1.2.7: `agy -p --model gemini-3.6-flash-low --dangerously-skip-permissions --sandbox` parses and runs in headless mode, and the model completed file-tool and `run_command` writes to the workspace, to a sibling state directory, and to `$HOME` - no file-write surface the probes reached was restricted.
 The launch therefore stays on `--dangerously-skip-permissions` alone: `--sandbox` is not omitted because it fails to compose but because no containment was observable in this mode, and its interactive-session behaviour under a spawned pane is unverified.
@@ -412,19 +426,49 @@ Silence is required here: returning `{}` instead caused the same live worker's f
 The vendor's [PreToolUse response schema](https://antigravity.google/docs/hooks#pretooluse) requires a decision when returning JSON.
 `tests/fm-agy-harness.test.sh` covers silent scope and payload rejection, while allowed calls in a primary or marked linked secondmate retain `ask`.
 
-### Model ids and --effort conflict
+### Model ids, catalog, and --effort conflict
+
+Refreshed 2026-09-25 with agy 1.2.11 on macOS 25.6.0, headless in a scratch directory; `~/.gemini/antigravity-cli/settings.json` and `~/.gemini/settings.json` hashed identically before and after.
+The catalog `bin/fm-spawn.sh` checks against, with `Fetching available models...` on stderr:
 
 ```sh
-agy --model gemini-3.8-flash-high --effort low -p 'reply with exactly: OK'
-agy --model gemini-3.8-flash --effort high -p 'reply with exactly: OK'
-agy --effort xhigh -p 'reply with exactly: OK'
+agy models </dev/null
 ```
 
 ```text
-error: invalid model selection (--model "gemini-3.8-flash-high" --effort "low"): --model gemini-3.8-flash-high conflicts with --effort=low
-OK
-error: invalid model selection (--model "" --effort "xhigh"): invalid --effort "xhigh" (valid: low, medium, high)
+gemini-3.8-flash-high	Gemini 3.8 Flash (High)
+gemini-3.8-flash-medium	Gemini 3.8 Flash (Medium)
+gemini-3.8-flash-low	Gemini 3.8 Flash (Low)
+gemini-3.7-flash-high	Gemini 3.7 Flash (High)
+gemini-3.7-flash-medium	Gemini 3.7 Flash (Medium)
+gemini-3.7-flash-low	Gemini 3.7 Flash (Low)
+gemini-3.6-flash-high	Gemini 3.6 Flash (High)
+gemini-3.6-flash-medium	Gemini 3.6 Flash (Medium)
+gemini-3.6-flash-low	Gemini 3.6 Flash (Low)
+gemini-3.1-pro-high	Gemini 3.1 Pro (High)
+gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
+claude-sonnet-4-6	Claude Sonnet 4.6 (Thinking)
+claude-opus-4-6-thinking	Claude Opus 4.6 (Thinking)
+gpt-oss-120b-medium	GPT-OSS 120B (Medium)
 ```
+
+Each launch pair ran as `agy -p 'Reply with exactly the word OK and nothing else. Do not use any tools.' --add-dir <scratch> --print-timeout 100s <pair> </dev/null`:
+
+| Pair | Exit | Output |
+|---|---:|---|
+| `--model gemini-3.8-flash-low` | 0 | `OK` |
+| `--model gemini-3.8-flash-high --effort high` | 0 | `OK` |
+| `--model gemini-3.8-flash --effort low` | 0 | `OK` |
+| `--model gemini-3.8-flash --effort high` | 0 | `OK` |
+| `--model gemini-3.8-flash-high --effort low` | 1 | `error: invalid model selection (--model "gemini-3.8-flash-high" --effort "low"): --model gemini-3.8-flash-high conflicts with --effort=low` |
+| `--model gemini-3.8-flash` | 1 | `error: invalid model selection (--model "gemini-3.8-flash" --effort ""): --model gemini-3.8-flash requires --effort (available: low, medium, high)` |
+| `--model gemini-3.1-pro --effort medium` | 1 | `error: invalid model selection (--model "gemini-3.1-pro" --effort "medium"): gemini-3.1-pro has no "medium" effort (available: low, high)` |
+| `--model gemini-3.8-flash --effort xhigh` | 1 | `error: invalid model selection (--model "gemini-3.8-flash" --effort "xhigh"): invalid --effort "xhigh" (valid: low, medium, high, max)` |
+| `--model gemini-3.9-nonexistent` | 1 | ends with the catalog's labels, e.g. `GPT-OSS 120B (Medium)` |
+
+A listed id or a base whose `<base>-<level>` is listed for the passed level therefore launches, and every refused shape above is one `bin/fm-spawn.sh` refuses before an endpoint exists.
+agy 1.2.11 also accepts `--effort max`; the adapter still caps xhigh and max at high.
+`tests/fm-agy-harness.test.sh` pins the acceptance rule and the unreachable, hung, and invalid-bound listing behavior against a fake catalog of the same shape.
 
 ### End-to-end supervised task
 
@@ -479,8 +523,9 @@ The vendor binary is `/opt/homebrew/bin/devin` (single arm64 Mach-O binary from 
 The agent process runs as `devin` (`ps -o comm=` reports `devin`), spawning a child `/opt/homebrew/bin/devin`.
 Devin publishes no harness marker to child tool environments: environment inspection confirmed only `FM_*`, `GIT_EDITOR`, `GIT_TERMINAL_PROMPT`, and inherited launcher variables (`CLAUDECODE` unset).
 `DEVIN_PROJECT_DIR` appears only inside hook execution environments.
-Firstmate's launch boundary establishes `FM_DEVIN_HARNESS=devin`, which is accepted by `bin/fm-harness.sh` only under an exact `devin` ancestor process.
-`tests/fm-devin-harness.test.sh` verifies that ancestry classification identifies `devin` and ignores unrelated processes.
+`bin/fm-harness.sh` therefore identifies Devin by an exact `devin` ancestor alone, with no Firstmate launch marker.
+Verified live on 2026-09-25 with `devin 3000.11.3 (9c803229faa4)`: `bin/fm-harness.sh` run from a worker's shell tool on the generated launch printed `devin`, which the common live guard asserts.
+`tests/fm-devin-harness.test.sh` pins that an exact `devin` ancestor outranks an inherited `CLAUDECODE` and that `devin-helper` is not Devin, and `tests/fm-devin-fork-harness.test.sh` keeps the anchoring meaningful when the suite itself runs under a real Devin parent.
 
 ### Approvals and permissions
 
@@ -491,7 +536,7 @@ It prompts on commands outside smart model confidence and outside the pre-allowe
 The interactive prompt for non-git commands presents an 8-option menu:
 `1 Yes (Approve once)`, `2 Yes, allow <cmd>`, `3 Yes, always allow ... in wt`, `4 Yes, always allow ... in all projects`, `5 Yes, switch to bypass mode`, `6 Edit command`, `7 Describe change to command`, `8 No`.
 The prompt for git commands offers a 7-option menu without option 5.
-Under captain decision D1 (extended 2026-09-14), Firstmate pre-allows the approved non-destructive `Exec(...)` set in `.devin/config.local.json` so unattended worker turns do not park on routine commands; the harness-adapters devin reference owns the list.
+Under captain decision D1 (extended 2026-09-14), Firstmate pre-allows the approved non-destructive `Exec(...)` set in the task's private config so unattended worker turns do not park on routine commands; the harness-adapters devin reference owns the list.
 
 ### Permission policy hooks
 
@@ -535,20 +580,38 @@ No hooks execute while blocked on trust.
 ### Configuration layers and lifecycle hooks
 
 Devin CLI reads configuration from `~/.config/devin/config.json`, committed project hooks from `.devin/hooks.v1.json`, and project local overrides from `.devin/config.local.json`.
-Passing `--config <path>` replaces the user config (`~/.config/devin/config.json`), which would discard the captain's user settings.
-Writing to `.devin/hooks.v1.json` would overwrite committed project hooks and dirty git tracking.
-Under captain decision D2, Firstmate writes its per-task configuration and lifecycle hooks to `$WT/.devin/config.local.json`.
-Both files are added to `.git/info/exclude` and removed during teardown.
-`bin/fm-spawn.sh` refuses launch if `.devin/config.local.json` or `.devin/rules/firstmate-attribution.md` already exists or is tracked by git.
-The generated file pins `"attribution": false` (documented user-scope only by the vendor) and carries the approved `Exec(...)` allow set plus `git push` force-spelling denies; the same no-attribution policy is also installed as the always-on rule `.devin/rules/firstmate-attribution.md`.
+Passing `--config <path>` replaces only the user layer, so Firstmate passes a private copy of the user config, `state/<id>.devin-config.json`, rather than a fresh file that would discard the captain's user settings.
+Upstream's `bin/fm-devin-config.sh` writes that copy with the busy-state and turn-end hooks appended, and the fork's `bin/fm-devin-lib.sh` layers the approved `Exec(...)` allow set, the `git push` force-spelling denies, the permission policy hooks, and the rate-limit retry hooks onto it, restoring the user's own `read_config_from`.
+Nothing is written into the worktree; the two worktree files older incarnations wrote are retired only with ownership evidence.
+The file pins `"attribution": false`, which the vendor documents as a user-scope key.
 The lifecycle hooks are:
 - `UserPromptSubmit`: applies `busy` with event `user-prompt-submit`.
-- `Stop`: touches `$TURNEND` and applies `idle` with event `stop`.
+- `Stop`: applies `idle` with event `stop`, then touches `$TURNEND` only if that apply was accepted for the current generation.
 - `SessionEnd`: applies `idle` with event `session-end`.
 - `PreToolUse`, `PermissionRequest`, and `PostToolUse`, plus a second `UserPromptSubmit`, `Stop`, and `SessionEnd` entry: the permission policy hooks above.
+- A third `UserPromptSubmit`, `Stop`, and `SessionEnd` entry: the rate-limit retry owned by `bin/fm-devin-rate-limit-retry.sh`.
 
 `SessionStart` is omitted because it fires on resume (`source=resume`) with an empty composer, which would strand a false `busy` record.
-Each hook command appends `>/dev/null 2>&1 || true`.
+Each hook command tolerates a refused event.
+
+### Private config layering
+
+Verified live on 2026-09-25 with `devin 3000.11.3 (9c803229faa4)` on macOS arm64, in a scratch git repository on a private tmux socket, with the config generated by the real `fm_devin_spawn_wire` from the captain's user config (which allows `Exec(git add)` but neither `Exec(git status)`, `Exec(git commit)`, nor `Exec(bin/fm-lint.sh)`), launched as `devin --permission-mode normal --respect-workspace-trust false --config state/lab1.devin-config.json --model swe-2-max -- "<prompt>"`:
+- `sudo -n true` was rejected by `PreToolUse`: `Tool rejected: {"decision":"block","reason":"Blocked by firstmate policy: sudo is refused by firstmate policy"}`.
+- `bin/fm-lint.sh` and a plain `git commit -m "Add b file"` ran with no prompt and no `devin-permission-log.jsonl` entry, so the fork's allow rules bound from the `--config` layer; the control `bin/other-check.sh` reached `PermissionRequest`, the judge escalated it (`needs-decision [key=devin-permission-exec-1-...]`), and approving once at the prompt closed it through `PostToolUse` (`resolved [key=...]: the escalated exec call was approved at the prompt and ran`).
+- Both worker commits carried no trailer or attribution line (`git log -1 --format='%B%(trailers)'` printed only the subject).
+- The busy record moved `busy` then `idle source=devin-hook event=stop` with `lab1.turn-ended` touched, plain `exit` recorded `idle ... event=session-end`, the retry turn ended (`ended.<ts>`), and the footer read `SWE-2 Max`.
+- A second launch with `--permission-mode smart` rendered `(smart mode on)` and settled the same way.
+
+The portable regressions in `tests/fm-devin-harness.test.sh` (the base writer and stale-`Stop` suppression) and `tests/fm-devin-fork-harness.test.sh` (the composition, user-config preservation, and refusal on a failed compose) pin this; the three live guards under Verification suite now drive the generated launch, so one command refreshes each part.
+
+### Turn-ending errors and the rate-limit retry
+
+Verified live on 2026-09-25 with `devin 3000.11.3 (9c803229faa4)`: a turn that ends on an error fires no hook, not even `Stop`.
+A probe config recording every `UserPromptSubmit`, `Stop`, and `SessionEnd` payload saw a normal turn record `submit` then `stop`, and a turn whose network was then cut record `submit` only, ending on `Something went wrong` with the session-log line `Sending error response ... method=session/prompt error=Error { ... message: "Connection error, send a message to continue retrying" ... }`.
+The session log is `~/.local/share/devin/cli/logs/devin_<date>_<pid>.log`, named for the `devin` process that also runs the hooks.
+The 2026-09-24 fleet logs record the rate-limit stop on the same `session/prompt` error-response path, with the reset in the message (`Your limit will reset in 40 seconds.`, `... in 3 minutes.`).
+The rate-limit error cannot be forced on demand, so `tests/fm-devin-rate-limit-retry-live-e2e.test.sh` proves session-log discovery and the `Stop` retire on the generated hooks, then appends a labeled rate-limit line to the isolated home's real session log after a hook-less cancel and follows it through a real `fm-send` retry the worker acknowledges; `tests/fm-devin-rate-limit-retry.test.sh` pins the error text with the captured lines.
 
 ### Control, interruption, and exit
 
@@ -564,27 +627,47 @@ On exit, Devin prints `Resume this session with devin -r <id>`, where `<id>` is 
 
 Devin CLI draws a structured composer:
 Top rule carries mode text (`──── (smart mode on) ─`), the agent prompt row opens with `❭` (U+276D), the bottom rule is a solid horizontal `─` rule, and the footer row reports model and context token usage (`SWE-2 Max Context: 13k / 262k tokens (5%)`).
-`bin/fm-composer-lib.sh` classifies this structure into `empty`, `pending`, or `unknown`.
+`bin/fm-composer-lib.sh` classifies this structure into `empty`, `pending`, or `unknown` through the fork-only frame selector in `bin/fm-composer-devin-lib.sh`; `tests/fm-composer-devin.test.sh` pins it.
 The idle placeholder `Ask Devin to build features, fix bugs, or work on your code` and active-work placeholder `Guide Devin while it works` are recognized as composer furniture.
 While busy, the delivery token `(esc twice to interrupt)` (or `(esc again to interrupt)`) is matched by `FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT` to confirm submitted keystrokes.
 
 ### Verification suite
 
-Run the portable regression and live guard with:
+Run the portable regressions and the live guards with the commands below; each live guard runs the real `bin/fm-spawn.sh` launch and its generated private config in an isolated home, on its own `-S` tmux socket with `TMUX` and `TMUX_PANE` removed.
 
 ```sh
-bin/fm-test-run.sh tests/fm-devin-harness.test.sh tests/fm-devin-permission-policy.test.sh
+bin/fm-test-run.sh tests/fm-devin-harness.test.sh tests/fm-devin-fork-harness.test.sh tests/fm-composer-devin.test.sh tests/fm-devin-permission-policy.test.sh tests/fm-devin-rate-limit-retry.test.sh
 FM_DEVIN_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-devin-signals-live-e2e.test.sh
+FM_DEVIN_RETRY_LIVE=1 bin/fm-test-run.sh tests/fm-devin-rate-limit-retry-live-e2e.test.sh
 FM_DEVIN_PERMISSION_LIVE=1 bin/fm-test-run.sh tests/fm-devin-permission-policy-live-e2e.test.sh
+FM_DEVIN_PERMISSION_LIVE=1 FM_DEVIN_PERMISSION_MODE=manual bin/fm-test-run.sh tests/fm-devin-permission-policy-live-e2e.test.sh
 ```
 
-The permission live guard passed on 2026-09-15 against `devin 3000.10.21 (611c1cba)`:
+All four live runs passed on 2026-09-25 against `devin 3000.11.3 (9c803229faa4)` on macOS arm64, tmux 3.7c:
 
 ```text
-ok - devin: PreToolUse delivers the exec command and a block decision refuses it
-ok - devin: PermissionRequest delivers tool_input.command and approve runs the call without a prompt
-ok - devin: an escalation falls through to the prompt and PostToolUse closes it once approved
-ok - devin: the headless swe-2-high first judge returns a parseable verdict (judge|project-local dev dependency install within the task worktree (static: npm install))
-# all devin permission policy live checks passed (devin 3000.10.21 (611c1cba))
+ok - devin 3000.11.3 (9c803229faa4): spawn brief, model, reviewed mode, trust, identity and native Stop
+ok - devin 3000.11.3 (9c803229faa4): no Claude Code hook ran and the worker commit carries no attribution
+ok - devin 3000.11.3 (9c803229faa4): real fm-send doorbell read and acknowledged
+ok - devin 3000.11.3 (9c803229faa4): idle interrupt sends one press; an open revert picker blocks exit and is closed without reverting
+ok - devin 3000.11.3 (9c803229faa4): double Escape cancels, preserves agent, and invalidates busy state
+ok - devin 3000.11.3 (9c803229faa4): plain exit and native -r session resume in reviewed mode
+ok - devin 3000.11.3 (9c803229faa4): the generated arm hook finds the session log and Stop retires it
+ok - devin 3000.11.3 (9c803229faa4): an injected rate-limit line after a hook-less cancel drives a real acknowledged retry
+ok - devin 3000.11.3 (9c803229faa4): plain exit leaves no retry sentinel
+ok - devin 3000.11.3 (9c803229faa4) (auto): PreToolUse delivers the exec command and a block refuses it
+ok - devin 3000.11.3 (9c803229faa4) (auto): a piped download escalates and PostToolUse closes it once approved
+ok - devin 3000.11.3 (9c803229faa4) (auto): a read-only command and a GET-shaped research fetch run without a prompt
+ok - devin 3000.11.3 (9c803229faa4) (auto): a declined piped download does not run and the next prompt closes it
+ok - devin 3000.11.3 (9c803229faa4) (auto): an explicit Claude import still runs the user's Claude Code hook
+ok - devin 3000.11.3 (9c803229faa4) (auto): the generated policy's headless swe-2-high judge returns a parseable verdict
+ok - devin 3000.11.3 (9c803229faa4) (manual): PreToolUse delivers the exec command and a block refuses it
+ok - devin 3000.11.3 (9c803229faa4) (manual): a piped download escalates and PostToolUse closes it once approved
+ok - devin 3000.11.3 (9c803229faa4) (manual): a read-only command and a GET-shaped research fetch run without a prompt
+ok - devin 3000.11.3 (9c803229faa4) (manual): a declined piped download does not run and the next prompt closes it
+ok - devin 3000.11.3 (9c803229faa4) (manual): an explicit Claude import still runs the user's Claude Code hook
+ok - devin 3000.11.3 (9c803229faa4) (manual): the generated policy's headless swe-2-high judge returns a parseable verdict
 ```
+
+The same runs showed that a GET-shaped lookup must print to stdout for the policy to approve it: `curl -o /dev/null` counts as a write outside the task write roots and escalates.
 

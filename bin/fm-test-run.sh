@@ -284,11 +284,11 @@ family_for_basename() {
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
-    fm-composer-agy.test.sh|\
+    fm-composer-agy.test.sh|fm-composer-devin.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-captain-hold-completed-ship.test.sh|fm-captain-hold-rehold.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-forge-detect.test.sh|fm-grok-harness.test.sh|\
-    fm-devin-permission-policy.test.sh|\
+    fm-devin-permission-policy.test.sh|fm-devin-rate-limit-retry.test.sh|fm-devin-fork-harness.test.sh|\
     fm-agy-permission-policy.test.sh|\
     fm-harness-precedence.test.sh|\
     fm-kimi-harness.test.sh|fm-devin-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
@@ -365,7 +365,7 @@ family_for_basename() {
     fm-launch-prompt-signals-live-e2e.test.sh|\
     fm-agy-primary-live-e2e.test.sh|fm-agy-observer-live-e2e.test.sh|\
     fm-agy-bypass-live-e2e.test.sh|\
-    fm-devin-permission-policy-live-e2e.test.sh|\
+    fm-devin-permission-policy-live-e2e.test.sh|fm-devin-rate-limit-retry-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-worker-account-live-e2e.test.sh|\
@@ -401,7 +401,7 @@ family_for_basename() {
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
-    fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
+    fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|fm-afk-sentinel.test.sh)
       printf '%s\n' afk
       ;;
     fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-contributions.test.sh|\
@@ -1514,9 +1514,16 @@ families_for_changed_path() {
       ;;
     bin/fm-devin-lib.sh)
       printf '%s\n' __script__:fm-devin-harness.test.sh
+      printf '%s\n' __script__:fm-devin-fork-harness.test.sh
       printf '%s\n' __script__:fm-devin-permission-policy.test.sh
+      printf '%s\n' __script__:fm-devin-rate-limit-retry.test.sh
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-devin-rate-limit-retry.sh)
+      printf '%s\n' __script__:fm-devin-rate-limit-retry.test.sh
+      printf '%s\n' __script__:fm-devin-fork-harness.test.sh
+      printf '%s\n' __script__:fm-devin-rate-limit-retry-live-e2e.test.sh
       ;;
     bin/fm-agy-lib.sh)
       printf '%s\n' __script__:fm-agy-harness.test.sh
@@ -1669,6 +1676,12 @@ families_for_changed_path() {
       # The reference scan is not transitive, so match the two helpers that
       # source this one as well: most suites inherit it only through them.
       families_for_test_reference git-config-helpers.sh lib.sh herdr-test-safety.sh \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
+    tests/tmproot-guard.sh)
+      # Same non-transitive reference scan: most suites reach the guard only
+      # through tests/lib.sh, so match that library as well.
+      families_for_test_reference tmproot-guard.sh lib.sh \
         || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/fixtures/*/*|tests/captures/*/*)

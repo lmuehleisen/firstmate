@@ -38,6 +38,11 @@ umask 022
 # shellcheck source=tests/git-config-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
 
+# The single guard every cleanup path uses before removing a fixture temp root;
+# its header owns what counts as safe to remove.
+# shellcheck source=tests/tmproot-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmproot-guard.sh"
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
@@ -97,8 +102,18 @@ pass() {
 # that file is armed once, here, at source time - which always runs in the
 # real caller, never a subshell.
 
+#
+# Every precondition below is fatal at source time: the library exits the
+# sourcing test with a message naming what is missing. It must never return
+# early, because a test that keeps running past a half-initialized library
+# builds its fixtures - and aims its cleanup - at empty or undefined roots.
+
 FM_TEST_CLEANUP_DIRS=()
-FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
+FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || {
+  printf 'not ok - tests/lib.sh precondition unmet: cannot create a cleanup registry in %s\n' \
+    "${TMPDIR:-/tmp}" >&2
+  exit 1
+}
 
 fm_test_pid_identity() {
   local pid=$1
@@ -106,9 +121,10 @@ fm_test_pid_identity() {
     '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid"
 }
 
-FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
+FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") && [ -n "$FM_TEST_OWNER_IDENTITY" ] || {
   rm -f "$FM_TEST_CLEANUP_REGISTRY"
-  return 1
+  printf 'not ok - tests/lib.sh precondition unmet: cannot read this shell'"'"'s process identity (needs a readable /proc/<pid> or a working ps)\n' >&2
+  exit 1
 }
 
 # --- process-event runner reaping -------------------------------------------
@@ -125,7 +141,12 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 # private one). It never matches on a script or process name, which would reach
 # into another home's live runners.
 
-FM_TEST_PROCEVENT_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-procevent.$$.XXXXXX") || return 1
+FM_TEST_PROCEVENT_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-procevent.$$.XXXXXX") || {
+  rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  printf 'not ok - tests/lib.sh precondition unmet: cannot create a process-event registry in %s\n' \
+    "${TMPDIR:-/tmp}" >&2
+  exit 1
+}
 
 fm_test_track_procevent_home() {  # <home> [claim-root]
   [ -n "${1:-}" ] || return 1
@@ -165,22 +186,35 @@ fm_test_cleanup() {
   local d
   fm_test_reap_procevent_homes
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    fm_test_rm_tmproot "$d" || true
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      fm_test_rm_tmproot "$d" || true
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
 }
 
 fm_test_tmproot() {
-  local prefix=${1:-fm-test} root tmp_base
+  local prefix=${1:-fm-test} root tmp_base reason
   tmp_base=${TMPDIR:-/tmp}
   tmp_base=${tmp_base%/}
-  root=$(mktemp -d "$tmp_base/${prefix}.XXXXXX") || return 1
+  root=$(mktemp -d "$tmp_base/${prefix}.XXXXXX") || {
+    printf 'fm_test_tmproot: cannot create a temp root in %s\n' "$tmp_base" >&2
+    return 1
+  }
   root=$(cd -P -- "$root" && pwd -P) || return 1
+  if reason=$(fm_test_tmproot_guard_reason "$root"); then
+    # Only a TMPDIR moved somewhere unsafe after sourcing gets here. The new
+    # directory is still empty, so roll it back with rmdir, then stop the owning
+    # test: a command substitution cannot exit its caller, and callers rarely
+    # check this assignment, so returning would hand them an empty root.
+    rmdir -- "$root" 2>/dev/null || true
+    printf 'not ok - fm_test_tmproot: refusing unsafe temp root %s: %s\n' "$root" "$reason" >&2
+    kill -TERM "$$"
+    return 1
+  fi
   if ! printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$root/.fm-test-fixture" ||
     ! printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"; then
     rm -rf "$root"
@@ -223,10 +257,11 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
+    fm_test_tmproot_guard_reason "$dir" >/dev/null && continue
     if [ -d "$dir" ] && [ ! -L "$dir" ]; then
       find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
     fi
-    rm -rf "$dir"
+    fm_test_rm_tmproot "$dir" || true
   done
 }
 

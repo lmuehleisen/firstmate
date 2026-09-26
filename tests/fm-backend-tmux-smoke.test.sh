@@ -7,6 +7,8 @@
 # server, isolated on a private socket (`-L`) so it never touches the host's
 # actual sessions.
 set -u
+# shellcheck source=tests/tmproot-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmproot-guard.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -34,7 +36,7 @@ trap cleanup_all EXIT
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  [ -n "${SHIM_DIR:-}" ] && rm -rf "$SHIM_DIR"
+  fm_test_rm_tmproot "${SHIM_DIR:-}"
 }
 
 # A `tmux` shim on PATH that transparently redirects every call to the private
@@ -42,6 +44,7 @@ cleanup_all() {
 # host's real sessions.
 SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke.XXXXXX") || exit 1
 SHIM_DIR=$(cd "$SHIM_DIR" && pwd -P) || exit 1
+fm_test_require_tmproot "$SHIM_DIR"
 cat > "$SHIM_DIR/tmux" <<SH
 #!/usr/bin/env bash
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
