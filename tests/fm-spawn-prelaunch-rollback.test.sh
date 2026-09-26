@@ -90,11 +90,11 @@ window_present() {  # <window-name>
 }
 
 # Everything a refused fresh spawn acquired before launch must be gone.
-assert_rolled_back() {  # <label> <home> <wt> <fakebin> <id>
-  local label=$1 home=$2 wt=$3 fakebin=$4 id=$5 leftover
+assert_rolled_back() {  # <label> <home> <wt> <fakebin> <id> <spawn-output>
+  local label=$1 home=$2 wt=$3 fakebin=$4 id=$5 out=$6 leftover
   ! window_present "fm-$id" || fail "$label: the refused spawn left its window fm-$id open"
   grep -qxF -- "return --force $wt" "$fakebin/treehouse-calls" 2>/dev/null ||
-    fail "$label: the leased slot was not returned; treehouse calls: $(cat "$fakebin/treehouse-calls" 2>/dev/null)"
+    fail "$label: the leased slot was not returned; treehouse calls: $(cat "$fakebin/treehouse-calls" 2>/dev/null); slot status: $(git -C "$wt" status --porcelain --ignored=matching --untracked-files=all 2>&1); spawn output: $out"
   for leftover in treehouse-lease busy-state busy-gen meta agy-hooks agy-permission.json agy-permission-cache; do
     [ ! -e "$home/state/$id.$leftover" ] && [ ! -L "$home/state/$id.$leftover" ] ||
       fail "$label: the refused spawn left state/$id.$leftover behind"
@@ -126,7 +126,7 @@ EOF
   esac
   grep -qxF -- "get --lease --lease-holder $home:$id" "$fakebin/treehouse-calls" ||
     fail "hooks: the case must lease a slot before refusing, or it proves nothing: $(cat "$fakebin/treehouse-calls" 2>/dev/null)"
-  assert_rolled_back hooks "$home" "$wt" "$fakebin" "$id"
+  assert_rolled_back hooks "$home" "$wt" "$fakebin" "$id" "$out"
   pass "fm-spawn.sh: an agy bypass refusal after leasing returns the slot and closes its window"
 }
 
@@ -150,7 +150,7 @@ EOF
     *'is not a private directory'*) ;;
     *) fail "stage: expected the staged-launch refusal, got: $out" ;;
   esac
-  assert_rolled_back stage "$home" "$wt" "$fakebin" "$id"
+  assert_rolled_back stage "$home" "$wt" "$fakebin" "$id" "$out"
   pass "fm-spawn.sh: a refusal after the record was published but before launch rolls everything back"
 }
 

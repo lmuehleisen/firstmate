@@ -191,7 +191,7 @@ test_exhausted_cd_enter() {
   [ "$(cat "$COUNTFILE.enters")" = 3 ] || fail "cd retries unbounded"
   [ ! -s "$COUNTFILE.pending" ] || fail "cd text left pending"
   assert_contains "$out" 'cleared owned input' "cleanup not reported"
-  assert_absent "$HOME_DIR/state/$id.treehouse-lease" "failure kept the receipt of a slot it could return"
+  assert_absent "$HOME_DIR/state/$id.treehouse-lease" "failure kept the receipt of a slot it could return: $out"
   grep -qxF -- "return --force $WT_DIR" "$FAKEBIN_DIR/treehouse-calls" \
     || fail "failed cd did not return its leased slot"
   assert_absent "$HOME_DIR/state/$id.meta" "failed cd published metadata"

@@ -1320,7 +1320,7 @@ test_dispatch_refuses_to_commit_without_a_published_record() {
     "spawn did not report task-record publication failure"
   assert_absent "$meta" "failed publication left a task record"
   assert_absent "$(home_of "$case_dir")/state/$id.treehouse-lease" \
-    "failed publication kept the receipt of a slot it could return"
+    "failed publication kept the receipt of a slot it could return: $out"
   grep -q '^return --force ' "$case_dir/fakebin/treehouse-calls" \
     || fail "failed publication did not return its leased slot"
   assert_absent "$(home_of "$case_dir")/state/$id.busy-state" \
@@ -1408,7 +1408,7 @@ test_dispatch_rolls_back_before_a_failed_launch_delivery() {
   # Every keystroke fails, so the spawn stops before the worker could start
   # and returns the slot it leased.
   assert_absent "$(home_of "$case_dir")/state/$id.treehouse-lease" \
-    "a failed delivery kept the receipt of a slot it could return"
+    "a failed delivery kept the receipt of a slot it could return: $out"
   assert_absent "$(home_of "$case_dir")/state/$id.busy-state" \
     "a failed launch delivery left its provisional busy generation behind"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
