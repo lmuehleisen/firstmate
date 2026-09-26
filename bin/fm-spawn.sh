@@ -361,6 +361,7 @@
 #     __PERMISSIONDIRS__ additional quoted state and task-data directory flags
 #     __AGYBIN__   quoted absolute agy executable resolved from PATH
 #     __DEVINBIN__ quoted absolute devin executable resolved from PATH
+#     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __TASKTMP__  quoted per-task temp root for Devin's TMPDIR
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
@@ -1425,12 +1426,11 @@ clear_relaunch_harness_wiring() {
   fm_agy_relaunch_retire_policy "$harness" "$state" "$id" || return 1
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    ! fm_devin_relaunch_path_kept "$harness" "$wt" "$path" || continue
     rm -f -- "$path" || return 1
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
-  fm_devin_relaunch_retire_dirs "$harness" "$wt"
+  fm_devin_relaunch_retire_legacy "$harness" "$wt" || return 1
   fm_agy_relaunch_retire_hooks "$harness" "$state" "$id" || return 1
 }
 
@@ -2253,21 +2253,23 @@ launch_command_template() { # <harness> <kind> <permission-flags>
   # devin (Devin CLI): interactive session with positional prompt.
   # --respect-workspace-trust false suppresses workspace trust prompts on
   # fresh worktrees. --permission-mode smart (for auto) auto-approves workspace
-  # edits; the generated local config pre-allows the approved routine command
-  # and task-scoped write set. normal (for manual) prompts for all writes and
+  # edits; the private config pre-allows the approved routine command and
+  # task-scoped write set. normal (for manual) prompts for all writes and
   # bash commands. Dangerous / bypass and sandbox autonomous are never emitted.
   # TMPDIR is isolated under the task temp root so test and build output does
   # not inherit another harness's temporary directory.
   # Foreign primary markers are cleared so an inherited CLAUDECODE cannot outrank
-  # devin's own marker in a process that only reads the environment.
-  # Devin has no CLI reasoning-effort flag (interactive Alt+T only), so effort
-  # is omitted from launch and recorded in task metadata only.
-  # Its turn-end and busy-state signals do not ride the launch command; they are
-  # lifecycle hooks written into $WT/.devin/config.local.json below.
+  # devin's own marker in a process that only reads the environment, and
+  # NO_COLOR is cleared so the composer guard can tell the dim placeholder
+  # from a real draft.
+  # Devin encodes effort in model ids and has no CLI reasoning-effort flag, so
+  # effort is omitted from launch and recorded in task metadata only.
+  # Its turn-end, busy-state, and permission-policy signals do not ride the
+  # launch command; they are hooks in the private config --config names.
   devin)
-    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS FM_DEVIN_HARNESS=devin TMPDIR=__TASKTMP__ __DEVINBIN__ '
+    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR FM_DEVIN_HARNESS=devin TMPDIR=__TASKTMP__ __DEVINBIN__ '
     [ -n "$permission_flags" ] && printf '%s ' "$permission_flags"
-    printf '%s' '--respect-workspace-trust false __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+    printf '%s' '--respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     ;;
   *) return 1 ;;
   esac
@@ -2662,9 +2664,8 @@ effort_flag_for_harness() {
     # launch flag and mapping have not been live-verified; the requested axis
     # stays in task metadata but never reaches the launch command. Cursor encodes
     # effort in model ids such as cursor-grok-4.5-high, so it also receives no
-    # separate effort flag. devin has interactive thinking levels (Alt+T in TUI)
-    # but no CLI launch flag; requested effort stays in task metadata per
-    # record-and-omit.
+    # separate effort flag. devin encodes effort in its model ids too (swe-2-high,
+    # swe-2-max), so requested effort stays in task metadata per record-and-omit.
   esac
 }
 
@@ -5005,6 +5006,7 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 sq_tasktmp=$(shell_quote "$TASK_TMP")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+[ "$HARNESS" != devin ] || MODELFLAG=$(model_flag_for_harness devin "$(fm_devin_launch_model "$MODEL")")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
@@ -5031,7 +5033,11 @@ cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
-devin) LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "${DEVIN_BIN:-}")"} ;;
+devin)
+  LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "${DEVIN_BIN:-}")"}
+  LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
+  [ "$RAW_LAUNCH" -ne 0 ] || fm_devin_launch_assert "$LAUNCH" "$CREW_PERMISSION_MODE" "$STATE_REAL/$ID.devin-config.json" || exit 1
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 LAUNCH=${LAUNCH//__TASKTMP__/$sq_tasktmp}

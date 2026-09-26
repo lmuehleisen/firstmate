@@ -154,13 +154,8 @@ test_devin_control_contract() {
   [ "$(fm_control_exit_command devin)" = 'exit' ] || fail "devin exit command must be plain exit, not the ambiguous /exit slash form"
 
   paths=$(fm_control_harness_wiring_paths devin "$wt" "$state" "$id")
-  [ "$paths" = "$wt/.devin/config.local.json
-$wt/.devin/rules/firstmate-attribution.md
-$state/$id.devin-permission.json" ] || fail "devin wiring paths must cover config.local.json, the attribution rule, and the permission policy file, got '$paths'"
-
-  paths=$(fm_control_harness_wiring_dirs devin "$wt")
-  [ "$paths" = "$wt/.devin/rules
-$wt/.devin" ] || fail "devin wiring dirs must cover .devin/rules then .devin, got '$paths'"
+  [ "$paths" = "$state/$id.devin-config.json" ] \
+    || fail "devin wiring paths must be the private per-task config, got '$paths'"
 
   pass "fm-control-lib: devin control mechanics match specification"
 }
@@ -231,7 +226,9 @@ run_devin_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
   local home=$1 proj=$2 wt=$3 fakebin=$4 id=$5
   shift 5
   local harness=${DEVIN_HARNESS_ARG:-devin}
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  # HOME isolates the user config the private Devin config is copied from.
+  mkdir -p "$home/userhome"
+  HOME="$home/userhome" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -356,10 +353,21 @@ EOF
   run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --model "custom-model" --effort high >/dev/null
   launch=$(cat "$home/launch.log")
 
-  # Launch marker and workspace trust
+  # Launch marker, color and foreign-marker scrub, and workspace trust
   case "$launch" in
     *'FM_DEVIN_HARNESS=devin'*) ;;
     *) fail "launch must set FM_DEVIN_HARNESS=devin, got: $launch" ;;
+  esac
+  local flag
+  for flag in '-u NO_COLOR' '-u ATLASSIAN_AGENT_TYPE' '-u ROVODEV_CLI' '-u CLAUDECODE' '-u CURSOR_AGENT'; do
+    case "$launch" in
+      *"$flag "*) ;;
+      *) fail "launch must clear ${flag#-u }, got: $launch" ;;
+    esac
+  done
+  case "$launch" in
+    *"--config '$home/state/$id.devin-config.json' "*) ;;
+    *) fail "launch must pass the private per-task config, got: $launch" ;;
   esac
   case "$launch" in
     *'--respect-workspace-trust false'*) ;;
@@ -386,6 +394,18 @@ EOF
   case "$launch" in
     *'-- '*brief*) ;;
     *) fail "launch must include positional brief separator: $launch" ;;
+  esac
+
+  # An omitted or default model launches the SWE-2 Max worker default.
+  fields=$(make_spawn_case shape-default)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout --model default >/dev/null
+  launch=$(cat "$home/launch.log")
+  case "$launch" in
+    *"--model 'swe-2-max' --"*) ;;
+    *) fail "a default model must launch devin on swe-2-max, got: $launch" ;;
   esac
 
   pass "fm-spawn.sh: devin launch shape, model flag, and effort omission verified"
@@ -418,8 +438,13 @@ $fields
 EOF
   : "$case_dir"
   run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
-  hook_file="$wt/.devin/config.local.json"
+  hook_file="$home/state/$id.devin-config.json"
   [ -f "$hook_file" ] || fail "hooks file was not created at $hook_file"
+  case "$(ls -l "$hook_file")" in
+    -rw-------*) ;;
+    *) fail "the private config must be mode 600: $(ls -l "$hook_file")" ;;
+  esac
+  [ ! -e "$wt/.devin" ] || fail "spawn must write nothing under the worktree's .devin"
 
   # Validate JSON syntax
   jq . "$hook_file" >/dev/null 2>&1 || fail "hooks file is not valid JSON: $(cat "$hook_file")"
@@ -461,15 +486,9 @@ EOF
   ! jq -e '.permissions.allow | map(select(test("Exec\\(rm[ )]|gh repo|git push.*force|Exec\\(git\\)|Exec\\(gh\\)|Exec\\(bash\\)|\\*"))) | length > 0' "$hook_file" >/dev/null \
     || fail "permissions.allow must not contain rm, gh repo, force-push, or blanket entries"
 
-  # The no-attribution policy is also installed as an always-on project rule.
-  local rule_file="$wt/.devin/rules/firstmate-attribution.md"
-  [ -f "$rule_file" ] || fail "attribution rule was not created at $rule_file"
-  grep -q 'trigger: always_on' "$rule_file" \
-    || fail "attribution rule must be always_on, got: $(cat "$rule_file")"
-  grep -q 'Co-Authored-By' "$rule_file" \
-    || fail "attribution rule must forbid Co-Authored-By attribution"
-  grep -q 'Generated with' "$rule_file" \
-    || fail "attribution rule must forbid Generated with attribution"
+  # Devin's own Claude import default stays: an absent user choice stays absent.
+  ! jq -e 'has("read_config_from")' "$hook_file" >/dev/null \
+    || fail "an absent user read_config_from must stay absent: $(jq -c .read_config_from "$hook_file")"
 
   # Hooks events: UserPromptSubmit, Stop, SessionEnd present; SessionStart absent
   jq -e '.hooks.UserPromptSubmit and .hooks.Stop and .hooks.SessionEnd' "$hook_file" >/dev/null \
@@ -547,12 +566,10 @@ EOF
     *) fail "the Stop hook must retire the retry turn" ;;
   esac
 
-  # Verify git exclude
+  # Nothing in the worktree needs a git exclude entry any more.
   exclude_file=$(git -C "$wt" rev-parse --git-path info/exclude)
-  grep -qxF '.devin/config.local.json' "$exclude_file" \
-    || fail ".devin/config.local.json must be in git info/exclude"
-  grep -qxF '.devin/rules/firstmate-attribution.md' "$exclude_file" \
-    || fail ".devin/rules/firstmate-attribution.md must be in git info/exclude"
+  ! grep -q '^\.devin/' "$exclude_file" 2>/dev/null \
+    || fail "spawn must not add .devin exclude entries: $(cat "$exclude_file")"
 
   # Verify busy generation was armed
   [ -f "$home/state/$id.busy-gen" ] || fail "busy generation was not armed: missing $id.busy-gen"
@@ -584,7 +601,101 @@ EOF
   out=$(fm_busy_classify tmux fake:w devin "$id" "$home/state")
   [ "$out" = "idle devin-hook" ] || fail "after SessionEnd state must be 'idle devin-hook', got '$out'"
 
+  # A Stop from a retired incarnation, run after the task is re-armed, must
+  # neither settle the replacement nor wake the watcher for it.
+  "$ROOT/bin/fm-busy-event.sh" arm "$home/state" "$id" >/dev/null
+  rm -f "$home/state/$id.turn-ended"
+  sh -c "$cmd_stop" || fail "a stale Stop hook command must still exit cleanly"
+  [ ! -e "$home/state/$id.turn-ended" ] || fail "a stale Stop must not touch the turn-ended notification"
+  out=$(fm_busy_classify tmux fake:w devin "$id" "$home/state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale Stop must not settle the replacement, got '$out'"
+
   pass "fm-spawn.sh: devin hooks generated, verified, and executed with correct busy transitions"
+}
+
+# --- private config: user settings, Claude import, refusal -------------------
+
+test_devin_private_config_preserves_user_config() {
+  local fields case_dir home proj wt fakebin id config user out before
+  fields=$(make_spawn_case userconfig)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  : "$case_dir"
+  user="$home/userhome/.config/devin/config.json"
+  mkdir -p "$(dirname "$user")"
+  printf '%s\n' '{"agent":{"model":"swe-2-high"},"attribution":true,"read_config_from":{"claude":true,"cursor":false},"permissions":{"allow":["Exec(make)"],"deny":["Exec(npm publish)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"true user-stop"}]}],"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"true user-pre"}]}]}}' >"$user"
+  before=$(cat "$user")
+  run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null \
+    || fail "spawn with a user config should succeed"
+  config="$home/state/$id.devin-config.json"
+  [ "$(cat "$user")" = "$before" ] || fail "spawn must never edit the user's own config"
+  jq -e '.agent.model == "swe-2-high" and .attribution == false' "$config" >/dev/null \
+    || fail "unrelated user settings must survive while attribution is forced off: $(jq -c . "$config")"
+  jq -e '.read_config_from == {"claude":true,"cursor":false}' "$config" >/dev/null \
+    || fail "the user's own import choices must survive: $(jq -c .read_config_from "$config")"
+  jq -e '.permissions.allow[0] == "Exec(make)" and (.permissions.allow | index(["Exec(git push)"]))
+    and .permissions.deny[0] == "Exec(npm publish)" and (.permissions.deny | index(["Exec(git push -f)"]))' "$config" >/dev/null \
+    || fail "user permission rules must survive ahead of the reviewed set: $(jq -c .permissions "$config")"
+  jq -e '.hooks.Stop[0].hooks[0].command == "true user-stop"
+    and (.hooks.Stop[-1].hooks | map(.command) | (.[0] | test("fm-busy-event")) and (.[1] | test("fm-devin-permission-policy")) and (.[2] | test("fm-devin-rate-limit-retry")))
+    and .hooks.PreToolUse[0].hooks[0].command == "true user-pre"
+    and (.hooks.PreToolUse[-1].hooks[0].command | test("fm-devin-permission-policy.sh.* pre-tool-use"))' "$config" >/dev/null \
+    || fail "user hooks must run first and the reviewed hooks must join the lifecycle group: $(jq -c .hooks "$config")"
+
+  # A user who turned Claude import off keeps it off.
+  fields=$(make_spawn_case userconfig-noclaude)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  user="$home/userhome/.config/devin/config.json"
+  mkdir -p "$(dirname "$user")"
+  printf '%s\n' '{"read_config_from":{"claude":false}}' >"$user"
+  run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null \
+    || fail "spawn with Claude import off should succeed"
+  jq -e '.read_config_from == {"claude":false}' "$home/state/$id.devin-config.json" >/dev/null \
+    || fail "an explicit Claude import off must survive"
+
+  # A malformed user config refuses the launch and leaves no config behind.
+  fields=$(make_spawn_case userconfig-malformed)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  user="$home/userhome/.config/devin/config.json"
+  mkdir -p "$(dirname "$user")"
+  printf 'broken' >"$user"
+  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) \
+    && fail "a malformed user config must refuse the devin launch"
+  case "$out" in
+    *'could not write the private config'*) ;;
+    *) fail "refusal must name the private config, got: $out" ;;
+  esac
+  [ ! -e "$home/state/$id.devin-config.json" ] || fail "a refused compose must leave no config behind"
+  [ -z "$(find "$home/state" -maxdepth 1 -name ".$id.devin-*config.*" -print)" ] \
+    || fail "a refused compose must leave no staged files: $(ls -A "$home/state")"
+  [ ! -s "$home/launch.log" ] || fail "a refused compose must not reach the pane"
+  case "$(cat "$user")" in broken) ;; *) fail "a refused compose must not touch the user config" ;; esac
+
+  # A user config the base writer accepts but the decorator cannot extend
+  # (a non-object permissions value) also refuses rather than launching on
+  # the undecorated base.
+  fields=$(make_spawn_case userconfig-undecoratable)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$fields
+EOF
+  user="$home/userhome/.config/devin/config.json"
+  mkdir -p "$(dirname "$user")"
+  printf '%s\n' '{"permissions":"all"}' >"$user"
+  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) \
+    && fail "an undecoratable user config must refuse the devin launch"
+  case "$out" in
+    *'could not compose the reviewed private config'*) ;;
+    *) fail "refusal must name the reviewed config, got: $out" ;;
+  esac
+  [ ! -e "$home/state/$id.devin-config.json" ] || fail "an undecorated base config must not survive a refused compose"
+  [ ! -s "$home/launch.log" ] || fail "an undecorated base config must not reach the pane"
+
+  pass "fm-spawn.sh: devin private config keeps user settings and import choice, and refuses a bad compose"
 }
 
 # --- collision refusal ------------------------------------------------------
@@ -614,7 +725,8 @@ EOF
 
   # Case 2: .devin/config.local.json is tracked on the project's default branch.
   # Spawn refreshes the leased worktree to origin's tip, so the file must be on
-  # origin/main rather than only on the pre-created worktree branch.
+  # origin/main rather than only on the pre-created worktree branch. It is the
+  # project's own config layer, so the spawn proceeds and leaves it untouched.
   fields=$(make_spawn_case collision-tracked)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $fields
@@ -625,12 +737,13 @@ EOF
   git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' add .devin/config.local.json
   git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "Track devin config"
   git -C "$proj" push origin main >/dev/null 2>&1
-  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
-    fail "spawn must refuse when .devin/config.local.json is tracked"
-  case "$out" in
-    *'.devin/config.local.json is tracked by git'*) ;;
-    *) fail "refusal must report .devin/config.local.json as tracked by git, got: $out" ;;
-  esac
+  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) \
+    || fail "spawn must proceed beside a project-tracked .devin/config.local.json: $out"
+  [ "$(cat "$wt/.devin/config.local.json")" = '{"tracked":true}' ] \
+    || fail "spawn must leave a project-tracked .devin/config.local.json untouched"
+  [ -z "$(git -C "$wt" status --porcelain)" ] \
+    || fail "spawn must leave the worktree clean: $(git -C "$wt" status --porcelain)"
+  [ -f "$home/state/$id.devin-config.json" ] || fail "spawn must still write the private config"
 
   # Case 3: .devin/rules/firstmate-attribution.md already exists (excluded so the
   # pooled worktree refreshes clean, same as case 1). This is the exact shape a
@@ -657,7 +770,7 @@ EOF
     || fail "the refused leftover's content must be untouched"
 
   # Case 4: .devin/rules/firstmate-attribution.md tracked on the project's
-  # default branch - a genuinely project-owned file, refused as tracked.
+  # default branch - a genuinely project-owned file the spawn leaves alone.
   fields=$(make_spawn_case collision-rule-tracked)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $fields
@@ -668,14 +781,12 @@ EOF
   git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' add .devin/rules/firstmate-attribution.md
   git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "Track devin attribution rule"
   git -C "$proj" push origin main >/dev/null 2>&1
-  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) && \
-    fail "spawn must refuse when .devin/rules/firstmate-attribution.md is tracked"
-  case "$out" in
-    *'firstmate-attribution.md is tracked by git'*) ;;
-    *) fail "refusal must report the attribution rule as tracked by git, got: $out" ;;
-  esac
+  out=$(run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout) \
+    || fail "spawn must proceed beside a project-tracked attribution rule: $out"
+  [ "$(cat "$wt/.devin/rules/firstmate-attribution.md")" = 'project rule' ] \
+    || fail "spawn must leave a project-tracked attribution rule untouched"
 
-  pass "fm-spawn.sh: devin spawn refuses managed .devin files, distinguishing tracked from untracked leftover"
+  pass "fm-spawn.sh: devin spawn refuses untracked legacy .devin leftovers and leaves tracked project files alone"
 }
 
 # --- teardown & relaunch wiring ---------------------------------------------
@@ -688,26 +799,16 @@ $fields
 EOF
   : "$case_dir"
   run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
-  [ -f "$wt/.devin/config.local.json" ] || fail "expected .devin/config.local.json to exist"
-  [ -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "expected .devin/rules/firstmate-attribution.md to exist"
+  [ -f "$home/state/$id.devin-config.json" ] || fail "expected the private config to exist"
+  [ ! -e "$wt/.devin" ] || fail "spawn must write nothing under the worktree's .devin"
 
-  # Test that fm_control_harness_wiring_paths covers .devin/config.local.json and the
-  # attribution rule so relaunch clears them
+  # fm_control_harness_wiring_paths covers the private config so relaunch
+  # clears it.
   local p
   for p in $(fm_control_harness_wiring_paths devin "$wt" "$home/state" "$id"); do
     [ -n "$p" ] && rm -f -- "$p"
   done
-  [ ! -f "$wt/.devin/config.local.json" ] || fail "fm_control_harness_wiring_paths must cover .devin/config.local.json"
-  [ ! -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "fm_control_harness_wiring_paths must cover .devin/rules/firstmate-attribution.md"
-  [ ! -f "$home/state/$id.devin-permission.json" ] || fail "fm_control_harness_wiring_paths must cover the permission policy file"
-
-  # fm_control_harness_wiring_dirs must cover the two directories the managed
-  # files lived in, deepest first, so the relaunch clear can retire them with
-  # rmdir once the files are gone.
-  for p in $(fm_control_harness_wiring_dirs devin "$wt"); do
-    [ -n "$p" ] && rmdir "$p" 2>/dev/null
-  done
-  [ ! -e "$wt/.devin" ] || fail "fm_control_harness_wiring_dirs must cover .devin/rules and .devin"
+  [ ! -f "$home/state/$id.devin-config.json" ] || fail "fm_control_harness_wiring_paths must cover the private config"
 
   # Teardown safety: ensure teardown uncommitted changes check does NOT ignore untracked .devin/ content
   # Create an actual untracked file in .devin/
@@ -723,6 +824,12 @@ EOF
   pass "fm-teardown / fm-control: relaunch wiring cleared and teardown protects unlanded .devin content"
 }
 
+plant_legacy_devin_wiring() {  # <worktree>
+  mkdir -p "$1/.devin/rules"
+  printf '{"attribution":false}\n' > "$1/.devin/config.local.json"
+  printf 'no attribution\n' > "$1/.devin/rules/firstmate-attribution.md"
+}
+
 test_devin_teardown_removes_managed_wiring_and_empty_dirs() {
   local fields case_dir home proj wt fakebin id
   fields=$(make_spawn_case teardown-wiring)
@@ -731,13 +838,17 @@ $fields
 EOF
   : "$case_dir"
   run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
-  [ -f "$wt/.devin/config.local.json" ] || fail "expected .devin/config.local.json to exist"
-  [ -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "expected .devin/rules/firstmate-attribution.md to exist"
+  [ -f "$home/state/$id.devin-config.json" ] || fail "expected the private config to exist"
+  [ -f "$home/state/$id.devin-permission.json" ] || fail "expected the permission policy file to exist"
+  # The two worktree files an older devin incarnation of this task wrote.
+  plant_legacy_devin_wiring "$wt"
 
   # --force keeps the worktree (the fake treehouse return is a no-op), so the
   # pooled slot's leftover state is directly inspectable afterwards.
   run_devin_teardown "$home" "$fakebin" "$id" --force >/dev/null \
     || fail "teardown of the devin task should succeed"
+  [ ! -e "$home/state/$id.devin-config.json" ] || fail "teardown must remove the private config"
+  [ ! -e "$home/state/$id.devin-permission.json" ] || fail "teardown must remove the permission policy file"
   [ ! -e "$wt/.devin/config.local.json" ] || fail "teardown must remove .devin/config.local.json"
   [ ! -e "$wt/.devin/rules/firstmate-attribution.md" ] || fail "teardown must remove .devin/rules/firstmate-attribution.md"
   [ ! -d "$wt/.devin/rules" ] || fail "teardown must remove the emptied .devin/rules directory"
@@ -751,6 +862,7 @@ $fields
 EOF
   : "$case_dir"
   run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
+  plant_legacy_devin_wiring "$wt"
   printf 'project rule\n' > "$wt/.devin/rules/project-rule.md"
   run_devin_teardown "$home" "$fakebin" "$id" --force >/dev/null \
     || fail "teardown of the devin task should succeed"
@@ -760,7 +872,7 @@ EOF
   [ -d "$wt/.devin/rules" ] && [ -d "$wt/.devin" ] \
     || fail "teardown must leave .devin dirs that still hold project content"
 
-  pass "fm-teardown: devin teardown removes managed files and only-empty .devin directories"
+  pass "fm-teardown: devin teardown removes the private config, legacy files, and only-empty .devin directories"
 }
 
 test_teardown_keeps_project_tracked_devin_files_for_a_nondevin_task() {
@@ -849,8 +961,8 @@ $fields
 EOF
   : "$case_dir"
   DEVIN_HARNESS_ARG="devin --raw-escape" run_devin_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --scout >/dev/null
-  [ ! -f "$wt/.devin/config.local.json" ] || fail "raw launch must not generate .devin/config.local.json"
-  [ ! -f "$wt/.devin/rules/firstmate-attribution.md" ] || fail "raw launch must not generate the attribution rule"
+  [ ! -e "$home/state/$id.devin-config.json" ] || fail "raw launch must not generate the private config"
+  [ ! -e "$wt/.devin" ] || fail "raw launch must not write under the worktree's .devin"
   [ ! -f "$home/state/$id.devin-permission.json" ] || fail "raw launch must not generate the permission policy file"
   [ ! -f "$home/state/$id.busy-gen" ] || fail "raw launch must not arm busy generation"
   pass "fm-spawn.sh: raw launch skips devin hook wiring and busy generation"
@@ -1033,6 +1145,7 @@ test_devin_missing_binary_refuses
 test_devin_launch_shape_and_model_handling
 test_devin_secondmate_refusal
 test_devin_hooks_generation_validation_and_execution
+test_devin_private_config_preserves_user_config
 test_devin_collision_refusal
 test_devin_teardown_and_relaunch
 test_devin_teardown_removes_managed_wiring_and_empty_dirs

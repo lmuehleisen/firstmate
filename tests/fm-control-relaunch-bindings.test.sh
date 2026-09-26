@@ -252,6 +252,7 @@ test_devin_worktree_wiring_is_retired_on_a_harness_switch() {
   printf '{"task":"rl37","status":"%s","log":"%s"}\n' \
     "$state/rl37.status" "$state/devin-permission-log.jsonl" \
     > "$state/rl37.devin-permission.json"
+  printf '{}\n' > "$state/rl37.devin-config.json"
   printf 'zsh' > "$dir/fake/command"
   out=$(run_spawn "$dir" rl37 --relaunch --harness claude); rc=$?
   expect_code 0 "$rc" "relaunch away from devin should succeed"$'\n'"$out"
@@ -261,11 +262,13 @@ test_devin_worktree_wiring_is_retired_on_a_harness_switch() {
     || fail "the retired devin incarnation's attribution rule must not outlive it"
   [ ! -e "$state/rl37.devin-permission.json" ] \
     || fail "the retired devin incarnation's permission policy file must not outlive it"
+  [ ! -e "$state/rl37.devin-config.json" ] \
+    || fail "the retired devin incarnation's private config must not outlive it"
   [ ! -d "$dir/wt/.devin/rules" ] \
     || fail "the emptied .devin/rules directory must not outlive the retired devin incarnation"
   [ ! -d "$dir/wt/.devin" ] \
     || fail "the emptied .devin directory must not outlive the retired devin incarnation"
-  pass "fm-spawn --relaunch: switching away from devin retires its worktree wiring and emptied directories"
+  pass "fm-spawn --relaunch: switching away from devin retires its private config, legacy worktree wiring, and emptied directories"
 }
 
 test_devin_relaunch_keeps_project_owned_devin_content() {
