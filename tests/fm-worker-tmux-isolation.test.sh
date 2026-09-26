@@ -198,19 +198,19 @@ SH
 # a hardlink or a rename of a live foreign socket, or a socket whose path
 # contains a newline followed by a foreign socket's path. The shared retire used
 # by teardown, spawn rollback, and the test runner must stop only servers whose
-# own socket is inside the directory. Every server here is a stand-in on a -S
-# socket under FLEET_DIR.
+# own socket is inside the directory, and must keep the directory, since a
+# renamed socket may be the foreign server's only one. Every server here is a
+# stand-in on a -S socket under FLEET_DIR.
 test_retire_ignores_planted_foreign_sockets() {
-  local dir="$FLEET_DIR/p" linked="$FLEET_DIR/a" moved="$FLEET_DIR/b" handle="$FLEET_DIR/bh"
-  local split="$FLEET_DIR/c" nl own_pid nl_pid
+  local dir="$FLEET_DIR/p" linked="$FLEET_DIR/a" moved="$FLEET_DIR/b"
+  local split="$FLEET_DIR/c" nl own_pid nl_pid moved_pid
   (umask 077 && mkdir "$dir") || fail "could not create the private directory"
   ltmux -S "$linked" new-session -d "$REAL_SLEEP 600" || fail "could not start the hardlinked stand-in"
   ltmux -S "$moved" new-session -d "$REAL_SLEEP 600" || fail "could not start the renamed stand-in"
   ltmux -S "$split" new-session -d "$REAL_SLEEP 600" || fail "could not start the newline stand-in"
+  moved_pid=$(ltmux -S "$moved" display-message -p '#{pid}')
   ln "$linked" "$dir/linked" || fail "could not hardlink a live socket into the private directory"
-  if ! ln "$moved" "$handle" || ! mv "$moved" "$dir/moved"; then
-    fail "could not rename a live socket into the private directory"
-  fi
+  mv "$moved" "$dir/moved" || fail "could not rename a live socket into the private directory"
   nl="$dir/n"$'\n'"$split"
   mkdir -p "$(dirname "$nl")"
   ltmux -S "$nl" new-session -d "$REAL_SLEEP 600" || fail "could not start the worker's newline-named server"
@@ -222,19 +222,21 @@ test_retire_ignores_planted_foreign_sockets() {
   # scan really does yield a foreign path, so the case cannot pass vacuously.
   assert_equals "$(ltmux -S "$linked" display-message -p '#{pid}')" \
     "$(ltmux -S "$dir/linked" display-message -p '#{pid}')" "the hardlink must reach the stand-in"
-  assert_equals "$(ltmux -S "$handle" display-message -p '#{pid}')" \
-    "$(ltmux -S "$dir/moved" display-message -p '#{pid}')" "the renamed socket must reach the stand-in"
+  assert_equals "$moved_pid" "$(ltmux -S "$dir/moved" display-message -p '#{pid}')" \
+    "the renamed socket must reach the stand-in"
   find "$dir" -type s -print | grep -qxF "$split" ||
     fail "a newline-split scan should yield the outside socket path"
 
-  fm_private_tmux_retire "$dir" || fail "retire should accept a private directory"
+  if fm_private_tmux_retire "$dir"; then
+    fail "retire must report failure while a socket in the directory answers for an outside server"
+  fi
   ltmux -S "$linked" has-session 2>/dev/null || fail "retire must not stop a server hardlinked into the directory"
-  ltmux -S "$handle" has-session 2>/dev/null || fail "retire must not stop a server renamed into the directory"
+  ltmux -S "$dir/moved" has-session 2>/dev/null ||
+    fail "retire must neither stop nor unlink a server's only socket renamed into the directory"
   ltmux -S "$split" has-session 2>/dev/null || fail "retire must not stop a server named after a newline"
   ! kill -0 "$nl_pid" 2>/dev/null || fail "retire must stop the worker's newline-named server"
   ! kill -0 "$own_pid" 2>/dev/null || fail "retire must stop the worker's own -S server"
-  [ ! -e "$dir" ] || fail "retire must remove the private directory"
-  pass "retire stops only servers socketed inside the directory, despite hardlinked, renamed, or newline-named sockets"
+  pass "retire stops only servers socketed inside the directory and keeps it while a hardlinked, renamed, or newline-named socket answers for another server"
 }
 
 # A worker can make its own live socket unreachable, for example with chmod.
