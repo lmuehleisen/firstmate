@@ -523,8 +523,9 @@ The vendor binary is `/opt/homebrew/bin/devin` (single arm64 Mach-O binary from 
 The agent process runs as `devin` (`ps -o comm=` reports `devin`), spawning a child `/opt/homebrew/bin/devin`.
 Devin publishes no harness marker to child tool environments: environment inspection confirmed only `FM_*`, `GIT_EDITOR`, `GIT_TERMINAL_PROMPT`, and inherited launcher variables (`CLAUDECODE` unset).
 `DEVIN_PROJECT_DIR` appears only inside hook execution environments.
-Firstmate's launch boundary establishes `FM_DEVIN_HARNESS=devin`, which is accepted by `bin/fm-harness.sh` only under an exact `devin` ancestor process.
-`tests/fm-devin-harness.test.sh` verifies that ancestry classification identifies `devin` and ignores unrelated processes.
+`bin/fm-harness.sh` therefore identifies Devin by an exact `devin` ancestor alone, with no Firstmate launch marker.
+Verified live on 2026-09-25 with `devin 3000.11.3 (9c803229faa4)`: `bin/fm-harness.sh` run from a worker's shell tool on the generated launch printed `devin`, which the common live guard asserts.
+`tests/fm-devin-harness.test.sh` pins that an exact `devin` ancestor outranks an inherited `CLAUDECODE` and that `devin-helper` is not Devin, and `tests/fm-devin-fork-harness.test.sh` keeps the anchoring meaningful when the suite itself runs under a real Devin parent.
 
 ### Approvals and permissions
 
@@ -602,7 +603,7 @@ Verified live on 2026-09-25 with `devin 3000.11.3 (9c803229faa4)` on macOS arm64
 - The busy record moved `busy` then `idle source=devin-hook event=stop` with `lab1.turn-ended` touched, plain `exit` recorded `idle ... event=session-end`, the retry turn ended (`ended.<ts>`), and the footer read `SWE-2 Max`.
 - A second launch with `--permission-mode smart` rendered `(smart mode on)` and settled the same way.
 
-The portable regressions in `tests/fm-devin-harness.test.sh` pin the composition, user-config preservation, refusal on a failed compose, and the stale-`Stop` suppression; rebasing the signals live guard onto the generated launch is the follow-up that will make this record refreshable by one command.
+The portable regressions in `tests/fm-devin-harness.test.sh` (the base writer and stale-`Stop` suppression) and `tests/fm-devin-fork-harness.test.sh` (the composition, user-config preservation, and refusal on a failed compose) pin this; the three live guards under Verification suite now drive the generated launch, so one command refreshes each part.
 
 ### Turn-ending errors and the rate-limit retry
 
@@ -610,7 +611,7 @@ Verified live on 2026-09-25 with `devin 3000.11.3 (9c803229faa4)`: a turn that e
 A probe config recording every `UserPromptSubmit`, `Stop`, and `SessionEnd` payload saw a normal turn record `submit` then `stop`, and a turn whose network was then cut record `submit` only, ending on `Something went wrong` with the session-log line `Sending error response ... method=session/prompt error=Error { ... message: "Connection error, send a message to continue retrying" ... }`.
 The session log is `~/.local/share/devin/cli/logs/devin_<date>_<pid>.log`, named for the `devin` process that also runs the hooks.
 The 2026-09-24 fleet logs record the rate-limit stop on the same `session/prompt` error-response path, with the reset in the message (`Your limit will reset in 40 seconds.`, `... in 3 minutes.`).
-The rate-limit error cannot be forced on demand, so the live guard proves session-log discovery, the `Stop` retire, and that the sentinel follows the real log after a hook-less cancel, while `tests/fm-devin-rate-limit-retry.test.sh` pins the error text with the captured lines.
+The rate-limit error cannot be forced on demand, so `tests/fm-devin-rate-limit-retry-live-e2e.test.sh` proves session-log discovery and the `Stop` retire on the generated hooks, then appends a labeled rate-limit line to the isolated home's real session log after a hook-less cancel and follows it through a real `fm-send` retry the worker acknowledges; `tests/fm-devin-rate-limit-retry.test.sh` pins the error text with the captured lines.
 
 ### Control, interruption, and exit
 
@@ -626,41 +627,47 @@ On exit, Devin prints `Resume this session with devin -r <id>`, where `<id>` is 
 
 Devin CLI draws a structured composer:
 Top rule carries mode text (`──── (smart mode on) ─`), the agent prompt row opens with `❭` (U+276D), the bottom rule is a solid horizontal `─` rule, and the footer row reports model and context token usage (`SWE-2 Max Context: 13k / 262k tokens (5%)`).
-`bin/fm-composer-lib.sh` classifies this structure into `empty`, `pending`, or `unknown`.
+`bin/fm-composer-lib.sh` classifies this structure into `empty`, `pending`, or `unknown` through the fork-only frame selector in `bin/fm-composer-devin-lib.sh`; `tests/fm-composer-devin.test.sh` pins it.
 The idle placeholder `Ask Devin to build features, fix bugs, or work on your code` and active-work placeholder `Guide Devin while it works` are recognized as composer furniture.
 While busy, the delivery token `(esc twice to interrupt)` (or `(esc again to interrupt)`) is matched by `FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT` to confirm submitted keystrokes.
 
 ### Verification suite
 
-Run the portable regression and live guard with:
+Run the portable regressions and the live guards with the commands below; each live guard runs the real `bin/fm-spawn.sh` launch and its generated private config in an isolated home, on its own `-S` tmux socket with `TMUX` and `TMUX_PANE` removed.
 
 ```sh
-bin/fm-test-run.sh tests/fm-devin-harness.test.sh tests/fm-devin-permission-policy.test.sh tests/fm-devin-rate-limit-retry.test.sh
+bin/fm-test-run.sh tests/fm-devin-harness.test.sh tests/fm-devin-fork-harness.test.sh tests/fm-composer-devin.test.sh tests/fm-devin-permission-policy.test.sh tests/fm-devin-rate-limit-retry.test.sh
 FM_DEVIN_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-devin-signals-live-e2e.test.sh
+FM_DEVIN_RETRY_LIVE=1 bin/fm-test-run.sh tests/fm-devin-rate-limit-retry-live-e2e.test.sh
 FM_DEVIN_PERMISSION_LIVE=1 bin/fm-test-run.sh tests/fm-devin-permission-policy-live-e2e.test.sh
+FM_DEVIN_PERMISSION_LIVE=1 FM_DEVIN_PERMISSION_MODE=manual bin/fm-test-run.sh tests/fm-devin-permission-policy-live-e2e.test.sh
 ```
 
-The signals live guard passed on 2026-09-25 against `devin 3000.11.3 (9c803229faa4)`:
+All four live runs passed on 2026-09-25 against `devin 3000.11.3 (9c803229faa4)` on macOS arm64, tmux 3.7c:
 
 ```text
-ok - devin: launches in smart mode without workspace trust prompt
-ok - devin: #{pane_current_command} reports devin
-ok - devin: initial turn completed with report write and git staging
-ok - devin: the rate-limit arm hook finds the session log and Stop retires it
-ok - devin: double Escape cancels running turn and prints Canceled
-ok - devin: the rate-limit sentinel follows the real session log after a hook-less cancel
-ok - devin: plain exit cleanly terminates process to shell, unambiguous against /revert
-ok - devin: delivery busy regex matches thinking tokens
-# all devin signals live checks passed (devin 3000.11.3 (9c803229faa4))
+ok - devin 3000.11.3 (9c803229faa4): spawn brief, model, reviewed mode, trust, identity and native Stop
+ok - devin 3000.11.3 (9c803229faa4): no Claude Code hook ran and the worker commit carries no attribution
+ok - devin 3000.11.3 (9c803229faa4): real fm-send doorbell read and acknowledged
+ok - devin 3000.11.3 (9c803229faa4): idle interrupt sends one press; an open revert picker blocks exit and is closed without reverting
+ok - devin 3000.11.3 (9c803229faa4): double Escape cancels, preserves agent, and invalidates busy state
+ok - devin 3000.11.3 (9c803229faa4): plain exit and native -r session resume in reviewed mode
+ok - devin 3000.11.3 (9c803229faa4): the generated arm hook finds the session log and Stop retires it
+ok - devin 3000.11.3 (9c803229faa4): an injected rate-limit line after a hook-less cancel drives a real acknowledged retry
+ok - devin 3000.11.3 (9c803229faa4): plain exit leaves no retry sentinel
+ok - devin 3000.11.3 (9c803229faa4) (auto): PreToolUse delivers the exec command and a block refuses it
+ok - devin 3000.11.3 (9c803229faa4) (auto): a piped download escalates and PostToolUse closes it once approved
+ok - devin 3000.11.3 (9c803229faa4) (auto): a read-only command and a GET-shaped research fetch run without a prompt
+ok - devin 3000.11.3 (9c803229faa4) (auto): a declined piped download does not run and the next prompt closes it
+ok - devin 3000.11.3 (9c803229faa4) (auto): an explicit Claude import still runs the user's Claude Code hook
+ok - devin 3000.11.3 (9c803229faa4) (auto): the generated policy's headless swe-2-high judge returns a parseable verdict
+ok - devin 3000.11.3 (9c803229faa4) (manual): PreToolUse delivers the exec command and a block refuses it
+ok - devin 3000.11.3 (9c803229faa4) (manual): a piped download escalates and PostToolUse closes it once approved
+ok - devin 3000.11.3 (9c803229faa4) (manual): a read-only command and a GET-shaped research fetch run without a prompt
+ok - devin 3000.11.3 (9c803229faa4) (manual): a declined piped download does not run and the next prompt closes it
+ok - devin 3000.11.3 (9c803229faa4) (manual): an explicit Claude import still runs the user's Claude Code hook
+ok - devin 3000.11.3 (9c803229faa4) (manual): the generated policy's headless swe-2-high judge returns a parseable verdict
 ```
 
-The permission live guard passed on 2026-09-15 against `devin 3000.10.21 (611c1cba)`:
-
-```text
-ok - devin: PreToolUse delivers the exec command and a block decision refuses it
-ok - devin: PermissionRequest delivers tool_input.command and approve runs the call without a prompt
-ok - devin: an escalation falls through to the prompt and PostToolUse closes it once approved
-ok - devin: the headless swe-2-high first judge returns a parseable verdict (judge|project-local dev dependency install within the task worktree (static: npm install))
-# all devin permission policy live checks passed (devin 3000.10.21 (611c1cba))
-```
+The same runs showed that a GET-shaped lookup must print to stdout for the policy to approve it: `curl -o /dev/null` counts as a write outside the task write roots and escalates.
 

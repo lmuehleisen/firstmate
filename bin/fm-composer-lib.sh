@@ -84,7 +84,9 @@
 #                without that evidence a matching hint remains unknown.
 #   devin      - a `❭` row between a top mode rule and a solid bottom rule,
 #                followed immediately by its model/context footer. The full
-#                structure proves this input region.
+#                structure proves this input region. Its selector lives in
+#                fork-only bin/fm-composer-devin-lib.sh, sourced below; this
+#                classifier stays the only caller.
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -172,6 +174,9 @@
 #
 # Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
+
+# shellcheck source=bin/fm-composer-devin-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-devin-lib.sh"
 
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
@@ -1647,77 +1652,6 @@ _fm_composer_select_cursorless() {
     fi
   fi
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
-}
-
-# Devin's composer has top rule `──── (smart mode on) ─` (or mode on),
-# prompt row opening with `❭` (U+276D), bottom solid `─` rule,
-# and model / context footer row (e.g. `SWE-2 Max Context: 13k / 262k tokens (5%)`).
-_fm_composer_select_devin() {  # <plain-screen>
-  local plain=$1 total_rows r footer_row=-1 bottom_row=-1 first=-1 last=-1 top_row=-1
-  local row_text bottom_text top_text below_text
-  total_rows=$(printf '%s\n' "$plain" | wc -l | tr -d ' ')
-  [ "$total_rows" -ge 4 ] || return 1
-
-  # Find bottom-most footer matching Devin's Context / token usage footer
-  r=$((total_rows - 1))
-  while [ "$r" -ge 3 ]; do
-    row_text=$(_fm_composer_screen_row "$r" "$plain")
-    if printf '%s\n' "$row_text" | LC_ALL=C grep -qE 'Context:[[:space:]]*[0-9]+.*tokens'; then
-      footer_row=$r
-      break
-    fi
-    r=$((r - 1))
-  done
-  [ "$footer_row" -ge 3 ] || return 1
-
-  # No later input or popup may hide behind the recognized footer
-  below_text=$(printf '%s\n' "$plain" | tail -n "+$((footer_row + 2))")
-  fm_composer_normalize_trim_var below_text
-  [ -z "$below_text" ] || return 1
-
-  # Directly above footer row is the solid bottom rule
-  bottom_row=$((footer_row - 1))
-  bottom_text=$(_fm_composer_screen_row "$bottom_row" "$plain")
-  case "$bottom_text" in
-    *────────*) ;;
-    *) return 1 ;;
-  esac
-
-  # Directly above bottom rule are content rows, ending at last = bottom_row - 1
-  last=$((bottom_row - 1))
-  [ "$last" -ge 1 ] || return 1
-
-  # Find the opening content row starting with `❭` (up to 8 rows above)
-  r=$last
-  while [ "$r" -ge 1 ] && [ "$r" -ge "$((last - 7))" ]; do
-    row_text=$(_fm_composer_screen_row "$r" "$plain")
-    case "$row_text" in
-      '❭'|'❭'\ *)
-        first=$r
-        break
-        ;;
-    esac
-    r=$((r - 1))
-  done
-  [ "$first" -ge 1 ] || return 1
-
-  # Directly above first content row is the top rule
-  top_row=$((first - 1))
-  top_text=$(_fm_composer_screen_row "$top_row" "$plain")
-  case "$top_text" in
-    *─*\(?*mode\ on\)*─*|*────────*) ;;
-    *) return 1 ;;
-  esac
-
-  FM_COMPOSER_SELECTED_KIND=devin
-  FM_COMPOSER_SELECTED_FIRST=$first
-  FM_COMPOSER_SELECTED_LAST=$last
-}
-
-_fm_composer_devin_verdict() {  # <screen> <styled>
-  local screen=$1 styled=$2
-  _fm_composer_classify_rows "$screen" "$styled" 0 \
-    "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
 }
 
 # Agy's separated prompt needs its own footer proof; the same `>` between

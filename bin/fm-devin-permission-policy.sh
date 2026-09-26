@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-devin-permission-policy.sh - firstmate's permission decision layer for
-# Devin CLI workers. bin/fm-spawn.sh installs it as native Devin lifecycle
-# hooks in the worker's .devin/config.local.json; the script itself and its
+# Devin CLI workers. bin/fm-devin-lib.sh installs it as native Devin lifecycle
+# hooks in the worker's private config (state/<id>.devin-config.json); it and its
 # per-task policy file (state/<id>.devin-permission.json) live outside the
 # worktree, and Devin reads hooks once at session start, so a worker cannot
 # rewrite the policy mid-session.
