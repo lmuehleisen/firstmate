@@ -1551,6 +1551,49 @@ SH
   pass "--max-wall-ms fails an over-budget run and refuses a malformed budget"
 }
 
+# A suite can leave a tmux server the runner's cleanup cannot stop in the run's
+# private tmux directory. The runner must keep that directory, say so, and fail
+# the otherwise green run rather than hide a leaked server.
+test_unretired_private_tmux_directory_fails_the_run() {
+  local tmp repo runner fixture fake_bin rc left
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tmux-retire.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-tmux-retire-fixture.test.sh
+  fake_bin="$tmp/fake-bin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fake_bin"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-private-tmux-lib.sh" "$repo/bin/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$fixture" <<SH
+#!/usr/bin/env bash
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "\$TMUX_TMPDIR/s" || exit 1
+printf '%s\n' "\$TMUX_TMPDIR" >"$tmp/tmux-dir"
+echo "ok - tmux retire fixture"
+SH
+  # The planted socket answers like one whose permissions a worker revoked.
+  cat >"$fake_bin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *" display-message "*) echo "error connecting to $2 (Permission denied)" >&2; exit 1 ;; esac
+exit 0
+SH
+  chmod +x "$runner" "$repo/$fixture" "$fake_bin/tmux"
+
+  set +e
+  PATH="$fake_bin:$PATH" "$runner" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  left=$(cat "$tmp/tmux-dir" 2>/dev/null || true)
+  case "$left" in /tmp/fmtr.*) ;; *) rm -rf "$tmp"; fail "the fixture did not record the run's private tmux directory" ;; esac
+  [ -S "$left/s" ] || { rm -rf "$left" "$tmp"; fail "the runner removed a private tmux directory it could not retire"; }
+  rm -rf "$left"
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "an unretired private tmux directory must fail the run, got $rc"; }
+  grep -qF "private tmux directory $left could not be retired" "$tmp/err" ||
+    { rm -rf "$tmp"; fail "the runner did not name the directory it could not retire: $(cat "$tmp/err")"; }
+  rm -rf "$tmp"
+  pass "an unretired private tmux directory is reported and fails the run"
+}
+
 test_jobs_parallel_scheduler_and_failure_propagation() {
   local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
@@ -1798,6 +1841,7 @@ test_changed_shared_fixture_selects_its_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
+test_unretired_private_tmux_directory_fails_the_run
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json

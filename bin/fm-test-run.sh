@@ -2369,8 +2369,13 @@ declare -a WORKER_SCRIPTS=()
 # Invoked indirectly by the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup_run() {
-  fm_private_tmux_retire "$RUN_TMUX_TMPDIR" || true
+  local rc=$?
+  if ! fm_private_tmux_retire "$RUN_TMUX_TMPDIR" && [ -e "$RUN_TMUX_TMPDIR" ]; then
+    echo "fm-test-run: private tmux directory $RUN_TMUX_TMPDIR could not be retired and a tmux server a suite left there may still run; stop it by its exact -S socket and remove the directory" >&2
+    [ "$rc" -ne 0 ] || rc=1
+  fi
   rm -rf "$RUN_TMP"
+  exit "$rc"
 }
 
 trap cleanup_run EXIT
