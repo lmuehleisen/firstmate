@@ -1267,13 +1267,16 @@ spawn_fresh_commit_rollback() {
 
 # The endpoint counts as gone only on a positive absence read: tmux's kill
 # reports success either way and an unreadable inventory proves nothing.
+# Every exit status is explicit: this runs from the EXIT trap, where bash 5
+# makes a bare `return` report the status from before the trap fired.
 spawn_endpoint_absent() {
   if [ "$BACKEND" = tmux ]; then
     fm_backend_source tmux || return 1
-    [ "$(fm_backend_tmux_target_presence "$T")" = missing ]
-    return
+    [ "$(fm_backend_tmux_target_presence "$T")" = missing ] && return 0
+    return 1
   fi
-  ! fm_backend_target_exists "$BACKEND" "$T" "$W"
+  fm_backend_target_exists "$BACKEND" "$T" "$W" && return 1
+  return 0
 }
 
 # Close the endpoint this spawn created and prove it is gone.
@@ -1337,6 +1340,7 @@ spawn_slot_holds_only_spawn_wiring() {
       return 1
     }
   done <<<"$status_out"
+  return 0
 }
 
 # Roll back what a fresh spawn acquired when it refuses before launch delivery.
