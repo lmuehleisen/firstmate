@@ -36,8 +36,7 @@ ltmux() { env -u TMUX -u TMUX_PANE "$REAL_TMUX" "$@"; }
 # pid_gone <pid>: true once <pid> has exited, allowing a stopped tmux server up
 # to five seconds, since kill-server returns before the server process exits.
 pid_gone() {
-  local i
-  for i in $(seq 1 50); do
+  for _ in $(seq 1 50); do
     kill -0 "$1" 2>/dev/null || return 0
     "$REAL_SLEEP" 0.1
   done
