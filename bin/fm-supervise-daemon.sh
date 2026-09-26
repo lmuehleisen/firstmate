@@ -239,6 +239,12 @@ INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 # Digest files older than DIGEST_RETAIN_DAYS are pruned at the next long flush.
 INJECT_INLINE_MAX_DEFAULT=480
 DIGEST_RETAIN_DAYS=7
+# A failed submit's owned-digest record and its pane captures (see
+# recover_owned_input). The newest SUBMIT_FAILURES_KEEP captures are kept, none
+# older than DIGEST_RETAIN_DAYS.
+INJECT_OWNED_NAME=.subsuper-inject-owned
+SUBMIT_FAILURES_DIR_NAME=.subsuper-submit-failures
+SUBMIT_FAILURES_KEEP=50
 CRASH_THRESHOLD_DEFAULT=10
 CRASH_WINDOW_DEFAULT=60
 CRASH_BACKOFF_DEFAULT=60
@@ -732,11 +738,23 @@ escalate_add() {  # <state> <distilled-item>
 # longer starts the message and the escalation reads as the captain returning.
 # A line well under that threshold arrives intact, idle or mid-turn.
 escalate_flush() {  # <state>
-  local state=$1 buf n msg dir file max encoded
+  local state=$1 buf n msg dir file max encoded rc=0 sum
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
+  # A digest an earlier failed submit left in the composer is resolved first:
+  # nothing new is typed while it may still be there.
+  recover_owned_input "$state" || rc=$?
+  case "$rc" in
+    0) ;;
+    3)
+      _buffer_drop_head "$state" "$OWNED_LINES" "$OWNED_EPOCH"
+      [ -s "$buf" ] || return 0
+      ;;
+    *) return 1 ;;
+  esac
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   n=$((n + 0))
+  sum=$(cksum < "$buf" | cut -d' ' -f1)
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
@@ -770,7 +788,7 @@ escalate_flush() {  # <state>
       fi
     fi
   fi
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state" "$n" "$sum"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
 }
 
@@ -1280,6 +1298,207 @@ window_for_task() {  # <task-key> [state]
   return 1
 }
 
+# --- owned-input recovery ---------------------------------------------------
+# A failed submit can leave the digest the daemon typed sitting in the
+# primary's composer, and every later flush then defers on a composer that is
+# not empty (2026-09-24: an unknown verdict, then hours of deferrals). So
+# inject_msg saves a pane capture under state/.subsuper-submit-failures/ on
+# every failed submit, and on tmux records the exact typed digest in
+# state/.subsuper-inject-owned, bound to the head of the escalation buffer that
+# digest carried. Every later flush first runs recover_owned_input, which acts
+# only on an idle pane whose composer fm_tmux_composer_owned_input proves holds
+# exactly that digest:
+#   - while the buffer still begins with the digest's events, Enter is retried
+#     through the shared owner (fm_tmux_owned_submit_enter); a confirmed submit
+#     drops those events, and an exhausted one clears the owned digest so the
+#     next flush types a fresh one;
+#   - once the buffer no longer begins with them (a return or a new away window
+#     reset it), the stale digest is cleared, never submitted.
+# Text the daemon cannot prove it owns - a draft, added text, an unknown or
+# unreadable composer - is never submitted or cleared: the flush keeps
+# deferring, one capture records that state, and the wedge alarm stays the
+# backstop. A composer that is empty again drops the record, and the digest's
+# events stay buffered for a fresh digest. Herdr needs no record: its submit
+# already withholds Enter from an unproven Claude payload and clears it.
+
+# record_submit_failure: save a plain capture of the supervisor pane with what
+# failed, prune old captures, and print the capture's path.
+record_submit_failure() {  # <state> <backend> <target> <what>
+  local state=$1 backend=$2 target=$3 what=$4 dir file old
+  dir="$state/$SUBMIT_FAILURES_DIR_NAME"
+  mkdir -p "$dir" || return 1
+  file="$dir/$(date '+%Y%m%dT%H%M%S')-$$-$RANDOM.txt"
+  (
+    umask 077
+    {
+      printf 'when: %s\nwhat: %s\nbackend: %s\ntarget: %s\ncomposer: %s\n\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$what" "$backend" "$target" \
+        "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)"
+      fm_backend_capture "$backend" "$target" 60 2>/dev/null
+    } > "$file"
+  ) || return 1
+  find "$dir" -type f -name '*.txt' -mtime +"$DIGEST_RETAIN_DAYS" -exec rm -f {} + 2>/dev/null || true
+  while IFS= read -r old; do
+    [ -n "$old" ] && rm -f -- "${dir:?}/${old:?}"
+  done < <(find "$dir" -type f -name '*.txt' -exec basename {} \; 2>/dev/null \
+    | sort -r | tail -n +$((SUBMIT_FAILURES_KEEP + 1)))
+  printf '%s' "$file"
+}
+
+# The owned-digest record: the typed bytes and the buffered events they carry.
+_owned_record_write() {  # <state> <target> <backend> <typed-text> <buffered-lines> <buffered-cksum>
+  local rec="$1/$INJECT_OWNED_NAME"
+  (
+    umask 077
+    printf 'epoch=%s\ntarget=%s\nbackend=%s\nlines=%s\nsum=%s\ntext=%s\n' \
+      "$(_now)" "$2" "$3" "$5" "$6" "$4" > "$rec.tmp"
+  ) && mv -f "$rec.tmp" "$rec"
+  rm -f "$rec.noted" "$rec.tmp"
+}
+
+# _owned_record_read: load the record into OWNED_* globals; 1 when unusable.
+_owned_record_read() {  # <record>
+  local line
+  OWNED_EPOCH='' OWNED_TARGET='' OWNED_BACKEND='' OWNED_LINES='' OWNED_SUM='' OWNED_TEXT=''
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      epoch=*) OWNED_EPOCH=${line#epoch=} ;;
+      target=*) OWNED_TARGET=${line#target=} ;;
+      backend=*) OWNED_BACKEND=${line#backend=} ;;
+      lines=*) OWNED_LINES=${line#lines=} ;;
+      sum=*) OWNED_SUM=${line#sum=} ;;
+      text=*) OWNED_TEXT=${line#text=} ;;
+    esac
+  done < "$1" || return 1
+  case "$OWNED_LINES" in ''|*[!0-9]*) OWNED_LINES=0 ;; esac
+  case "$OWNED_EPOCH" in ''|*[!0-9]*) OWNED_EPOCH=$(_now) ;; esac
+  [ -n "$OWNED_TEXT" ] && [ -n "$OWNED_TARGET" ] && [ -n "$OWNED_BACKEND" ]
+}
+
+# _buffer_head_matches: 0 when the buffer still begins with the <lines> events
+# whose cksum was <sum> when the owned digest was typed.
+_buffer_head_matches() {  # <state> <lines> <sum>
+  local buf="$1/.subsuper-escalations"
+  [ "$2" -gt 0 ] && [ -n "$3" ] || return 1
+  [ "$(wc -l < "$buf" 2>/dev/null || echo 0)" -ge "$2" ] || return 1
+  [ "$(head -n "$2" "$buf" | cksum | cut -d' ' -f1)" = "$3" ]
+}
+
+# _buffer_drop_head: remove the <lines> delivered events. Later events keep
+# waiting, aged from when the delivered digest was typed.
+_buffer_drop_head() {  # <state> <lines> <typed-epoch>
+  local state=$1 buf="$1/.subsuper-escalations"
+  tail -n +$(($2 + 1)) "$buf" > "$buf.tmp" 2>/dev/null && mv -f "$buf.tmp" "$buf"
+  if [ -s "$buf" ]; then
+    printf '%s\n' "$3" > "${buf}.since"
+  else
+    : > "$buf"
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+  fi
+}
+
+# _owned_note_once: log and capture a composer the daemon may not touch, once
+# per record, so hours of deferrals do not fill the capture directory.
+_owned_note_once() {  # <state> <target> <why>
+  local rec="$1/$INJECT_OWNED_NAME" capture
+  [ -e "$rec.noted" ] && return 0
+  : > "$rec.noted"
+  capture=$(record_submit_failure "$1" tmux "$2" "owned digest not recoverable: $3") || capture='(pane capture failed)'
+  log "inject recovery waiting: $3; pane capture: $capture"
+}
+
+# The owned digest left the composer: it is empty, or the pane went busy from
+# idle across the Enter.
+_owned_submit_landed() {  # <target>
+  [ "$(fm_tmux_composer_state "$1")" = empty ] || pane_is_busy "$1" tmux
+}
+
+# _owned_clear_presses: Ctrl+U presses that remove the digest a wrapped row at
+# a time, bounded by the rows it can occupy.
+_owned_clear_presses() {  # <target> <text>
+  local width
+  width=$(tmux display-message -p -t "$1" '#{pane_width}' 2>/dev/null) || width=
+  case "$width" in ''|*[!0-9]*) width=80 ;; esac
+  [ "$width" -gt 8 ] || width=8
+  printf '%s' $(( ${#2} / (width - 4) + 2 ))
+}
+
+# recover_owned_input: resolve an owned digest before a flush types anything.
+# Returns 0 to proceed with a normal flush, 1 to defer, and 3 when the owned
+# digest was submitted, so its OWNED_LINES events are delivered.
+recover_owned_input() {  # <state>
+  local state=$1 rec target backend rc presses err capture
+  rec="$state/$INJECT_OWNED_NAME"
+  [ -e "$rec" ] || return 0
+  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  if ! _owned_record_read "$rec"; then
+    log "inject recovery: the owned-digest record is unreadable; dropped it without touching the composer"
+    rm -f "$rec" "$rec.noted"
+    return 0
+  fi
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  if [ "$backend" != tmux ] || [ "$OWNED_BACKEND" != "$backend" ] || [ "$OWNED_TARGET" != "$target" ]; then
+    log "inject recovery: the owned digest was typed into $OWNED_BACKEND:$OWNED_TARGET, not $backend:$target; dropped the record without touching either"
+    rm -f "$rec" "$rec.noted"
+    return 0
+  fi
+  fm_backend_target_exists tmux "$target" || return 1
+  if pane_is_busy "$target" tmux; then
+    log "inject deferred: supervisor pane busy (agent mid-turn)"
+    return 1
+  fi
+  rc=0
+  fm_tmux_composer_owned_input "$target" "$OWNED_TEXT" || rc=$?
+  case "$rc" in
+    0) ;;
+    1)
+      if [ "$(fm_tmux_composer_state "$target")" = empty ]; then
+        log "inject recovery: the owned digest is no longer in the composer; its events stay buffered for a fresh digest"
+        rm -f "$rec" "$rec.noted"
+        return 0
+      fi
+      _owned_note_once "$state" "$target" "the composer holds text the daemon cannot prove it typed, so it is left untouched"
+      return 1
+      ;;
+    *)
+      _owned_note_once "$state" "$target" "the composer is unreadable or not identified, so the owned digest is left untouched"
+      return 1
+      ;;
+  esac
+  presses=$(_owned_clear_presses "$target" "$OWNED_TEXT")
+  if ! _buffer_head_matches "$state" "$OWNED_LINES" "$OWNED_SUM"; then
+    if fm_tmux_clear_owned_input "$target" "$OWNED_TEXT" fm_tmux_composer_owned_input "$presses"; then
+      log "inject recovery: cleared a stale owned digest whose events are no longer buffered"
+      rm -f "$rec" "$rec.noted"
+      return 0
+    fi
+    capture=$(record_submit_failure "$state" tmux "$target" "stale owned digest cleanup unconfirmed") || capture='(pane capture failed)'
+    log "inject recovery: could not confirm clearing a stale owned digest; pane capture: $capture"
+    return 1
+  fi
+  rc=0
+  err=$(fm_tmux_owned_submit_enter "$target" "$OWNED_TEXT" fm_tmux_composer_owned_input "$presses" \
+    'away-mode digest' _owned_submit_landed "$target" 2>&1 >/dev/null) || rc=$?
+  case "$rc" in
+    0)
+      log "inject recovered: submitted the owned digest left in the composer ($OWNED_LINES event(s))"
+      rm -f "$rec" "$rec.noted"
+      return 3
+      ;;
+    1)
+      rm -f "$rec" "$rec.noted"
+      capture=$(record_submit_failure "$state" tmux "$target" "owned digest resubmit exhausted; cleared") || capture='(pane capture failed)'
+      log "inject recovery gave up: ${err#error: }; its events stay buffered for a fresh digest; pane capture: $capture"
+      ;;
+    *)
+      capture=$(record_submit_failure "$state" tmux "$target" "owned digest resubmit unconfirmed") || capture='(pane capture failed)'
+      log "inject recovery failed: ${err#error: }; pane capture: $capture"
+      ;;
+  esac
+  return 1
+}
+
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on successful inject (or empty buffer), non-zero if the pane is
@@ -1295,13 +1514,15 @@ window_for_task() {  # <task-key> [state]
 #     For tmux that means a cleared composer; for herdr's normal idle-baseline
 #     path it means native agent-state observed a real turn start.
 #     Pending means Enter was swallowed; unknown is treated as undelivered by
-#     this strict daemon path.
+#     this strict daemon path. Either failure leaves a pane capture and, on
+#     tmux, the owned-digest record that recover_owned_input resolves before
+#     the next flush types anything.
 #   - COMPOSER GUARD before typing: if the cursor line already has real content
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
-inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+inject_msg() {  # <message> [state] [buffered-lines buffered-cksum]
+  local msg=$1 state target backend retries sleep_s verdict composer encoded capture
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1354,7 +1575,9 @@ inject_msg() {  # <message> [state]
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  capture=$(record_submit_failure "$state" "$backend" "$target" "submit unconfirmed (verdict=$verdict)") || capture='(pane capture failed)'
+  [ "$backend" != tmux ] || _owned_record_write "$state" "$target" "$backend" "$msg" "${3:-0}" "${4:-}"
+  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer); pane capture: $capture"
   return 1
 }
 

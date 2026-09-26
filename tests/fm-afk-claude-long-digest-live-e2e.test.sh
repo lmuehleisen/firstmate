@@ -11,6 +11,10 @@
 #      event.
 #   3. With the primary mid-turn, the Claude busy guard reads busy and the flush
 #      defers; once the turn ends the flush delivers a line that still classifies.
+#   4. A digest an unconfirmed submit left under Claude's invisible-character
+#      review banner is submitted once by the next flush and still classifies.
+#   5. A stale owned digest is cleared from the wrapped composer with Ctrl+U a row
+#      at a time and never submitted.
 # The stand-in Claude has no tools, no Chrome, and no MCP servers; it only receives
 # text. Its project and FM_HOME are isolated temporary folders, and a few Haiku turns
 # are submitted.
@@ -205,3 +209,78 @@ kind=$(classify "$row")
 [ "$kind" = away-supervisor ] \
   || fail "Claude Code $CLAUDE_VERSION delivered the deferred escalation as $kind: $row"
 pass "Claude Code $CLAUDE_VERSION: a mid-turn escalation defers on the Claude busy guard and arrives intact after the turn"
+
+# The number of transcript user rows containing <text>.
+user_row_count() {  # <text>
+  local transcript
+  transcript=$(find "$HOME/.claude/projects" -name "$SESSION_ID.jsonl" 2>/dev/null | head -1)
+  [ -n "$transcript" ] || { printf 0; return 0; }
+  jq -s --arg text "$1" '[.[] | select(.type == "user") | .message.content
+    | if type == "string" then . else (map(select(.type == "text") | .text) | join("")) end
+    | select(contains($text))] | length' "$transcript"
+}
+
+# Type <typed> as the daemon does, press Enter once, and require Claude to hold it
+# under its review banner, so the case cannot pass vacuously.
+leave_digest_in_composer() {  # <typed> <what>
+  local i=0
+  tmux -L "$SOCKET" send-keys -t "$SESSION" -l "$1"
+  sleep 0.5
+  tmux -L "$SOCKET" send-keys -t "$SESSION" Enter
+  until daemon 'fm_tmux_composer_owned_input "$PANE" "$TYPED"'; do
+    [ "$i" -lt 20 ] || {
+      printf '%s\n' "$(screen)" >&2
+      fail "Claude Code $CLAUDE_VERSION no longer holds a marked digest after its first Enter; the $2 case cannot reproduce a digest left in the composer"
+    }
+    sleep 0.25
+    i=$((i + 1))
+  done
+}
+
+long_event() {  # <token>
+  printf 'lab-%s.status: blocked: %s the release needs a go or no-go before the next deploy train, and the migration window closes at the end of the week, so the pick decides whether the schema change ships this sprint or waits for the next one [key=%s]' "$1" "$1" "$1"
+}
+
+# 4. A digest an unconfirmed submit left in the composer is submitted once by the
+#    next flush, and the events it carried are not typed again.
+wait_ready 'the owned-digest recovery case'
+: > "$STATE/.subsuper-escalations"
+daemon "escalate_add \"\$STATE\" '$(long_event OWNEDCASE)'"
+TYPED=$(daemon 'fm_operational_input_encode away-supervisor "Supervisor escalate (1 event(s)): $(cat "$STATE/.subsuper-escalations") (pre-read; re-arm not needed — watcher daemon-managed)" t && printf "%s" "$t"')
+export TYPED
+leave_digest_in_composer "$TYPED" 'owned-digest recovery'
+daemon '_owned_record_write "$STATE" "$PANE" tmux "$TYPED" 1 "$(cksum < "$STATE/.subsuper-escalations" | cut -d" " -f1)"'
+daemon 'escalate_flush "$STATE"' \
+  || fail "Claude Code $CLAUDE_VERSION: the owned digest left in the composer was not recovered"
+grep -q 'inject recovered: submitted the owned digest' "$STATE/.supervise-daemon.log" \
+  || fail "Claude Code $CLAUDE_VERSION: the flush delivered without the owned-digest recovery"
+row=$(user_row 'OWNEDCASE') || fail "Claude Code $CLAUDE_VERSION transcript holds no recovered digest row"
+kind=$(classify "$row")
+[ "$kind" = away-supervisor ] \
+  || fail "Claude Code $CLAUDE_VERSION delivered the recovered digest as $kind: $row"
+wait_ready 'the end of the recovered digest turn'
+[ "$(user_row_count OWNEDCASE)" -eq 1 ] \
+  || fail "Claude Code $CLAUDE_VERSION received the recovered events $(user_row_count OWNEDCASE) times"
+pass "Claude Code $CLAUDE_VERSION: a digest left under the review banner is submitted once by the next flush and classifies as away-supervisor"
+
+# 5. A stale owned digest, whose events are no longer buffered, is cleared from a
+#    wrapped Claude composer a row at a time and never submitted; the fresh
+#    digest that follows arrives on its own.
+wait_ready 'the stale owned-digest case'
+: > "$STATE/.subsuper-escalations"
+TYPED=$(daemon 'fm_operational_input_encode away-supervisor "Supervisor escalate (1 event(s)): $(long_event STALECASE) (pre-read; re-arm not needed — watcher daemon-managed)" t && printf "%s" "$t"')
+export TYPED
+leave_digest_in_composer "$TYPED" 'stale owned-digest'
+daemon "escalate_add \"\$STATE\" 'lab-fresh.status: blocked: FRESHCASE the rollout needs a window pick [key=fresh]'"
+daemon '_owned_record_write "$STATE" "$PANE" tmux "$TYPED" 1 stale'
+daemon 'escalate_flush "$STATE"' \
+  || fail "Claude Code $CLAUDE_VERSION: the fresh digest after a stale owned digest was not delivered"
+grep -q 'cleared a stale owned digest' "$STATE/.supervise-daemon.log" \
+  || fail "Claude Code $CLAUDE_VERSION: the stale owned digest was not cleared"
+row=$(user_row 'FRESHCASE') || fail "Claude Code $CLAUDE_VERSION transcript holds no fresh digest row"
+[ "$(classify "$row")" = away-supervisor ] \
+  || fail "Claude Code $CLAUDE_VERSION delivered the fresh digest as $(classify "$row"): $row"
+wait_ready 'the end of the fresh digest turn'
+[ "$(user_row_count STALECASE)" -eq 0 ] \
+  || fail "Claude Code $CLAUDE_VERSION received the stale owned digest"
+pass "Claude Code $CLAUDE_VERSION: a stale owned digest is cleared from the wrapped composer a row at a time and never submitted"

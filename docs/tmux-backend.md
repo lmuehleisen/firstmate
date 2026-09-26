@@ -53,6 +53,9 @@ When Enter is lost, retries require the complete owned command at the shell curs
 Unreadable or changed input is preserved and reported for inspection.
 The real-shell regression and verified versions are recorded in [runtime backend verification](verification/runtime-backends-fork.md#shell-command-submission).
 
+The away-mode daemon reuses the same owner for a digest an unconfirmed submit left in the primary's agent composer.
+There, ownership means the shared classifier places the cursor in a composer holding input that is exactly the typed digest, and cleanup presses Ctrl+U once per wrapped row.
+
 ### Agent liveness probe
 
 A target-existence check proves only that the pane exists, and it reads that from an exact inventory of the `=`-anchored session, never from `display-message` exiting 0, which tmux does for any target while a server runs.

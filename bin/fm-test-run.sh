@@ -397,7 +397,8 @@ family_for_basename() {
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
-    fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|fm-afk-sentinel.test.sh)
+    fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-owned-digest-recovery.test.sh|\
+    fm-afk-return.test.sh|fm-afk-sentinel.test.sh)
       printf '%s\n' afk
       ;;
     fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-contributions.test.sh|\
@@ -684,6 +685,7 @@ portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-contract.test.sh 15645
 tests/fm-afk-inject-e2e.test.sh 35889
+tests/fm-afk-owned-digest-recovery.test.sh 57686
 tests/fm-afk-pi-herdr-return-e2e.test.sh 45
 tests/fm-afk-return.test.sh 20385
 tests/fm-agy-harness.test.sh 47933
