@@ -516,6 +516,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
    Your tmux commands reach a private per-task tmux server; never point tmux at a server you did not create (with -S, or by setting TMUX), and never kill tmux by process name or pid.
+   Any tmux server you start with -S must use a socket under \$TMUX_TMPDIR, such as -S "\$TMUX_TMPDIR/lab", so cleanup can stop it.
 3. Use gh for GitHub operations. For browser work, use the harness browser tools or Playwright.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
@@ -611,6 +612,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
    Your tmux commands reach a private per-task tmux server; never point tmux at a server you did not create (with -S, or by setting TMUX), and never kill tmux by process name or pid.
+   Any tmux server you start with -S must use a socket under \$TMUX_TMPDIR, such as -S "\$TMUX_TMPDIR/lab", so cleanup can stop it.
 3. Use gh for GitHub operations. For browser work, use the harness browser tools or Playwright.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
