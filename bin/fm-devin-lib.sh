@@ -294,11 +294,11 @@ fm_devin_launch_assert() {  # <launch> <crew-permission-mode> <config>
     return 1
     ;;
   esac
-  [ -f "$config" ] && [ -n "${FM_DEVIN_WIRED_SPEC:-}" ] &&
-    jq -e --argjson spec "$FM_DEVIN_WIRED_SPEC" "$FM_DEVIN_CONFIG_COMPLETE" "$config" >/dev/null 2>&1 || {
+  if [ ! -f "$config" ] || [ -z "${FM_DEVIN_WIRED_SPEC:-}" ] ||
+    ! jq -e --argjson spec "$FM_DEVIN_WIRED_SPEC" "$FM_DEVIN_CONFIG_COMPLETE" "$config" >/dev/null 2>&1; then
     echo "error: cannot launch devin worker: $config lacks the reviewed permission wiring" >&2
     return 1
-  }
+  fi
 }
 
 # Relaunch retire, before the shared wiring paths go: the policy's retire

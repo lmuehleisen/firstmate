@@ -671,7 +671,7 @@ EOF
     *) fail "refusal must name the private config, got: $out" ;;
   esac
   [ ! -e "$home/state/$id.devin-config.json" ] || fail "a refused compose must leave no config behind"
-  [ -z "$(ls -A "$home/state" | grep -E "^\.$id\.devin-(user-)?config\." || true)" ] \
+  [ -z "$(find "$home/state" -maxdepth 1 -name ".$id.devin-*config.*" -print)" ] \
     || fail "a refused compose must leave no staged files: $(ls -A "$home/state")"
   [ ! -s "$home/launch.log" ] || fail "a refused compose must not reach the pane"
   case "$(cat "$user")" in broken) ;; *) fail "a refused compose must not touch the user config" ;; esac
