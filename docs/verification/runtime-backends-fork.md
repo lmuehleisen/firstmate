@@ -165,6 +165,19 @@ ok - Claude Code 2.1.281 (Claude Code): a mid-turn escalation defers on the Clau
 ```
 This guard is the refresh command after a Claude Code upgrade.
 
+The same guard proves the daemon's recovery of a digest left in the composer (`recover_owned_input` in `bin/fm-supervise-daemon.sh`).
+Claude Code holds a marked digest under its review banner after the first Enter, with the composer reading pending and its extracted text equal to the typed digest without U+2063; one Ctrl+U deletes one wrapped row, so a two-row digest clears in two presses.
+Refreshed on 2026-09-26 on macOS with tmux 3.7c on a private socket, against Claude Code 2.1.283:
+
+```text
+ok - Claude Code 2.1.283 (Claude Code): a digest of more than 2,000 characters typed inline arrives wrapped as pasted content and classifies as none
+ok - Claude Code 2.1.283 (Claude Code): a long digest arrives as a 336-character pointer line that classifies as away-supervisor, with every event in its file
+ok - Claude Code 2.1.283 (Claude Code): a mid-turn escalation defers on the Claude busy guard and arrives intact after the turn
+ok - Claude Code 2.1.283 (Claude Code): a digest left under the review banner is submitted once by the next flush and classifies as away-supervisor
+ok - Claude Code 2.1.283 (Claude Code): a stale owned digest is cleared from the wrapped composer a row at a time and never submitted
+```
+`tests/fm-afk-owned-digest-recovery.test.sh` is the portable regression for the same recovery, including the give-up path and composers the daemon may not touch.
+
 ## Composer classification matrix
 
 ### 2026-09-10 Codex pane re-read refresh
