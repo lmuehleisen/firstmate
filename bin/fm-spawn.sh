@@ -1350,6 +1350,8 @@ spawn_abort_cleanup() {
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            # A surviving private tmux directory stays reachable for teardown.
+            [ ! -d "${WORKER_TMUX_DIR:-}" ] || echo "worker_tmux_dir=$WORKER_TMUX_DIR"
           } >"$SPAWN_META_TMP" 2>/dev/null &&
             fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
             true
