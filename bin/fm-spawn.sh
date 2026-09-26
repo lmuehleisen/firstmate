@@ -2258,16 +2258,15 @@ launch_command_template() { # <harness> <kind> <permission-flags>
   # bash commands. Dangerous / bypass and sandbox autonomous are never emitted.
   # TMPDIR is isolated under the task temp root so test and build output does
   # not inherit another harness's temporary directory.
-  # Foreign primary markers are cleared so an inherited CLAUDECODE cannot outrank
-  # devin's own marker in a process that only reads the environment, and
-  # NO_COLOR is cleared so the composer guard can tell the dim placeholder
-  # from a real draft.
+  # Foreign primary markers are cleared so an inherited CLAUDECODE cannot rename
+  # a devin tool process that only reads the environment, and NO_COLOR is
+  # cleared so the composer guard can tell the dim placeholder from a real draft.
   # Devin encodes effort in model ids and has no CLI reasoning-effort flag, so
   # effort is omitted from launch and recorded in task metadata only.
   # Its turn-end, busy-state, and permission-policy signals do not ride the
   # launch command; they are hooks in the private config --config names.
   devin)
-    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR FM_DEVIN_HARNESS=devin TMPDIR=__TASKTMP__ __DEVINBIN__ '
+    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR TMPDIR=__TASKTMP__ __DEVINBIN__ '
     [ -n "$permission_flags" ] && printf '%s ' "$permission_flags"
     printf '%s' '--respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     ;;

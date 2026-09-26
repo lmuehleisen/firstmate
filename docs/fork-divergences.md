@@ -154,11 +154,11 @@ Each entry has these one-line fields: `Intent:` with its source, `Class:`, `Seam
 
 ### devin-adapter-mechanics
 
-- Intent: the fork's own Devin adapter, fork PRs 25 to 28, which predates upstream's; the fork deleted upstream's `bin/fm-devin-config.sh`.
-- Class: carried, open convergence question under investigation; not decided.
-- Seam: fork-only `bin/fm-devin-lib.sh`, and the large fork diff in shared `tests/fm-devin-harness.test.sh`.
-- Guard: `tests/fm-devin-harness.test.sh`; fork-only `tests/fm-control-relaunch-bindings.test.sh` (relaunch away from Devin retires only firstmate-owned wiring).
-- Upstream: now ships its own Devin adapter (upstream #5380); converging onto it while keeping `devin-permission-layer` would shrink the largest shared test diff.
+- Intent: the fork's own Devin adapter, fork PRs 25 to 28, which predates upstream's; converged onto upstream's private config writer (fork PR 59) and its common portable suite and live guard (the change that added `tests/fm-devin-fork-harness.test.sh`).
+- Class: carried; after that convergence the remaining fork mechanics are plain `exit`, the SWE-2 Max default, the full-frame composer selector, and legacy worktree-wiring cleanup.
+- Seam: fork-only `bin/fm-devin-lib.sh` and `bin/fm-composer-devin-lib.sh`; in shared files, the lines marked `Fork` in `tests/fm-devin-harness.test.sh` and `tests/fm-devin-signals-live-e2e.test.sh`, and the Devin selector's source line and calls in `bin/fm-composer-lib.sh`.
+- Guard: `tests/fm-devin-harness.test.sh`; `tests/fm-devin-fork-harness.test.sh`; `tests/fm-composer-devin.test.sh`; `tests/fm-control-relaunch-bindings.test.sh` (relaunch away from Devin retires only firstmate-owned wiring); the opt-in live guards `tests/fm-devin-signals-live-e2e.test.sh` and `tests/fm-devin-rate-limit-retry-live-e2e.test.sh`.
+- Upstream: exits with `/quit`, reads the composer through the generic glyph rules, and recognizes only `esc twice`; the full-frame selector and the `esc again` signal are candidates to offer upstream.
 
 ### agy-adapter-mechanics
 

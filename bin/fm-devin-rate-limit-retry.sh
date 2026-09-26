@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-devin-rate-limit-retry.sh - automatic retry for a Devin CLI worker whose
 # turn stopped on the model rate limit. Fork-only; bin/fm-devin-lib.sh wires
-# it as native Devin hooks in the worker's .devin/config.local.json.
+# it as native Devin hooks in the worker's private config.
 #
 # Usage: fm-devin-rate-limit-retry.sh <event> <state-dir> <task-id> <fm-home>
 #   events: arm | stop | end | retire | watch (internal)

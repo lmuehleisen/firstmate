@@ -20,7 +20,7 @@ Verified for crewmate and scout work only, never a secondmate or primary.
 | Resume | `devin -c` / `--continue` for the most recent session, or `devin -r <SESSION_ID>` / `--resume <SESSION_ID>`. Session IDs are hyphenated word pairs (e.g. `aloud-powder`, `booming-flute`). |
 | Models | `--model <model>`. An omitted or `default` model launches `--model swe-2-max`, the worker default; an explicit model passes through unchanged. The launch footer (`SWE-2 Max`), not task metadata, is the runtime evidence. |
 | Effort | Encoded in model ids (`swe-2-high`, `swe-2-max`); there is no separate CLI effort flag. Requested effort is recorded in task metadata only (record-and-omit). |
-| Marker | `FM_DEVIN_HARNESS=devin` established at launch boundary by `bin/fm-spawn.sh` and verified against ancestry (`comm=devin`) in `bin/fm-harness.sh`. |
+| Marker | None. Devin publishes no harness-identity marker, so `bin/fm-harness.sh` identifies it by an exact `devin` ancestor (`comm=devin`), which outranks an inherited foreign marker; `bin/fm-spawn.sh` also clears foreign markers at the launch boundary. |
 | Composer | Structured composer between a top mode rule (`──── (smart mode on) ─`), prompt row with `❭` (U+276D), and a solid bottom `─` rule, followed by a model and context footer (`Context: ... tokens`). Idle placeholder is `Ask Devin to build features, fix bugs, or work on your code`; busy placeholder is `Guide Devin while it works`. |
 | Skill | Skills discovered in `.devin/skills/` and `.claude/skills/`. |
 | Config | User config at `~/.config/devin/config.json`. Passing `--config <path>` replaces only that user layer; project `.devin` config still merges over it. Firstmate launches every worker with `--config state/<id>.devin-config.json`, a private copy of the user config carrying firstmate's wiring (see Lifecycle hooks and configuration layers). |
@@ -123,7 +123,7 @@ The permission judge keeps its own `swe-2-high`.
 
 Devin CLI provides an interactive TUI composer.
 The composer is structured between a top mode rule (e.g. `──── (smart mode on) ─`), an agent prompt row opening with `❭` (U+276D), a solid bottom rule `────────────────────`, and a model and context footer row (`SWE-2 Max Context: 13k / 262k tokens (5%)`).
-`bin/fm-composer-lib.sh` classifies this structure into `empty`, `pending`, or `unknown`.
+`bin/fm-composer-lib.sh` classifies this structure into `empty`, `pending`, or `unknown`, calling the fork-only frame selector in `bin/fm-composer-devin-lib.sh`.
 The idle placeholder `Ask Devin to build features, fix bugs, or work on your code` and the active-work placeholder `Guide Devin while it works` are recognized as composer furniture.
 While Devin is busy thinking, the delivery token `(esc twice to interrupt)` (or `(esc again to interrupt)`) appears on the status line.
 `bin/fm-composer-lib.sh`'s `FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT` matches either signal to confirm submitted keystrokes.
@@ -169,3 +169,6 @@ The environment was authenticated with a Devin subscription (`Logged in (via Dev
 
 8. The private config binds the reviewed wiring (live-observed 2026-09-25, devin 3000.11.3):
    the evidence is recorded in `../../../../../docs/verification/runtime-backends-fork.md` under "Private config layering".
+
+9. The generated launch end to end (live guards, 2026-09-25, devin 3000.11.3):
+   ancestry-only identity from a tool subprocess, the SWE-2 Max footer, reviewed smart and normal launches with their policy hooks, a real acknowledged rate-limit retry, and native resume in reviewed mode are recorded in `../../../../../docs/verification/runtime-backends-fork.md` under "Verification suite".
