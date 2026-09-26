@@ -158,11 +158,23 @@
 #   A fresh task uses `treehouse get --lease`; the lease lasts until guarded
 #   teardown returns it, including while its worker is stopped for approval.
 #   state/<id>.treehouse-lease holds the provider's bare-path stdout during
-#   acquisition. Successful metadata/backlog publication removes that receipt;
-#   every earlier failure retains it and refuses a fresh retry. Inspect it before
-#   recovery: neither acquisition failure nor a post-acquisition claim collision
-#   authorizes automatic return/reset. A partial or empty receipt is unresolved,
-#   not proof no lease exists. This script never edits Treehouse's own state.
+#   acquisition. Successful metadata/backlog publication removes that receipt.
+#   Acquisition failure, an empty receipt, a failed isolation check, or a
+#   post-acquisition claim collision retains it and refuses a fresh retry; none
+#   of those authorizes automatic return/reset, and a partial or empty receipt
+#   is unresolved, not proof no lease exists. Inspect it before recovery.
+#   A fresh spawn refused after that point but before launch delivery is a
+#   pre-launch abort, which the EXIT trap rolls back: it closes the endpoint
+#   this spawn created, retires the busy-state and state-side harness wiring it
+#   armed, and returns the slot it leased with `treehouse return --force` and
+#   removes the receipt - but only once the endpoint is confirmed gone, any
+#   provisional task record is rolled back, the slot holds nothing beyond the
+#   worktree wiring this spawn wrote after leasing it, and the project lock is
+#   held. Nothing of a worker exists in the slot yet, so the reset discards no
+#   work. An unconfirmed close, a failed record rollback, any other content in
+#   the slot (including a wiring path already present when it was leased), an
+#   unavailable lock, or a failed return retains the lease and receipt for
+#   inspection. This script never edits Treehouse's own state directly.
 #   The exact returned path is checked for isolation and competing local-home
 #   claims before a child shell enters it with its own TREEHOUSE_DIR, replacing
 #   any inherited parent-slot value. The pane's outer shell stays in the project,
@@ -1229,6 +1241,16 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_TREEHOUSE_RECEIPT=
+# Pre-launch abort scope (header: Treehouse lease receipt). Each flag is set
+# when a fresh spawn acquires the resource and cleared just before the launch
+# line reaches the endpoint; past that point the per-harness gates own failure.
+SPAWN_PRELAUNCH_ENDPOINT=0
+SPAWN_PRELAUNCH_LEASE=0
+SPAWN_PRELAUNCH_WIRING=0
+SPAWN_PRELAUNCH_ENDPOINT_GONE=1
+SPAWN_SLOT_LEASED_STATUS=
+SPAWN_SLOT_LEASED_STATUS_OK=0
+SPAWN_SLOT_UNEXPECTED=
 HERDR_RECLAIM_WT=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
@@ -1246,6 +1268,173 @@ spawn_fresh_commit_rollback() {
   fi
   echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
   return 1
+}
+
+# The endpoint counts as gone only on a positive absence read: tmux's kill
+# reports success either way and an unreadable inventory proves nothing.
+# Every exit status is explicit: this runs from the EXIT trap, where bash 5
+# makes a bare `return` report the status from before the trap fired.
+spawn_endpoint_absent() {
+  if [ "$BACKEND" = tmux ]; then
+    fm_backend_source tmux || return 1
+    [ "$(fm_backend_tmux_target_presence "$T")" = missing ] && return 0
+    return 1
+  fi
+  fm_backend_target_exists "$BACKEND" "$T" "$W" && return 1
+  return 0
+}
+
+# Returning a slot needs more than the cheap read above, which on Herdr,
+# Zellij, and cmux takes any failed call for a missing pane. Only a
+# structured not-found proves the pane shell has left the slot, the rule
+# teardown uses: tmux reports it as missing and Herdr as pane_not_found.
+# Zellij and cmux have no such read, so their endpoint is never proven gone
+# and unknown keeps the lease.
+spawn_endpoint_proven_absent() {
+  case "$BACKEND" in
+    tmux)
+      fm_backend_source tmux || return 1
+      [ "$(fm_backend_tmux_target_presence "$T")" = missing ] && return 0
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      fm_backend_herdr_endpoint_confirmed_gone "$T" && return 0
+      ;;
+  esac
+  return 1
+}
+
+# Close the endpoint this spawn created and prove it is gone.
+spawn_endpoint_close_confirmed() {  # [polls] [interval]
+  local tab_id='' i=0 max=${1:-10} interval=${2:-0.5}
+  [ "$BACKEND" != zellij ] || tab_id=${ZELLIJ_TAB_ID:-}
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_kill orca "$T" 2>/dev/null || true
+  else
+    fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
+  fi
+  while [ "$i" -lt "$max" ]; do
+    spawn_endpoint_absent && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+# Retire the state-side wiring a fresh spawn armed: per-task files under the
+# state directory, the global turn-end registry entry, the agy and devin
+# policy layers, and the busy generation. Nothing inside the worktree is
+# touched here; the slot's reset on return removes what spawn wrote there,
+# and a slot that is not returned keeps its contents for inspection.
+spawn_prelaunch_retire_wiring() {
+  local harness path token_path token auth_path
+  harness=$(fm_control_harness_family "$HARNESS") || harness=
+  if token_path=$(fm_control_harness_turnend_token_path "$harness" "$STATE_REAL" "$ID") &&
+    [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    token=
+    IFS= read -r token <"$token_path" || true
+    auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || auth_path=
+    [ -z "$auth_path" ] || rm -f -- "$auth_path"
+  fi
+  fm_devin_relaunch_retire_policy "$harness" "$STATE_REAL" "$ID" || true
+  fm_agy_relaunch_retire_policy "$harness" "$STATE_REAL" "$ID" || true
+  while IFS= read -r path; do
+    case "$path" in "$STATE_REAL"/*) rm -f -- "$path" ;; esac
+  done < <(fm_control_harness_wiring_paths "$harness" "$WT" "$STATE_REAL" "$ID")
+  fm_agy_relaunch_retire_hooks "$harness" "$STATE_REAL" "$ID" || true
+  [ "$harness" != agy ] || fm_agy_teardown_remove_state "$STATE_REAL" "$ID" || true
+  # A published provisional record's rollback retires the generation itself.
+  if [ -n "${BUSY_GEN:-}" ] && [ "$SPAWN_FRESH_COMMIT_PENDING" != 1 ]; then
+    "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" --gen "$BUSY_GEN" >/dev/null 2>&1 ||
+      echo "warning: could not retire the busy generation after aborted spawn of $ID" >&2
+  fi
+}
+
+# Every path the slot reports as changed, untracked, or ignored.
+spawn_slot_status() {
+  git -C "$WT" status --porcelain=v1 --ignored=matching --untracked-files=all 2>/dev/null
+}
+
+# The return resets the slot, so it qualifies only when it holds nothing
+# beyond the worktree wiring this spawn wrote after leasing it: an untracked
+# leftover, an ignored file, or a modification an earlier tenant left is kept,
+# even at a wiring path, because the slot's state at lease time shows it.
+spawn_slot_holds_only_spawn_wiring() {
+  local harness status_out entry allowed
+  [ "$SPAWN_SLOT_LEASED_STATUS_OK" = 1 ] || {
+    SPAWN_SLOT_UNEXPECTED='its state when leased is unknown'
+    return 1
+  }
+  harness=$(fm_control_harness_family "$HARNESS") || harness=
+  allowed=$(fm_control_harness_wiring_paths "$harness" "$WT" "$STATE_REAL" "$ID" 2>/dev/null || true)
+  status_out=$(spawn_slot_status) || return 1
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if printf '%s\n' "$SPAWN_SLOT_LEASED_STATUS" | cut -c4- | grep -qxF -- "${entry:3}" ||
+      ! printf '%s\n' "$allowed" | grep -qxF -- "$WT/${entry:3}"; then
+      SPAWN_SLOT_UNEXPECTED=${entry:3}
+      return 1
+    fi
+  done <<<"$status_out"
+  return 0
+}
+
+# Roll back what a fresh spawn acquired when it refuses before launch delivery.
+# The endpoint closes first: its pane shell sits in the leased slot, so the
+# slot is returned only once that shell is proven gone.
+spawn_prelaunch_abort_cleanup() {
+  if [ "$SPAWN_PRELAUNCH_ENDPOINT" = 1 ]; then
+    SPAWN_PRELAUNCH_ENDPOINT=0
+    if [ -n "${T:-}" ] && ! spawn_endpoint_close_confirmed; then
+      SPAWN_PRELAUNCH_ENDPOINT_GONE=0
+      echo "warning: aborted spawn of $ID could not confirm its endpoint ${T:-} closed; close it by hand" >&2
+    elif [ -n "${T:-}" ] && ! spawn_endpoint_proven_absent; then
+      SPAWN_PRELAUNCH_ENDPOINT_GONE=0
+      echo "warning: aborted spawn of $ID closed its endpoint ${T:-}, but $BACKEND cannot prove the pane is gone; check it by hand" >&2
+    fi
+  fi
+  if [ "$SPAWN_PRELAUNCH_WIRING" = 1 ]; then
+    SPAWN_PRELAUNCH_WIRING=0
+    spawn_prelaunch_retire_wiring
+  fi
+}
+
+# Return the slot an aborted fresh spawn leased. This runs after the
+# provisional task record's rollback, so a record that could not be removed
+# never names a slot Treehouse may hand to another task.
+spawn_prelaunch_return_lease() {
+  local lock_taken=0 out
+  if [ "$SPAWN_PRELAUNCH_LEASE" = 1 ]; then
+    SPAWN_PRELAUNCH_LEASE=0
+    if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+      echo "warning: lease on $WT retained with receipt $SPAWN_TREEHOUSE_RECEIPT because the task record $STATE/$ID.meta could not be rolled back" >&2
+      return 0
+    fi
+    if [ "$SPAWN_PRELAUNCH_ENDPOINT_GONE" != 1 ]; then
+      echo "warning: lease on $WT retained with receipt $SPAWN_TREEHOUSE_RECEIPT because its endpoint may still be open" >&2
+      return 0
+    fi
+    SPAWN_SLOT_UNEXPECTED=
+    if ! spawn_slot_holds_only_spawn_wiring; then
+      echo "warning: lease on $WT retained with receipt $SPAWN_TREEHOUSE_RECEIPT because the slot holds content this spawn did not write${SPAWN_SLOT_UNEXPECTED:+ ($SPAWN_SLOT_UNEXPECTED)}; inspect it before returning the slot" >&2
+      return 0
+    fi
+    if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" != 1 ]; then
+      if [ -n "$SPAWN_TREEHOUSE_PROJECT_LOCK" ] && fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+        lock_taken=1
+      else
+        echo "warning: lease on $WT retained with receipt $SPAWN_TREEHOUSE_RECEIPT because the project lock was unavailable" >&2
+        return 0
+      fi
+    fi
+    if out=$( (cd "$PROJ_ABS" && treehouse return --force "$WT") 2>&1 </dev/null); then
+      rm -f "$SPAWN_TREEHOUSE_RECEIPT"
+      echo "spawn: returned leased slot $WT after aborted spawn of $ID" >&2
+    else
+      echo "warning: treehouse return failed for $WT after aborted spawn of $ID; lease and receipt $SPAWN_TREEHOUSE_RECEIPT retained: $out" >&2
+    fi
+    [ "$lock_taken" != 1 ] || fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
+  fi
 }
 
 parse_orca_worktree_result() {
@@ -1309,6 +1498,7 @@ spawn_abort_cleanup() {
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
+  spawn_prelaunch_abort_cleanup
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -1358,6 +1548,7 @@ spawn_abort_cleanup() {
       status=1
     fi
   fi
+  spawn_prelaunch_return_lease
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
@@ -3902,6 +4093,8 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
   esac
+  # Orca's own abort cleanup owns its terminal and worktree.
+  [ "$BACKEND" = orca ] || SPAWN_PRELAUNCH_ENDPOINT=1
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
@@ -4246,7 +4439,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       exit 1
     fi
     WT=$(cat "$SPAWN_TREEHOUSE_RECEIPT")
-    echo "spawn: lease receipt $SPAWN_TREEHOUSE_RECEIPT is retained until dispatch commits; failures never auto-return the slot" >&2
+    echo "spawn: lease receipt $SPAWN_TREEHOUSE_RECEIPT is retained until dispatch commits" >&2
     [ -n "$WT" ] || {
       echo "error: treehouse get --lease returned no worktree path; inspect $SPAWN_TREEHOUSE_RECEIPT before recovery; no automatic return attempted" >&2
       exit 1
@@ -4257,6 +4450,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   if [ "${#FM_WORKTREE_CLAIMS[@]}" -gt 0 ]; then
     echo "REFUSED: leased slot $WT is already claimed by ${FM_WORKTREE_CLAIMS[*]}; allocation violated the claim invariant. Lease retained, no reset or return attempted; inspect $SPAWN_TREEHOUSE_RECEIPT." >&2
     exit 1
+  fi
+  # The slot is now proven this spawn's own, isolated, and unclaimed. Its
+  # state now is what an abort must find again, plus only its own wiring.
+  if [ -n "$SPAWN_TREEHOUSE_RECEIPT" ]; then
+    SPAWN_SLOT_LEASED_STATUS=$(spawn_slot_status) && SPAWN_SLOT_LEASED_STATUS_OK=1
+    SPAWN_PRELAUNCH_LEASE=1
   fi
   acquired_wt_real=$(real_path_or_raw "$WT")
   # Preserve the interactive provider's child-shell boundary: the pane's
@@ -4419,6 +4618,7 @@ if [ "$KIND" != secondmate ]; then
   # armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
   # open-close pair.
   BUSY_GEN=
+  [ "$RELAUNCH" -eq 1 ] || SPAWN_PRELAUNCH_WIRING=1
   case "$HARNESS" in
   codex*)
     if fm_busy_codex_semantic_source; then
@@ -5031,7 +5231,9 @@ pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
-agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+# A raw launch carries no placeholder and resolves no executable, so the
+# substitution must tolerate an unset binary rather than abort under set -u.
+agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "${AGY_BIN:-}")"} ;;
 devin)
   LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "${DEVIN_BIN:-}")"}
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
@@ -5278,6 +5480,11 @@ fi
 # The pane receives only the short source line for the staged launch file,
 # so that line is also what the tmux Enter recovery below proves it owns.
 LAUNCH_TYPED=". $(shell_quote "$LAUNCH_FILE")"
+# Launch delivery begins: from here a worker may run in the slot, so the
+# per-harness gates below own any failure and nothing is rolled back blindly.
+SPAWN_PRELAUNCH_ENDPOINT=0
+SPAWN_PRELAUNCH_LEASE=0
+SPAWN_PRELAUNCH_WIRING=0
 spawn_send_literal "$T" "$LAUNCH_TYPED"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

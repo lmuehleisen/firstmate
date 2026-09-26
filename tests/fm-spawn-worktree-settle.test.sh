@@ -191,9 +191,11 @@ test_exhausted_cd_enter() {
   [ "$(cat "$COUNTFILE.enters")" = 3 ] || fail "cd retries unbounded"
   [ ! -s "$COUNTFILE.pending" ] || fail "cd text left pending"
   assert_contains "$out" 'cleared owned input' "cleanup not reported"
-  assert_present "$HOME_DIR/state/$id.treehouse-lease" "failure lost lease receipt"
+  assert_absent "$HOME_DIR/state/$id.treehouse-lease" "failure kept the receipt of a slot it could return: $out"
+  grep -qxF -- "return --force $WT_DIR" "$FAKEBIN_DIR/treehouse-calls" \
+    || fail "failed cd did not return its leased slot"
   assert_absent "$HOME_DIR/state/$id.meta" "failed cd published metadata"
-  pass "spawn clears an exhausted cd submit while retaining its lease receipt"
+  pass "spawn clears an exhausted cd submit, closes its window, and returns its leased slot"
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
