@@ -1345,6 +1345,9 @@ test_dispatch_leaves_no_record_when_the_transition_fails() {
     "a failed backlog transition lost the acquired lease receipt"
   assert_absent "$(home_of "$case_dir")/state/$id.busy-state" \
     "a failed backlog transition left the task's armed busy generation behind"
+  assert_absent "/tmp/fmwt-$(printf '%s\n%s' "$(cd "$(home_of "$case_dir")" && pwd -P)" "$id" |
+    { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)" \
+    "a failed backlog transition left the worker's private tmux directory behind"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "a failed dispatch left the backlog item in $(row_state "$case_dir" "$id")"
   pass "a failed backlog transition fails the dispatch loudly and leaves no record"

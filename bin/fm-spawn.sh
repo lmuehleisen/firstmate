@@ -1230,9 +1230,18 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
 spawn_fresh_commit_rollback() {
+  local sock
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
     "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
     SPAWN_FRESH_COMMIT_PENDING=0
+    # With the record gone, the worker's private tmux servers and directory go too.
+    if [ -n "${WORKER_TMUX_DIR:-}" ] && [ ! -L "$WORKER_TMUX_DIR" ] && [ -d "$WORKER_TMUX_DIR" ] &&
+      [ -O "$WORKER_TMUX_DIR" ]; then
+      while IFS= read -r sock; do
+        env -u TMUX -u TMUX_PANE tmux -S "$sock" kill-server >/dev/null 2>&1 || true
+      done < <(find "$WORKER_TMUX_DIR" -type s -print 2>/dev/null)
+      rm -rf "$WORKER_TMUX_DIR"
+    fi
     return 0
   fi
   echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2

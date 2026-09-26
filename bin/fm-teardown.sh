@@ -3167,6 +3167,26 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   return 1
 }
 
+# retire_worker_tmux_dir <home> <id> <dir>: stop a ship or scout worker's private
+# tmux servers, each by its exact socket, and remove their directory
+# (docs/tmux-backend.md). Only the task's own expected directory is touched, and
+# only while it is still private to this user.
+retire_worker_tmux_dir() {
+  local home=$1 id=$2 dir=$3 sock
+  [ -n "$dir" ] || return 0
+  if [ "$dir" = "/tmp/fmwt-$(printf '%s\n%s' "$(cd "$home" && pwd -P)" "$id" |
+    { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)" ] &&
+    [ ! -L "$dir" ] && [ -d "$dir" ] && [ -O "$dir" ] &&
+    [ -z "$(find "$dir" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ]; then
+    while IFS= read -r sock; do
+      env -u TMUX -u TMUX_PANE tmux -S "$sock" kill-server >/dev/null 2>&1 || true
+    done < <(find "$dir" -type s -print 2>/dev/null)
+    rm -rf "$dir"
+  elif [ -e "$dir" ] || [ -L "$dir" ]; then
+    echo "warning: recorded worker tmux directory $dir is not task $id's private directory; leaving it and any server in it untouched" >&2
+  fi
+}
+
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
   sub_state="$home/state"
@@ -3212,6 +3232,7 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
+    retire_worker_tmux_dir "$home" "$child_id" "$(meta_value "$child_meta" worker_tmux_dir)"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3681,22 +3702,8 @@ remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-# Stop a ship or scout worker's private tmux servers, each by its exact socket,
-# and remove their directory (docs/tmux-backend.md). Only this task's own
-# expected directory is touched, and only while it is still private to this user.
-if [ -n "$WORKER_TMUX_DIR" ]; then
-  if [ "$WORKER_TMUX_DIR" = "/tmp/fmwt-$(printf '%s\n%s' "$(cd "$FM_HOME" && pwd -P)" "$ID" |
-    { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)" ] &&
-    [ ! -L "$WORKER_TMUX_DIR" ] && [ -d "$WORKER_TMUX_DIR" ] && [ -O "$WORKER_TMUX_DIR" ] &&
-    [ -z "$(find "$WORKER_TMUX_DIR" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ]; then
-    while IFS= read -r WORKER_TMUX_SOCK; do
-      env -u TMUX -u TMUX_PANE tmux -S "$WORKER_TMUX_SOCK" kill-server >/dev/null 2>&1 || true
-    done < <(find "$WORKER_TMUX_DIR" -type s -print 2>/dev/null)
-    rm -rf "$WORKER_TMUX_DIR"
-  elif [ -e "$WORKER_TMUX_DIR" ] || [ -L "$WORKER_TMUX_DIR" ]; then
-    echo "warning: recorded worker tmux directory $WORKER_TMUX_DIR is not this task's private directory; leaving it and any server in it untouched" >&2
-  fi
-fi
+# Stop the worker's private tmux servers and remove their directory.
+retire_worker_tmux_dir "$FM_HOME" "$ID" "$WORKER_TMUX_DIR"
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {
