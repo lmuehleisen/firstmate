@@ -48,6 +48,7 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 tmux picks a client's server from an inherited `TMUX` before it reads `TMUX_TMPDIR`, and without either it uses the default server, where the fleet usually runs.
 Every ship and scout agent therefore starts with `TMUX` and `TMUX_PANE` unset and `TMUX_TMPDIR` on a short private per-task directory, so its bare `tmux`, including `tmux kill-server`, reaches only a private server.
+Teardown stops every server socketed in that directory by its exact path and removes it, touching it only while it is the task's own expected directory and still private to this user.
 Secondmates keep `TMUX`, because they place their own crew on the fleet server, and the behavior test runner gives every suite the same boundary.
 Naming the fleet socket with `-S`, killing tmux by process name, or clearing the environment still reaches the fleet; the worker rules forbid the first two.
 `tests/fm-worker-tmux-isolation.test.sh` is the regression.
